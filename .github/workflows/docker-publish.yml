@@ -23,7 +23,6 @@ jobs:
     secrets: inherit
     with:
       images: |
-        registry.digitalocean.com/artcraft/autocraft
         ghcr.io/storytold/autocraft
         docker.io/storytold/autocraft
       dockerfile: deploy/container/Dockerfile
