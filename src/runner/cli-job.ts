@@ -6,6 +6,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, createWriteStream, mkdirSync, openSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import { dbPath } from "../db.ts";
 import { cliGate, jobLimit } from "./autopilot.ts";
 import { checkRequest, endJob, JobError, now } from "./jobs.ts";
@@ -79,7 +80,7 @@ export async function runCliJob(db: DatabaseSync, req: CliRequest): Promise<numb
   closeSync(openSync(logPath, "a"));
   db.prepare("UPDATE jobs SET log_path = ? WHERE id = ?").run(logPath, job);
   const log = createWriteStream(logPath, { flags: "a" });
-  const child = spawn(process.execPath, [new URL("../cli.ts", import.meta.url).pathname, "runner", "exec", String(job)], {
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../cli.ts", import.meta.url)), "runner", "exec", String(job)], {
     stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, AUTOCRAFT_DB: dbPath() },
   });
   db.prepare("UPDATE jobs SET pid = ? WHERE id = ?").run(child.pid ?? null, job);
