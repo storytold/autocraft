@@ -42,6 +42,8 @@ export function appManifest(name: string, baseUrl: string): Manifest {
     public: false,
     default_permissions: {
       metadata: "read", contents: "write", pull_requests: "write", issues: "write", actions: "write", repository_advisories: "write",
+      // CI state reads (main-ci, main-fix, verify, the merge queue's checks): the installation token answers 403 without them.
+      checks: "read", commit_statuses: "read",
     },
     default_events: [],
   };
