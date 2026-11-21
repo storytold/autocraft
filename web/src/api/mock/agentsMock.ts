@@ -1,7 +1,7 @@
 // Agents, accounts and rates on fake data: three accounts (one disabled), twelve runs in flight and a few hundred finished ones.
 import { traceRunDetail } from "./traceMock";
 import type { Api } from "../client";
-import type { AgentRun, AgentRunDetail, ClaudeAccount, JevStatus, Rates, UsagePause, User } from "../types";
+import type { AgentRun, AgentRunDetail, ClaudeAccount, JevStatus, ProviderStatus, Rates, UsagePause, User } from "../types";
 import { NOW, REPOS } from "./fixtures";
 
 const wait = <T>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
@@ -118,16 +118,18 @@ export function createAgentsMock(me: User, changed: () => void): Pick<Api, "acco
     return a;
   };
   let pause: UsagePause = { fiveHour: 80, weekly: 80 };
-  let jev: JevStatus = { enabled: true, unavailable: null };
+  let jev: JevStatus = { enabled: true, unavailable: null, provider: "jev", model: null };
+  const providers: ProviderStatus = { mode: "server", model: { provider: "claude" }, classifier: { provider: "jev" } };
   const visible = () => accounts.filter((a) => me.role === "operator" || a.enabled);
   return {
     accounts: {
       list: () => wait(visible()),
       pause: () => wait({ ...pause }),
       jev: () => wait({ ...jev }),
+      providers: () => wait(providers),
       async setJev(input) {
         if (me.role !== "operator") throw new Error("only operators change accounts");
-        jev = { enabled: input.enabled, unavailable: input.enabled ? null : { reason: "switched off", since: iso(0) } };
+        jev = { enabled: input.enabled, unavailable: input.enabled ? null : { reason: "switched off", since: iso(0) }, provider: "jev", model: null };
         changed();
         return wait({ ...jev });
       },

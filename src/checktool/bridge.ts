@@ -4,7 +4,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
-import type { CheckTool } from "./index.ts";
+import type { CheckResult, CheckTool } from "./index.ts";
 
 export const CHECK_SERVER = "build";
 export const CHECK_APP_PATH = "/app/check-tool";
@@ -13,6 +13,8 @@ export type Bridge = {
   /** MCP server entry and read-only mount for the sandbox. */
   mcpServer: { command: string; args: string[]; env: Record<string, string> };
   mount: { host: string; path: string };
+  /** The tool's answer for a call a model made through a provider that has no MCP client (src/agents/model-call.ts). */
+  call: (input: unknown) => Promise<CheckResult>;
   /** The agent run that the tool's rows are recorded under from now on: each turn on the same bridge is its own run. */
   setRun: (runId: number) => void;
   close: () => void;
@@ -42,6 +44,7 @@ export async function startBridge(tool: CheckTool, runId: number): Promise<Bridg
   await new Promise<void>((ok, bad) => { server.once("error", bad); server.listen(0, "127.0.0.1", ok); });
   const port = (server.address() as { port: number }).port;
   return {
+    call: (input) => tool.run(input, current),
     mcpServer: { command: "/usr/bin/node", args: ["--no-warnings", `${CHECK_APP_PATH}/main.ts`], env: { CHECK_TOOL_URL: `http://127.0.0.1:${port}/`, CHECK_TOOL_TOKEN: token } },
     mount: { host: fileURLToPath(new URL("./server", import.meta.url)), path: CHECK_APP_PATH },
     setRun: (id) => { current = id; },

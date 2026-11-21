@@ -356,6 +356,11 @@ export function startJevRun(db: DatabaseSync, s: Omit<RunStart, "accountId" | "j
   return insertRun(db, { ...s, ...stepOf(s.promptId), accountId: null });
 }
 
+/** Records a call on the compatible provider (src/agents/compatible.ts): no account and no slot, since the API has neither. */
+export function startCompatibleRun(db: DatabaseSync, s: Omit<RunStart, "accountId" | "jobId" | "step" | "stage">): number {
+  return insertRun(db, { ...s, ...stepOf(s.promptId), accountId: null });
+}
+
 /** Records a follow-up run on the account of an earlier call (its session lives there), or returns null when that account is no longer enabled, has no headroom or no free slot. Same transaction rule as `tryStartClaudeRun`. */
 export function tryStartFollowUp(db: DatabaseSync, accountId: string, s: RunInput): number | null {
   db.exec("BEGIN IMMEDIATE");

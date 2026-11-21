@@ -69,7 +69,7 @@ export async function live(db: DatabaseSync, req: Req): Promise<LiveBoard> {
   const hiddenRuns = filtered(hidden) ? ` AND ${touchesHidden(hidden).sql}` : "";
   type Call = { id: number; job_id: number | null; step: string; model: string; provider: string; label: string | null; started_at: string; ended_at: string | null; state: string; progress: string | null };
   const callOp = (c: Call): LiveOp => ({
-    kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: c.provider !== "jev" && req.user.role === "operator" ? `${stepTitle(c.step)} on ${c.label ?? "an unknown account"}` : stepTitle(c.step),
+    kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: c.provider === "compatible" ? `${stepTitle(c.step)} on the compatible provider` : c.provider === "decisions" ? `${stepTitle(c.step)} on the decisions endpoint` : c.provider !== "jev" && req.user.role === "operator" ? `${stepTitle(c.step)} on ${c.label ?? "an unknown account"}` : stepTitle(c.step),
     start: c.started_at, end: c.ended_at, estimate: c.state === "running" ? callEstimate(c.step, c.model) : null, ...(c.state === "failed" ? { failed: true } : {}),
   });
   type Task = { id: number; job_id: number | null; step: string; repo: string; number: number | null; state: string; queued_at: string; started_at: string | null; ended_at: string | null; results: string; summary: string | null; current: string | null };

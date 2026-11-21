@@ -2,8 +2,12 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import type { DatabaseSync } from "node:sqlite";
 import type { PromptsReport } from "../../../web/src/api/types.ts";
-import { promptsReport } from "../../prompts/index.ts";
+import { promptsReport, type ProviderMode } from "../../prompts/index.ts";
+import { modelProvider } from "../../agents/compatible.ts";
+import { classifierProvider } from "../../agents/classifier.ts";
+import { inferenceMode } from "../../remote/mode.ts";
 
 // Read when the server loads its code, so a later checkout without a restart
 // does not change what the page claims.
@@ -21,6 +25,17 @@ const COMMIT = ((): string | null => {
   }
 })();
 
-export function prompts(): PromptsReport {
-  return promptsReport(COMMIT);
+export function prompts(db: DatabaseSync): PromptsReport {
+  // Which provider answers now, so the page describes the calls this host makes, not the default ones. In the user-local
+  // mode the model calls run on Task Runners (the helpers run the Claude command shown), but the classifier still answers
+  // here in both modes.
+  const classifier = classifierProvider();
+  const model = modelProvider();
+  const mode: ProviderMode = {
+    model: inferenceMode(db) === "user-local" ? "claude" : model.provider === "compatible" ? "compatible" : model.provider === "invalid" ? "invalid" : "claude",
+    classifier: classifier.provider === "compatible" || classifier.provider === "decisions" ? classifier.provider : classifier.provider === "invalid" ? "invalid" : "jev",
+    ...(model.provider === "invalid" && { modelProblem: model.reason }),
+    ...(classifier.provider === "invalid" && { classifierProblem: classifier.reason }),
+  };
+  return promptsReport(COMMIT, mode);
 }

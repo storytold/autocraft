@@ -167,10 +167,10 @@ Operators and maintainers only (other readers get 404). The list shows every sca
 
 ### Agents (`/agents`, `/agents/<run>`)
 
-An agent run is one model call: one `claude -p` call or one Jev batch request, made through the prompt registry. The page has three parts.
+An agent run is one model call: one `claude -p` batch, one typed-decision request, or one request (with its file turns) to the compatible provider, made through the prompt registry. The page has three parts.
 
 - **Claude accounts**: one card per account the signed-in user may see. Everyone sees enabled accounts; operators also see disabled ones. A card shows the operator-set label (never an email or path), the enabled state, 5-hour and weekly use as bars with reset times ("resets in 2 h 40 m"), the age of the reading, runs now against the concurrency limit, and the reason when the account is paused. Operators edit label, enabled and max concurrent inline (`PUT /api/accounts/:id`; audited).
-- **Running now**: every active run, refreshed every 5 s while the tab is visible. Each shows step and stage, model, account label (Jev has no account), the items it works on as `repo#n` links with "+N more", elapsed time and tokens so far.
+- **Running now**: every active run, refreshed every 5 s while the tab is visible. Each shows step and stage, model, account label (the classifier and the compatible provider have no Claude account), the items it works on as `repo#n` links with "+N more", elapsed time and tokens so far.
 - **Recent runs**: newest first, filtered on the server by step, account, state and repo, and read by keyset cursor ("Load more"); the page never shows a total. A run opens a detail panel (a bottom sheet on phones) with the rendered prompt (collapsible; its registry id and version link to the Prompts page), the output, the error, token counts and a link to the job. Prompt and output are kept for ten years; after that the panel says "Prompt text removed after ten years".
 
 ### Build environments (`/envs`, `/envs/<task>`)

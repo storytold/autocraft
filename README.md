@@ -53,9 +53,9 @@ See [Trust boundary](docs/pipeline.md#trust-boundary).
 | Node 24 or later (`engines` in `package.json`), pnpm | Runs the TypeScript directly; SQLite through the built-in `node:sqlite` |
 | `gh`, logged in | Sync (`gh api graphql`) and every GitHub write |
 | `git` | Clones, diffs and pushes |
-| `claude` (Claude Code CLI) | All Claude calls |
+| `claude` (Claude Code CLI) | Model calls on this host, unless a compatible provider is configured (see [Bring your own model and classifier](#bring-your-own-model-and-classifier)) |
 | `bwrap` (bubblewrap, `/usr/bin/bwrap`) | Sandbox for tool-using calls. Without it, those calls run without tools; `AUTOCRAFT_NO_SANDBOX=1` forces that |
-| `jev` (optional) | CLI for TypeSafe's Jev model, used by the classify, priority and duplicate steps (`jev --compact ask`). Without it, switched off (`autocraft-server accounts jev off`), or when its account is out of credit or its key is rejected, Haiku does Jev's work through the Claude accounts (more Claude usage) |
+| `jev` (optional) | CLI for TypeSafe's Jev model, used by the classify, priority and duplicate steps (`jev --compact ask`). Without it, switched off (`autocraft-server accounts jev off`), or when its account is out of credit or its key is rejected, Haiku does Jev's work through the Claude accounts (more Claude usage). A compatible classifier replaces it instead (see [Bring your own model and classifier](#bring-your-own-model-and-classifier)) |
 | Podman and a second OS user | Build environments for Verify and Fix (optional) |
 | `sqlite3`, `curl` | `deploy/backup.sh` and `deploy/hook.sh` |
 
@@ -132,6 +132,34 @@ autocraft-server accounts jev off      # Haiku does Jev's work; `on` switches Je
 
 See [Claude accounts and agent runs](docs/pipeline.md#claude-accounts-and-agent-runs).
 
+### Bring your own model and classifier
+
+Claude accounts are one way to run the model calls; a chat API that speaks the widely used `/chat/completions` JSON shape is the other. Set the provider and point it at an API (yours, a gateway's or a local server's) with a key in a file only its owner can read:
+
+```sh
+export AUTOCRAFT_MODEL_PROVIDER=compatible
+export AUTOCRAFT_COMPATIBLE_BASE_URL=https://models.example.com/v1
+export AUTOCRAFT_COMPATIBLE_KEY_FILE=/srv/autocraft/config/model-key   # chmod 600
+export AUTOCRAFT_COMPATIBLE_MODELS='{"top":"large-model","mid":"medium-model","small":"small-model"}'
+```
+
+Every prompt is registered for a tier, so the three models take the place of Opus, Sonnet and Haiku. Calls that read a checkout keep their tools: this host reads the files for the model (read-only, confined to the checkout) and no bubblewrap sandbox is started. The typed decisions can use the same API instead of Jev:
+
+```sh
+export AUTOCRAFT_CLASSIFIER_PROVIDER=compatible
+export AUTOCRAFT_COMPATIBLE_CLASSIFIER_MODEL=small-model   # default: the small tier
+```
+
+or a Decisions API endpoint, whose typed questions are exactly Jev's shape:
+
+```sh
+export AUTOCRAFT_CLASSIFIER_PROVIDER=decisions
+export AUTOCRAFT_DECISIONS_BASE_URL=https://api.openai.com/v1   # the default
+export AUTOCRAFT_DECISIONS_KEY_FILE=/srv/autocraft/config/model-key
+```
+
+`autocraft-server accounts providers`, the Accounts page and the health checks say which provider is configured. What is different from a Claude call — no explorer subagent, no item tools, no images (the two screenshot prompts are refused), no follow-up fix turn, no USD cost — is listed in [Bring your own model](docs/operations.md#bring-your-own-model). The providers are read from the environment on every call, so a wrong base URL or key file is reported rather than worked around.
+
 ### Track repos and sync
 
 ```sh
@@ -194,7 +222,7 @@ Details, including the worker and build environments: [docs/operations.md](docs/
 
 An instance runs its model calls in one of two modes, which an operator switches on the Inference page or with `autocraft-server inference`:
 
-- `server` (default): calls run on this host with the Claude accounts registered on the Accounts page.
+- `server` (default): calls run on this host with the Claude accounts registered on the Accounts page, or with the compatible provider configured in the environment (see [Bring your own model and classifier](#bring-your-own-model-and-classifier)).
 - `user-local`: calls are queued, and maintainers' and operators' own Claude Code or Codex subscriptions run them through a small Task Runner (`autocraft`) on their machines, in a sandbox. A Task Runner logs in with `autocraft login`, approved on the Connect page; its credential is separate from an MCP Connector token. Held claims make pickup immediate. Maintainers and operators can also reserve a queued call for their own Task Runners (**Run on my Task Runner** in the model call queue) or switch their Task Runners to Manual only.
 
 The planner, gates, Jev calls, embeddings, GitHub writes and builds always stay on the server. A Task Runner only receives a call's prompt, read-only checkouts and per-call tools, and sends back a reply. See [User-local inference](docs/operations.md#user-local-inference) for setup, eligibility and limits.

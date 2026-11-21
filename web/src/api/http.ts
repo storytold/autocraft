@@ -311,6 +311,7 @@ export function createHttpApi(): Api {
       pause: () => get("/api/accounts/pause"),
       setPause: (input) => put("/api/accounts/pause", input),
       jev: () => get("/api/accounts/jev"),
+      providers: () => get("/api/accounts/providers"),
       setJev: (input) => put("/api/accounts/jev", input),
       update: (id, input) => put(`/api/accounts/${encodeURIComponent(id)}`, input),
       add: (label) => post("/api/accounts", { label }),

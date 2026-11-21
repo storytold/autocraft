@@ -1,11 +1,14 @@
-// autocraft-server accounts list | set <id> [--label X] [--enabled yes|no] [--max-concurrent N] | jev [N | on | off] | pause [show | --five-hour N --weekly N]
+// autocraft-server accounts list | set <id> [--label X] [--enabled yes|no] [--max-concurrent N] | jev [N | on | off] | providers | pause [show | --five-hour N --weekly N]
 import { connect } from "../db.ts";
+import { classifierProvider } from "./classifier.ts";
+import { modelProviderReport } from "./compatible.ts";
 import { jevEnabled, jevOutage, setJevEnabled } from "./jev.ts";
 import { AccountError, jevParallel, listAccounts, setJevParallel, setUsagePause, updateAccount, usagePause } from "./accounts.ts";
 
 const USAGE = `usage: autocraft-server accounts list
        autocraft-server accounts set <id> [--label <text>] [--enabled yes|no] [--max-concurrent <N>]   (N from 1 to 100)
-       autocraft-server accounts jev [<N> | on | off]   Jev calls at once (1 to 100), or switch Jev on or off; shows the setting and whether Jev is in use
+       autocraft-server accounts jev [<N> | on | off]   classifier calls at once (1 to 100), or switch the classifier on or off; shows the setting and what answers
+       autocraft-server accounts providers   which provider makes model calls and which answers the typed decisions
        autocraft-server accounts pause [show]   usage levels (%) at which an account stops taking calls
        autocraft-server accounts pause --five-hour <N> --weekly <N>   set them (each 1 to 100)`;
 
@@ -60,9 +63,29 @@ function jev(args: string[]): void {
       throw e;
     }
   }
-  console.log(`Jev calls at once: ${jevParallel(db)}`);
+  console.log(`Classifier calls at once: ${jevParallel(db)}`);
+  const c = classifierProvider();
+  const who = c.provider === "compatible" || c.provider === "decisions" ? c.model : "Jev";
   const o = jevOutage(db);
-  console.log(o ? `Jev unavailable (${o.reason}) since ${o.since}; Haiku does its work` : jevEnabled(db) ? "Jev in use" : "Jev off");
+  const by = c.provider === "compatible" ? `the compatible classifier (${who})` : c.provider === "decisions" ? `the decisions endpoint (${who})` : c.provider === "invalid" ? `nothing: ${c.reason}` : "Jev";
+  console.log(`The typed decisions are answered by ${by}`);
+  // An invalid provider is not "Jev in use": the fallback model answers while the configuration is wrong.
+  if (!o && c.provider === "invalid") return;
+  if (o) console.log(`${who} unavailable (${o.reason}) since ${o.since}; the fallback model does its work`);
+  else console.log(jevEnabled(db) ? `${who} in use` : `${who} switched off; the fallback model does its work`);
+}
+
+/** Which provider makes model calls and which answers the typed decisions, read from the environment only. */
+function providers(): void {
+  const m = modelProviderReport();
+  if (m.provider === "compatible") {
+    console.log(`Model calls: the compatible provider, ${m.models.top} / ${m.models.mid} / ${m.models.small} (top / mid / small) at ${m.baseUrl}${m.problem ? `; ${m.problem}` : ""}`);
+  } else if (m.provider === "invalid") console.log(`Model calls cannot run: ${m.reason}`);
+  else console.log("Model calls: Claude accounts (the claude command on this host)");
+  const c = classifierProvider();
+  console.log(c.provider === "compatible" ? `Typed decisions: the compatible classifier, ${c.model}`
+    : c.provider === "decisions" ? `Typed decisions: the decisions endpoint at ${c.config.baseUrl}, ${c.model}`
+    : c.provider === "invalid" ? `Typed decisions cannot run: ${c.reason}` : "Typed decisions: Jev");
 }
 
 function pause(args: string[]): void {
@@ -90,11 +113,12 @@ function pause(args: string[]): void {
 
 export const commands = {
   accounts: {
-    summary: "Claude accounts: list | set <id> [--label X] [--enabled yes|no] [--max-concurrent N] | jev [N | on | off] | pause [show | --five-hour N --weekly N]",
+    summary: "Claude accounts: list | set <id> [--label X] [--enabled yes|no] [--max-concurrent N] | jev [N | on | off] | providers | pause [show | --five-hour N --weekly N]",
     run: (args: string[]) => {
       if (args[0] === "list") print();
       else if (args[0] === "set") set(args.slice(1));
       else if (args[0] === "jev") jev(args.slice(1));
+      else if (args[0] === "providers") providers();
       else if (args[0] === "pause") pause(args.slice(1));
       else die(USAGE);
     },

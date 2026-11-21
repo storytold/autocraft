@@ -1,6 +1,6 @@
 # How AutoCraft works
 
-AutoCraft reads every issue and pull request in the tracked repos, sorts them, reviews the pull requests worth taking and merges the safe ones. Models do the reading. People answer the questions that need judgement.
+AutoCraft reads every issue and pull request in the tracked repos, sorts them, reviews the pull requests worth taking and merges the safe ones. Models do the reading. People answer the questions that need judgement. The models run under Claude accounts, or under a compatible API configured in the environment (see [Bring your own model](operations.md#bring-your-own-model)); the typed decisions run under Jev, under a compatible classifier or under a decisions endpoint.
 
 ## Sync
 

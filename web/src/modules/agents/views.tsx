@@ -47,7 +47,7 @@ function Items({ r, max = 3, expandable }: { r: AgentRun; max?: number; expandab
   );
 }
 
-const who = (r: AgentRun): ReactNode => (r.provider === "jev" ? "Jev (no account)" : r.via ? <RemoteVia via={r.via} /> : (r.accountLabel ?? "unknown account"));
+const who = (r: AgentRun): ReactNode => (r.provider === "jev" ? "Jev (no account)" : r.provider === "compatible" ? "compatible provider (no account)" : r.provider === "decisions" ? "decisions endpoint (no account)" : r.via ? <RemoteVia via={r.via} /> : (r.accountLabel ?? "unknown account"));
 
 // ---- running now ---------------------------------------------------------------
 
@@ -152,7 +152,7 @@ function RecentRuns({ selected }: { selected?: number }) {
                   </Link>
                 </td>
                 <td className="px-3 max-md:hidden">{r.model}</td>
-                <td className="whitespace-nowrap px-3 text-ink/70 max-md:hidden">{r.provider === "jev" ? "–" : r.via ? <RemoteVia via={r.via} /> : r.accountLabel}</td>
+                <td className="whitespace-nowrap px-3 text-ink/70 max-md:hidden">{r.provider === "jev" || r.provider === "compatible" || r.provider === "decisions" ? "–" : r.via ? <RemoteVia via={r.via} /> : r.accountLabel}</td>
                 <td className="px-3">
                   <Items r={r} max={2} />
                 </td>
@@ -339,7 +339,7 @@ export function FlowRunning({ params }: ViewProps) {
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <Link to={`/agents/${r.id}`} className="code text-sm font-medium hover:underline">{r.step}</Link>
               <Badge tone="accent">{r.model}</Badge>
-              <span className="text-xs text-ink/70">{r.provider === "jev" ? "Jev" : r.via ? <RemoteVia via={r.via} /> : (r.accountLabel ?? "unknown account")}</span>
+              <span className="text-xs text-ink/70">{r.provider === "jev" ? "Jev" : r.provider === "compatible" ? `compatible provider · ${r.model}` : r.provider === "decisions" ? `decisions endpoint · ${r.model}` : r.via ? <RemoteVia via={r.via} /> : (r.accountLabel ?? "unknown account")}</span>
               <span className="num ml-auto text-xs text-ink/70">{elapsed(r)}</span>
             </div>
             <div className="mt-0.5">

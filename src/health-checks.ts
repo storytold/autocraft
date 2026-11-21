@@ -3,6 +3,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { DatabaseSync } from "node:sqlite";
 import { listAccounts } from "./agents/accounts.ts";
+import { classifierProvider } from "./agents/classifier.ts";
+import { modelProviderReport } from "./agents/compatible.ts";
 import { deadlineStops } from "./runner/autopilot.ts";
 import { stepTitle } from "./dash/api/trace.ts";
 import { repoErrors } from "./sync-errors.ts";
@@ -156,12 +158,33 @@ function syncRepoChecks({ db }: CheckCtx): Check[] {
 }
 
 function accountsCheck({ db, nowMs, probe }: CheckCtx): Check[] {
+  // With the compatible provider, the Claude accounts are not used: a paused or signed-out one says nothing about the calls.
+  if (modelProviderReport().provider === "compatible") return [ok("accounts", "/accounts")];
   const on = listAccounts(db, nowMs, !probe).filter((a) => a.enabled);
   if (on.length && on.every((a) => a.pausedReason || a.auth.loggedIn === false)) {
     const text = on.length === 1 ? "The Claude account is paused" : "All Claude accounts are paused";
     return [{ id: "accounts", state: "fail", text, brief: text, since: null, to: "/accounts" }];
   }
   return [ok("accounts", "/accounts")];
+}
+
+/**
+ * The providers this host's calls go to (src/agents/compatible.ts): a configuration the environment cannot satisfy fails
+ * before the first job does; a compatible provider that is not in use passes without a word.
+ */
+function providerChecks({ mode }: CheckCtx): Check[] {
+  const m = modelProviderReport();
+  const c = classifierProvider();
+  const out: Check[] = [];
+  // In the user-local mode the model calls run on maintainers' Task Runners, so the model provider setting is not used
+  // and a mistake in it says nothing about this instance. The classifier still answers here in both modes.
+  if (mode === "user-local") out.push(ok("model-provider", "/accounts"));
+  else if (m.provider === "invalid") out.push({ id: "model-provider", state: "fail", text: `Model calls cannot run: ${m.reason}`, brief: "The model provider is not configured", since: null, to: "/accounts" });
+  else if (m.provider === "compatible" && m.problem) out.push({ id: "model-provider", state: "fail", text: `Model calls cannot run: ${m.problem}`, brief: "The model provider is not ready", since: null, to: "/accounts" });
+  else out.push(ok("model-provider", "/accounts"));
+  if (c.provider === "invalid") out.push({ id: "classifier-provider", state: "warn", text: `The typed decisions cannot run: ${c.reason}; the fallback model does their work`, brief: "The classifier is not configured", since: null, to: "/accounts" });
+  else out.push(ok("classifier-provider", "/accounts"));
+  return out;
 }
 
 function rateCheck({ db, nowMs }: CheckCtx): Check[] {
@@ -294,7 +317,7 @@ function remoteNoTakerCheck({ db, nowMs, mode }: CheckCtx): Check[] {
 }
 
 /** Every check, in the order the lists show them. */
-const SOURCES: ((ctx: CheckCtx) => Check[])[] = [runnerCheck, workerChecks, queueCheck, confidentialCheck, syncCheck, syncRepoChecks, accountsCheck, rateCheck, deadlineChecks, livenessCheck, appIdentityChecks, authorIdsCheck, outsideSurgeCheck, remoteCallsCheck, remoteStarvedCheck, remoteManualCheck, remoteNoTakerCheck];
+const SOURCES: ((ctx: CheckCtx) => Check[])[] = [runnerCheck, workerChecks, queueCheck, confidentialCheck, syncCheck, syncRepoChecks, accountsCheck, providerChecks, rateCheck, deadlineChecks, livenessCheck, appIdentityChecks, authorIdsCheck, outsideSurgeCheck, remoteCallsCheck, remoteStarvedCheck, remoteManualCheck, remoteNoTakerCheck];
 
 export function computeChecks(db: DatabaseSync, nowMs: number = Date.now(), probe = false): Check[] {
   const mode = inferenceMode(db);

@@ -9,7 +9,12 @@ import { createHash } from "node:crypto";
 import { jevParallel } from "../agents/accounts.ts";
 import { askJevCloudflare, jevCloudflareConfig } from "../agents/jev-cloudflare.ts";
 import { jevAvailable, jevEnv, jevFailure, markJevUnavailable, markJevWorking } from "../agents/jev.ts";
-import { accountConfigDir, itemRepos, NoTakerError, poolRoom, repoBatches, startClaudeRun, type PoolRoom, startJevRun, tryStartFollowUp, isHalt, type Started } from "../agents/call.ts";
+import { accountConfigDir, itemRepos, NoTakerError, poolRoom, repoBatches, startClaudeRun, type PoolRoom, startCompatibleRun, startJevRun, tryStartFollowUp, isHalt, type Started } from "../agents/call.ts";
+import { askCompatibleClassifier, CompatibleError, modelForAlias, modelProvider, type CompatibleConfig } from "../agents/compatible.ts";
+import { askDecisionsClassifier } from "../agents/decisions.ts";
+import { classifierModel, classifierProvider } from "../agents/classifier.ts";
+import { toolRoots } from "../agents/filetools.ts";
+import { runCompatibleCall } from "../agents/model-call.ts";
 import { touchStore, type KeptSession, type SessionAsk } from "../prepush/resume.ts";
 import { finishRun, packText, setRunProgress } from "../agents/runs.ts";
 import { clockLine, saveTools, type ToolClock } from "../agents/tools.ts";
@@ -466,8 +471,74 @@ export async function askClaude<K extends ClaudePromptId>(id: K, model: string, 
   return (await askOnce(id, model, input, db, opts)) ?? null;
 }
 
+/**
+ * askOnce on the compatible provider (src/agents/compatible.ts): the same rendered prompt, sent to the API instead of
+ * `claude -p`. A prompt with a checkout gets the provider's read-only file tools (src/agents/filetools.ts) and the build
+ * tool when its stage gives one; without a checkout it is one request. No account and no slot is used, so the run is
+ * recorded without one. There is no session to keep: a lint failure repeats the call (the step's attempts), and the
+ * prompts that ask for a follow-up fix turn record it in `problems` only.
+ */
+async function askCompatible<K extends ClaudePromptId>(id: K, model: string, input: ClaudeInput[K], db: DatabaseSync, opts: AskOptions, cfg: CompatibleConfig): Promise<LintedReply | null> {
+  const p = CLAUDE_PROMPTS[id];
+  const sandboxed = opts.checkout !== undefined && p.sandbox !== undefined;
+  const reference = sandboxed && p.sandbox?.reference === true ? opts.reference : undefined;
+  if (reference) input = input.map((x) => ({ ...x, reference: true })) as ClaudeInput[K];
+  const docs = sandboxed && p.sandbox?.docs ? await docsOf(db, opts.checkout!) : undefined;
+  if (docs) input = input.map((x) => ({ ...x, repo_docs: true })) as ClaudeInput[K];
+  const parts = claudeParts(id, input, sandboxed);
+  const items = refsOf(input);
+  const actual = modelForAlias(cfg, model);
+  // A prompt that reads images back (screenshots, reference pages) cannot run here: the file tools show text only. Record
+  // the run as failed with that reason instead of letting the model answer a question it could not see.
+  if (p.needsImages) {
+    const runId = startCompatibleRun(db, { promptId: id, promptVersion: promptVersion(id), provider: "compatible", model: actual, items, prompt: joinParts(parts) });
+    finishRun(db, runId, { state: "failed", error: "the compatible provider cannot show images to the model", summary: "needs images" });
+    return null;
+  }
+  const runId = startCompatibleRun(db, { promptId: id, promptVersion: promptVersion(id), provider: "compatible", model: actual, items, prompt: joinParts(parts) });
+  const start = now();
+  let bridge: Bridge | undefined;
+  try {
+    const workspace = sandboxed && p.sandbox?.workspace === true;
+    const shared = workspace ? opts.shared ?? await workspaceOf(db) : undefined;
+    const checkTool = sandboxed && opts.check !== undefined && p.sandbox?.check === true ? opts.check : undefined;
+    if (checkTool) bridge = await startBridge(checkTool, runId);
+    const roots = sandboxed ? toolRoots({ checkout: opts.checkout!, ...(shared?.length && { shared }), ...(docs && { docs }), ...(reference && { reference }) }) : [];
+    const r = await runCompatibleCall({
+      cfg, model: actual, system: parts.system, stdin: parts.stdin, maxTurns: sandboxed ? p.sandbox!.maxTurns : null, roots,
+      ...(bridge && { check: bridge.call }), ...(opts.onProgress && { onProgress: opts.onProgress }),
+      timeoutMs: p.limits.timeoutSeconds * 1000 + (checkTool ? CHECK_MAX_WALL_MS : 0),
+    });
+    const tokens = { input: r.usage.input, output: r.usage.output, cacheRead: r.usage.cacheRead, cacheWrite: r.usage.cacheWrite };
+    const { text, stored, refused } = screenReply(id, r.text);
+    if (refused) {
+      finishRun(db, runId, { state: "failed", tokens, error: "the reply holds a credential; refused", summary: "unreadable output", output: stored });
+      return null;
+    }
+    finishRun(db, runId, { state: "done", tokens, costUsd: null, summary: `answered in ${r.turns} turn${r.turns === 1 ? "" : "s"}${checkTool && checkTool.calls ? `, ${checkTool.calls} checks (${Math.round(checkTool.usedMs / 1000)} s)` : ""}`, output: stored });
+    const reply: Reply = { text, usage: { ...tokens, cost: null }, turns: sandboxed ? r.turns : undefined, model: r.model };
+    if (!opts.lint) return reply;
+    // No session to send a fix turn on: the lint's problems are recorded and, where the step fails on them, the call is repeated.
+    return await lintTail(reply, opts.lint, false, async () => "skipped");
+  } catch (e) {
+    const halt = isHalt(e);
+    // A call that failed after some turns still spent their tokens: the failed run carries them.
+    const u = e instanceof CompatibleError ? e.usage : undefined;
+    const tokens = u ? { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite } : undefined;
+    finishRun(db, runId, { state: "failed", ...(tokens && { tokens }), error: scrubError(`${(e as Error).message ?? e}`), summary: halt ? "cancelled" : e instanceof CompatibleError ? "model call failed" : "model call failed before the answer" });
+    if (halt) throw e;
+    return null;
+  } finally {
+    bridge?.close();
+    opts.check?.close();
+  }
+}
+
 async function askOnce<K extends ClaudePromptId>(id: K, model: string, input: ClaudeInput[K], db: DatabaseSync, opts: AskOptions): Promise<LintedReply | null | undefined> {
   if (inferenceMode(db) === "user-local") return askRemote(id, model, input, db, opts);
+  const provider = modelProvider();
+  if (provider.provider === "invalid") throw new Error(`the model provider is not configured: ${provider.reason}`);
+  if (provider.provider === "compatible") return askCompatible(id, model, input, db, opts, provider.config);
   const ses = opts.session;
   const sandboxed = opts.checkout !== undefined && CLAUDE_PROMPTS[id].sandbox !== undefined;
   const reference = sandboxed && CLAUDE_PROMPTS[id].sandbox?.reference ? opts.reference : undefined;
@@ -773,25 +844,42 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
   }
 }
 
-/** Sends a registered Jev request (src/prompts) for one item to `jev ask`; the same rule as `askClaude`. Recorded as an agent run without an account. */
+/**
+ * Sends a registered Jev request (src/prompts) for one item to `jev ask` (or to Workers AI, or to the compatible
+ * classifier); the same rule as `askClaude`. Recorded as an agent run without an account.
+ */
 export async function askJev(id: JevPromptId, item: Item | DupePair | { ref: string }, db: DatabaseSync, body: string = renderJev(id, item as Item | DupePair), perCallUsage = true): Promise<Proc> {
-  const runId = startJevRun(db, { promptId: id, promptVersion: promptVersion(id), provider: "jev", model: "jev", items: refsOf([item]), prompt: body });
+  const classifier = classifierProvider();
+  if (classifier.provider === "invalid") throw new Error(`the classifier provider is not configured: ${classifier.reason}`);
+  const viaApi = classifier.provider === "compatible";
+  const viaDecisions = classifier.provider === "decisions";
+  // A model that is not Jev answers, so the run says which model it was; Jev has no model of its own to name.
+  const model = viaApi || viaDecisions ? classifier.model : "jev";
+  const runId = startJevRun(db, { promptId: id, promptVersion: promptVersion(id), provider: viaApi ? "compatible" : viaDecisions ? "decisions" : "jev", model, items: refsOf([item]), prompt: body });
   const start = now();
   try {
-    const cf = jevCloudflareConfig();
+    const cf = viaApi || viaDecisions ? null : jevCloudflareConfig();
     const timeoutMs = JEV_PROMPTS[id].limits.timeoutSeconds * 1000;
-    const r = cf ? await askJevCloudflare(cf, body, timeoutMs) : await runner("jev", JEV_ARGS, body, undefined, timeoutMs, jevEnv(), undefined, true);
+    const r = viaApi ? await askCompatibleClassifier(classifier.config, classifier.model, body, timeoutMs)
+      : viaDecisions ? await askDecisionsClassifier(classifier.config, body, timeoutMs)
+      : cf ? await askJevCloudflare(cf, body, timeoutMs) : await runner("jev", JEV_ARGS, body, undefined, timeoutMs, jevEnv(), undefined, true);
     let tokens: { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined;
     try {
       const j = JSON.parse(r.stdout) as { usage?: { input_tokens?: number; output_tokens?: number } };
       if (j.usage) tokens = { input: j.usage.input_tokens ?? 0, output: j.usage.output_tokens ?? 0, cacheRead: 0, cacheWrite: 0 };
     } catch { /* the caller reports an unreadable answer */ }
+    // Jev's flat price is Jev's: another model's tokens have no cost this host knows (the provider bills them).
+    const cost = viaApi || viaDecisions || !tokens ? null : tokens.input * JEV_USD_PER_INPUT_TOKEN;
+    // Jev's registered model id is what its usage rows have always named; a classifier that stands in for Jev names itself.
+    const usageModel = viaApi || viaDecisions ? model : JEV_PROMPTS[id].models[0]!;
     // A step that sums its retries into one row (usage option of runModelStep) saves nothing here.
-    if (tokens && perCallUsage) saveUsage(db, String(runId), "jev", id.split(".")[0]!, JEV_PROMPTS[id].models[0]!, 1, { ...tokens, cost: tokens.input * JEV_USD_PER_INPUT_TOKEN }, start, now());
+    if (tokens && perCallUsage) saveUsage(db, String(runId), "jev", id.split(".")[0]!, usageModel, 1, { ...tokens, cost }, start, now());
     const outage = jevFailure(r);
     if (outage) markJevUnavailable(db, outage.kind, outage.reason);
     else if (r.code === 0) markJevWorking(db, Date.parse(start));
-    if (r.code === 0 && tokens) finishRun(db, runId, { state: "done", tokens, costUsd: tokens.input * JEV_USD_PER_INPUT_TOKEN, summary: "answered", output: r.stdout });
+    // The Decisions API reports no tokens: its answer is a done run without a token count, not an unreadable one.
+    const answered = r.code === 0 && (tokens !== undefined || viaDecisions);
+    if (answered) finishRun(db, runId, { state: "done", ...(tokens && { tokens }), costUsd: cost, summary: "answered", output: r.stdout });
     else finishRun(db, runId, { state: "failed", error: scrubError(`${exitClass(r.code)} ${r.stderr}`), summary: r.code === 0 ? "unreadable answer" : exitClass(r.code), output: r.stdout });
     return r;
   } catch (e) {
@@ -829,7 +917,9 @@ export async function runJev(db: DatabaseSync, runId: string, items: Item[], wid
     // Once a call shows Jev is unavailable, the items still waiting are left for Haiku.
     if (!jevAvailable(db)) return;
     const ref = refOf(item);
-    const r = await runModelStep(db, CLASSIFY_JEV, item, { usage: { run: runId, agent: `jev-${ref}`, stage: "classify", items: (ok) => (ok ? 1 : 0), withoutUsage: true, skipWhen: (x) => !x.ok && !jevAvailable(db) } });
+    // Jev answers are recorded even without a usage field (its price is flat), but a classifier that reports no tokens is
+    // not given a zero-token row: the row would claim it ran on no tokens.
+    const r = await runModelStep(db, CLASSIFY_JEV, item, { usage: { run: runId, agent: `jev-${ref}`, stage: "classify", items: (ok) => (ok ? 1 : 0), withoutUsage: classifierModel() === null, skipWhen: (x) => !x.ok && !jevAvailable(db) } });
     if (r.ok) saveVerdict(db, "jev", runId, r.value);
     else if (jevAvailable(db)) console.error(`jev: no valid answer for ${ref}`);
   }), width);

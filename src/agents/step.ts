@@ -4,6 +4,7 @@
 // usage rows and the error result.
 import type { DatabaseSync } from "node:sqlite";
 import { NoTakerError, poolRoom, repoBatches } from "./call.ts";
+import { classifierModel } from "./classifier.ts";
 import { jevAvailable } from "./jev.ts";
 import { jevParallel } from "./accounts.ts";
 import { add, askClaude, askJev, pool, saveUsage, type AskOptions, type LintedReply, type Usage } from "../classify/run.ts";
@@ -100,7 +101,7 @@ const zero = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, c
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const sizeOf = <I,>(step: { size?: (i: I) => number }, x: I) => step.size ? step.size(x) : Array.isArray(x) ? x.length : 1;
 
-type Reply = { text: string; usage: Usage; problems?: LintProblem[]; fixTurn?: boolean; model?: string } | { answers: unknown; usage: Usage; code: number | null; json: boolean };
+type Reply = { text: string; usage: Usage; problems?: LintProblem[]; fixTurn?: boolean; model?: string } | { answers: unknown; usage: Usage; code: number | null; json: boolean; /** False when the reply carried no usage field (a decisions endpoint reports none). */ usageKnown?: boolean };
 
 /**
  * Runs one declared step on `input`: the call, the parse, up to `attempts` calls (a parse error or a failed call repeats
@@ -117,7 +118,9 @@ export async function runModelStep<I, V, C = void>(db: DatabaseSync, step: Claud
   let usage = zero();
   let todo: I | undefined = input, rest: I | undefined = input;
   let fallback: V | null = null, error = "no answer", sawUsage = false;
-  let ran: string | undefined, untaken: NoTakerError | undefined;
+  // `reported`: the model any text reply said it ran, set before parsing, so a reply that fails to parse still names its
+  // model in the usage row. `ran`: the model of the last accepted answer, which is what a result reports.
+  let ran: string | undefined, reported: string | undefined, untaken: NoTakerError | undefined;
   for (let attempt = 0; attempt < attempts && todo !== undefined; attempt++) {
     if (opts.cancelled?.()) break;
     if (step.provider === "jev" && !jevAvailable(db)) { error = "jev unavailable"; break; }
@@ -131,8 +134,8 @@ export async function runModelStep<I, V, C = void>(db: DatabaseSync, step: Claud
     }
     if (!r) { error = "no answer"; continue; }
     usage = add(usage, r.usage);
-    if ("text" in r) opts.onReply?.(r as LintedReply);
-    if ("answers" in r ? r.json : true) sawUsage = true;
+    if ("text" in r) { if (r.model) reported = r.model; opts.onReply?.(r as LintedReply); }
+    if ("answers" in r ? r.json && r.usageKnown !== false : true) sawUsage = true;
     const ctx: ParseCtx = { attempt, last: attempt === attempts - 1, ...("text" in r ? { problems: r.problems, fixTurn: r.fixTurn } : { code: r.code }) };
     if ("answers" in r && !r.json) { error = "unreadable answer"; continue; }
     const reply = ("text" in r ? r.text : r.answers) as never;
@@ -153,8 +156,12 @@ export async function runModelStep<I, V, C = void>(db: DatabaseSync, step: Claud
     const u = opts.usage;
     const total = sizeOf(step, input);
     const items = u.items ? u.items(ok, total, rest === undefined ? 0 : sizeOf(step, rest)) : total - (rest === undefined ? 0 : sizeOf(step, rest));
-    const model = u.model ?? reg.models[0]!;
-    const saved = step.provider === "jev" ? { ...usage, cost: usage.input * JEV_USD_PER_INPUT_TOKEN } : usage;
+    // The row names the model that answered: the registered alias for a Claude call (or Jev's own id), the harness's
+    // reported model when it differs (the compatible provider, and a Task Runner's own model), and a compatible
+    // classifier's model for a typed decision. Jev's flat price is not applied to a classifier that is not Jev.
+    const typed = step.provider === "jev" ? classifierModel() : null;
+    const model = u.model ?? typed ?? reported ?? reg.models[0]!;
+    const saved = step.provider === "jev" && typed === null ? { ...usage, cost: usage.input * JEV_USD_PER_INPUT_TOKEN } : usage;
     if (u.keepEarlier) db.prepare("UPDATE main.token_usage SET agent = agent || '@' || COALESCE(started_at, '') WHERE run_id = ? AND agent = ?").run(u.run, u.agent);
     saveUsage(db, u.run, u.agent, u.stage, model, items, saved, start, new Date().toISOString());
   }

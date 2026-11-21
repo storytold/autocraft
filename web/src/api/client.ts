@@ -51,6 +51,7 @@ import type {
   ClaudeAccount,
   UsagePause,
   JevStatus,
+  ProviderStatus,
   Rates,
   AnswerInput,
   AuditFilter,
@@ -421,6 +422,8 @@ export interface Api {
     list(): Promise<ClaudeAccount[]>;
     pause(): Promise<UsagePause>;
     jev(): Promise<JevStatus>;
+    /** The model provider of this host and the classifier's, as its environment configures them. */
+    providers(): Promise<ProviderStatus>;
     /** Operators: switches Jev on or off. */
     setJev(input: { enabled: boolean }): Promise<JevStatus>;
     /** Operators. */

@@ -551,6 +551,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/accounts/pause", agents.getPause),
     { method: "PUT", pattern: "/api/accounts/pause", operator: true, handler: ok(agents.putPause) },
     get("/api/accounts/jev", agents.getJev),
+    get("/api/accounts/providers", agents.getProviders),
     { method: "PUT", pattern: "/api/accounts/jev", operator: true, handler: ok(agents.putJev) },
     { method: "PUT", pattern: "/api/accounts/:id", operator: true, handler: ok(agents.putAccount) },
     { method: "POST", pattern: "/api/accounts", operator: true, handler: ok(agents.postAccount) },

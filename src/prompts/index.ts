@@ -68,6 +68,8 @@ type Common = {
   lint?: boolean;
   /** The reply carries code (a patch, conflict resolutions, a test): its parser reads it as written, and a reply holding a credential of a fixed shape (`hasFixedCredential`) is refused as unreadable. */
   codeReply?: boolean;
+  /** The prompt needs images read back to the model (screenshots, reference pages): a provider whose tools read text only cannot run it. */
+  needsImages?: boolean;
   /** Further rows for the Prompts page's settings table, such as texts the stage posts itself. */
   extra?: { label: string; value: string }[];
 };
@@ -509,6 +511,7 @@ const VERIFY_SCREENSHOT: ClaudePrompt = {
   purpose: "Decides whether a pull request visibly changes what a user sees and, if so, which of the repo's screenshot commands to run (and with which arguments) to show the changed screen. The machine renders the screen at the base and at the head; the commands come from the repo's screenshot setup, never from the model.",
   models: ["sonnet"],
   effort: "medium",
+  needsImages: true,
   placeholders: { pr: `The pull request as a JSON object indented by one space: ref, title, body (first ${PLAN_BODY_LIMIT} characters), label (settled type label or null), review (verdict, reason, risks, fixes), files (code files changed), diff (the unified diff of the code files), commands (the screenshot commands you may use: name, doc, params with the allowed values of each, and capture, true for a command that saves an image) and, when set, size (the usual window size).`, repo_access: REPO_ACCESS_DOC },
   sandbox: { tools: ["Read", "Grep", "Glob"], maxTurns: 20, workspace: true },
   template: `You decide whether one open pull request needs before and after screenshots, and plan them. The machine builds the project at the base commit and at the head commit, runs the script you choose at both, and the images are compared afterwards. You never judge the result.
@@ -542,6 +545,7 @@ const VERIFY_COMPARE: ClaudePrompt = {
   purpose: "Looks at the before and after screenshots of a pull request (rendered by the machine at the base and at the head) and says whether the visible change matches what the pull request claims, or whether the after image is clearly broken. An operator reviews the answer; only a clear regression holds the merge.",
   models: ["opus"],
   effort: "medium",
+  needsImages: true,
   placeholders: { pr: `The pull request as a JSON object indented by one space: ref, title, body (first ${PLAN_BODY_LIMIT} characters), script (the commands that were run, with their arguments), review (the review's verdict and reason, or null) and shots (one entry per image pair: name, before and after, the paths of the two images under ${REPO_PATH}).` },
   sandbox: { tools: ["Read"], maxTurns: 8 },
   template: `You compare the screenshots of one open pull request. The machine rendered the same screen at the base commit (before) and at the pull request's head commit (after). The images are PNG files under ${REPO_PATH}; open each one with Read, the before image and the after image of every shot named in the shots field.
@@ -1926,16 +1930,39 @@ const shellWord = (a: string) => (a === "" ? '""' : /^[\w@%+=:,./-]+$/.test(a) ?
 
 const FIXED_DIR = "One fixed empty directory under the app's cache directory, the same for every call and every account (the CLI puts its working directory into its system prompt, so a directory per call would defeat the prompt cache), with no project instructions in it";
 
-function settings(p: ClaudePrompt | JevPrompt): PromptInfo["settings"] {
+/**
+ * Which provider answers this host's calls, so the page describes the calls it actually makes (src/agents/compatible.ts,
+ * src/agents/decisions.ts). `invalid` carries the configuration's reason: the page shows that instead of naming a provider
+ * that is not the one running.
+ */
+export type ProviderMode = {
+  model: "claude" | "compatible" | "invalid";
+  classifier: "jev" | "compatible" | "decisions" | "invalid";
+  modelProblem?: string;
+  classifierProblem?: string;
+};
+
+function settings(p: ClaudePrompt | JevPrompt, mode: ProviderMode): PromptInfo["settings"] {
   const l = p.limits;
+  const apiModel = p.runner === "claude" && mode.model === "compatible";
+  const badModel = p.runner === "claude" && mode.model === "invalid";
+  const apiClassifier = p.runner === "jev" && mode.classifier === "compatible";
+  const decisionsClassifier = p.runner === "jev" && mode.classifier === "decisions";
+  const badClassifier = p.runner === "jev" && mode.classifier === "invalid";
   const s: PromptInfo["settings"] = [
-    ...(p.runner === "claude" ? [{ label: "Effort", value: p.effort }] : []),
+    ...(p.runner === "claude" && !apiModel ? [{ label: "Effort", value: p.effort }] : []),
     { label: "Items per call", value: String(l.perCall) },
-    { label: "Calls at once", value: p.runner === "claude" ? "As many as the enabled accounts have free slots for" : `The Jev setting (default ${JEV_PARALLEL_DEFAULT})` },
+    { label: "Calls at once", value: p.runner === "jev" ? `The classifier setting (default ${JEV_PARALLEL_DEFAULT})` : apiModel ? "As many as the stage's pool starts (the compatible provider has no account slots)" : "As many as the enabled accounts have free slots for" },
     { label: "Attempts", value: `${l.attempts} (a retry asks only for the items still missing)` },
     { label: "Time limit", value: `${l.timeoutSeconds} s per call` },
   ];
-  if (p.runner === "claude" && p.sandbox) {
+  // What differs when the compatible provider answers: one request, or file turns of this host's own, and no harness.
+  if (apiModel) s.push({ label: "Provider", value: `The compatible provider (src/agents/compatible.ts): ${p.sandbox ? "a loop of at most the Max turns below, with Read, Grep and Glob on the checkout and the workspace (real paths confined to them), and mcp__build__check when the stage gives one" : "one request, no tools"}; no sandbox process, no item tools, no explorer subagent, no images, no follow-up fix turn` });
+  if (apiClassifier) s.push({ label: "Provider", value: "The compatible classifier: Jev's request, sent as one JSON request to the configured model (src/agents/compatible.ts)" });
+  if (decisionsClassifier) s.push({ label: "Provider", value: "The decisions endpoint: Jev's questions sent as one Decisions request (a predicate per yes-probability, a choice with the criteria as its options; src/agents/decisions.ts). It reports no tokens, so the call's usage row carries none" });
+  if (badModel) s.push({ label: "Provider", value: `Model calls cannot run: ${mode.modelProblem ?? "the model provider is not configured"}; the fallback is not used silently` });
+  if (badClassifier) s.push({ label: "Provider", value: `The typed decisions cannot run: ${mode.classifierProblem ?? "the classifier is not configured"}; the fallback model does their work` });
+  if (p.runner === "claude" && p.sandbox && !apiModel) {
     s.push({ label: "Tools", value: `${p.sandbox.tools.join(", ")} on a read-only checkout (the pull request's head commit, or the base commit for Fix) at ${REPO_PATH}; no tools (and no checkout) when the tree is too large, the head moved or the sandbox is unavailable` });
     s.push({ label: "Max turns", value: String(p.sandbox.maxTurns) });
     s.push({ label: "Sandbox", value: "bubblewrap: only the claude binary, the system libraries, the checkout (read-only; CLAUDE.md, AGENTS.md and .claude files left out, so a pull request cannot plant instructions), the repository's repo docs where the prompt has them (see Repo docs) and the account's credentials file (read-only; the sandbox never refreshes the token, so a call whose token has under 30 minutes left runs without tools on the host) or, for an account with a long-lived token, that token as an environment variable instead (no credentials file, no expiry wait) are visible; empty home and a clean environment (only HOME, PATH, the config directory and language settings, plus the account's token when it has one); network only; any reply text that looks like a token or key is removed" });
@@ -1947,18 +1974,18 @@ function settings(p: ClaudePrompt | JevPrompt): PromptInfo["settings"] {
       s.push({ label: "Explorer", value: `The ${AGENT_TOOL} tool starts one subagent, ${EXPLORER}, on ${EXPLORER_MODEL} with ${EXPLORER_TOOLS.join(", ")} (definition read-only at ${AGENTS_PATH}, --agents); its tokens are recorded as extra rows of the call's usage` });
       s.push({ label: "Item tools", value: `When an item snapshot exists, a read-only MCP server (--mcp-config ${MCP_PATH}) with search_items, item, similar_items and pr_diff over the synced issues and pull requests of public repositories (tools mcp__items__*, allowed for the call and the explorer); without a snapshot the call has none` });
     }
-  } else if (p.runner === "claude") s.push({ label: "Where", value: `${FIXED_DIR}; the prompt's fixed text is the system prompt (--system-prompt, replacing the CLI's own) and the item data is on stdin` });
+  } else if (p.runner === "claude" && !apiModel && !badModel) s.push({ label: "Where", value: `${FIXED_DIR}; the prompt's fixed text is the system prompt (--system-prompt, replacing the CLI's own) and the item data is on stdin` });
   if (p.runner === "claude" && !p.sandbox) s.push({ label: "Tools", value: "None" });
-  else if (p.runner === "jev") s.push({ label: "Where", value: "Request on stdin as one line of JSON" });
+  else if (p.runner === "jev" && !apiClassifier && !decisionsClassifier && !badClassifier) s.push({ label: "Where", value: "Request on stdin as one line of JSON" });
   if (p.extra) s.push(...p.extra);
   return s;
 }
 
-function info(p: ClaudePrompt | JevPrompt): PromptInfo {
+function info(p: ClaudePrompt | JevPrompt, mode: ProviderMode): PromptInfo {
   const base = {
     id: p.id, stage: p.stage, purpose: p.purpose, models: p.models, runner: p.runner,
     placeholders: Object.entries(p.placeholders).map(([name, meaning]) => ({ name, meaning })),
-    output: p.output, validation: p.validation, settings: settings(p), limits: p.limits,
+    output: p.output, validation: p.validation, settings: settings(p, mode), limits: p.limits,
   };
   if (p.runner === "claude") {
     const id = p.id as ClaudePromptId;
@@ -1966,7 +1993,10 @@ function info(p: ClaudePrompt | JevPrompt): PromptInfo {
     const parts = claudeParts(id, ex.input, p.sandbox !== undefined);
     return {
       ...base,
-      command: (p.sandbox ? sandboxPreview(claudeArgs(id, p.models[0]!, true, undefined, undefined, false, p.lint === true), p.sandbox.workspace === true, p.lint === true) : ["claude", ...claudeArgs(id, p.models[0]!, false, undefined, "<system prompt, shown above>")]).map(shellWord).join(" "),
+      command: mode.model === "invalid" ? "— (the model provider is not configured)"
+        : mode.model === "compatible"
+        ? `POST <compatible API>/chat/completions${p.sandbox ? ", then Read/Grep/Glob turns" : ""}`
+        : (p.sandbox ? sandboxPreview(claudeArgs(id, p.models[0]!, true, undefined, undefined, false, p.lint === true), p.sandbox.workspace === true, p.lint === true) : ["claude", ...claudeArgs(id, p.models[0]!, false, undefined, "<system prompt, shown above>")]).map(shellWord).join(" "),
       template: p.template,
       system: parts.system,
       questions: [],
@@ -1978,7 +2008,10 @@ function info(p: ClaudePrompt | JevPrompt): PromptInfo {
   const item = SAMPLE_ITEMS[0]!;
   return {
     ...base,
-    command: ["jev", ...JEV_ARGS].join(" "),
+    command: mode.classifier === "invalid" ? "— (the classifier is not configured)"
+      : mode.classifier === "compatible" ? "POST <compatible API>/chat/completions"
+      : mode.classifier === "decisions" ? "POST <decisions endpoint>/decisions"
+      : ["jev", ...JEV_ARGS].join(" "),
     template: JSON.stringify(p.request, null, 2),
     system: null,
     questions: Object.entries(p.request.questions).map(([id, q]) => ({ id, type: q.type, instructions: q.instructions, criteria: q.criteria ?? null })),
@@ -1987,6 +2020,6 @@ function info(p: ClaudePrompt | JevPrompt): PromptInfo {
   };
 }
 
-export function promptsReport(commit: string | null): PromptsReport {
-  return { commit, prompts: PROMPTS.map(info), comments: COMMENT_TEMPLATES };
+export function promptsReport(commit: string | null, mode: ProviderMode = { model: "claude", classifier: "jev" }): PromptsReport {
+  return { commit, prompts: PROMPTS.map((p) => info(p, mode)), comments: COMMENT_TEMPLATES };
 }

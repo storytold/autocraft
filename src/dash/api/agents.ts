@@ -2,11 +2,14 @@
 // only operators change an account (audited as `account-change`). The box
 // config's directories never reach a response: accounts are returned by id and label.
 import type { DatabaseSync } from "node:sqlite";
-import type { AgentRunFilter, AgentRunState, ClaudeAccount, JevStatus } from "../../../web/src/api/types.ts";
+import type { AgentRunFilter, AgentRunState, ClaudeAccount, JevStatus, ProviderStatus } from "../../../web/src/api/types.ts";
 import { AccountError, listAccounts, setUsagePause, updateAccount, usagePause } from "../../agents/accounts.ts";
 import { jevEnabled, jevOutage, setJevEnabled } from "../../agents/jev.ts";
+import { modelProviderReport } from "../../agents/compatible.ts";
+import { classifierProvider } from "../../agents/classifier.ts";
 import { addAccount, beginLogin, beginToken, refreshNow, removeToken, sendCode, sendTokenCode, signOut, stopLogin, stopToken } from "../../agents/manage.ts";
 import { getRun, listRuns, rates as ratesOf, RunQueryError } from "../../agents/runs.ts";
+import { inferenceMode } from "../../remote/mode.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { hiddenRepos } from "./visible.ts";
@@ -36,7 +39,29 @@ export const putPause = (db: DatabaseSync, req: Req) => wrap(() => setUsagePause
 
 export const getJev = (db: DatabaseSync): JevStatus => {
   const o = jevOutage(db);
-  return { enabled: jevEnabled(db), unavailable: o ? { reason: o.reason, since: o.since } : null };
+  const c = classifierProvider();
+  const kind = c.provider === "compatible" || c.provider === "decisions" ? c.provider : c.provider === "invalid" ? "invalid" : "jev";
+  return {
+    enabled: jevEnabled(db),
+    unavailable: o ? { reason: o.reason, since: o.since } : null,
+    provider: kind,
+    model: c.provider === "compatible" || c.provider === "decisions" ? c.model : null,
+    ...(c.provider === "invalid" ? { problem: c.reason } : {}),
+  };
+};
+
+/** The model provider and the classifier's, as configured now. Nothing here reads a key or a URL's path. */
+export const getProviders = (db: DatabaseSync): ProviderStatus => {
+  const m = modelProviderReport();
+  const c = classifierProvider();
+  return {
+    mode: inferenceMode(db) === "user-local" ? "user-local" : "server",
+    model: m.provider === "compatible" ? { provider: "compatible", models: { top: m.models.top, mid: m.models.mid, small: m.models.small }, problem: m.problem }
+      : m.provider === "invalid" ? { provider: "invalid", reason: m.reason } : { provider: "claude" },
+    classifier: c.provider === "compatible" ? { provider: "compatible", model: c.model }
+      : c.provider === "decisions" ? { provider: "decisions", model: c.model }
+      : c.provider === "invalid" ? { provider: "invalid", reason: c.reason } : { provider: "jev" },
+  };
 };
 export const putJev = (db: DatabaseSync, req: Req) => wrap(() => {
   const enabled = (req.json as { enabled?: unknown } | null)?.enabled;

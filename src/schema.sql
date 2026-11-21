@@ -811,7 +811,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   stage INTEGER NOT NULL,
   prompt_id TEXT NOT NULL,
   prompt_version TEXT NOT NULL,
-  provider TEXT NOT NULL,             -- claude | jev
+  provider TEXT NOT NULL,             -- claude | jev | compatible (the model API of src/agents/compatible.ts)
   model TEXT NOT NULL,
   account_id TEXT,                    -- null for Jev
   items TEXT NOT NULL DEFAULT '[]',   -- JSON [{repo, number}], at most 50
@@ -839,7 +839,7 @@ CREATE INDEX IF NOT EXISTS agent_runs_started ON agent_runs(started_at);
 -- Written by the calling process every poll; rows not seen for 30 s are ignored, runner start deletes all.
 CREATE TABLE IF NOT EXISTS model_waits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  provider TEXT NOT NULL,             -- claude | jev
+  provider TEXT NOT NULL,             -- claude | jev | compatible (the model API of src/agents/compatible.ts)
   class INTEGER NOT NULL,             -- 0 | 1 | 2
   job_id INTEGER,
   step TEXT NOT NULL,
