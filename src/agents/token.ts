@@ -45,7 +45,7 @@ export async function checkToken(configDir: string, token: string, signal?: Abor
     const env = childEnv(confDir, { [TOKEN_ENV]: token });
     for (const k of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"]) delete env[k];
     const stdout = await new Promise<string | null>((resolve) => {
-      execFile(claudeBin(), ["-p", "Reply OK", "--model", "haiku", "--max-turns", "1", "--output-format", "json"], { timeout: 60_000, env, cwd: cwd!, signal, maxBuffer: 8 << 20 }, (e, out) => resolve(e ? null : String(out)));
+      execFile(claudeBin(), ["-p", "Reply OK", "--model", "haiku", "--max-turns", "1", "--output-format", "json"], { timeout: 60_000, env, cwd: cwd!, signal, maxBuffer: 8 << 20, windowsHide: true }, (e, out) => resolve(e ? null : String(out)));
     });
     if (stdout === null || signal?.aborted) return false;
     const parsed = JSON.parse(stdout) as unknown;

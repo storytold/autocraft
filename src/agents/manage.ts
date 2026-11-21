@@ -119,7 +119,7 @@ export async function signOut(db: DatabaseSync, id: unknown, by: string): Promis
   const a = dirOf(db, id);
   cancelLogin(a.id);
   await new Promise<void>((resolve) => {
-    execFile(claudeBin(), ["auth", "logout"], { timeout: 30_000, env: childEnv(a.configDir) }, () => resolve());
+    execFile(claudeBin(), ["auth", "logout"], { timeout: 30_000, env: childEnv(a.configDir), windowsHide: true }, () => resolve());
   });
   deleteToken(a.configDir);
   recordTokenRemoved(db, a.id);

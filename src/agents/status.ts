@@ -23,7 +23,7 @@ export function childEnv(configDir: string, extra: Record<string, string> = {}):
 function run(args: string[], configDir: string, timeout: number, cwd?: string): Promise<string> {
   return new Promise((resolve) => {
     // A signed-out account may exit non-zero and still print its JSON.
-    execFile(claudeBin(), args, { timeout, env: childEnv(configDir), cwd, maxBuffer: 8 << 20 }, (_e, stdout) => resolve(String(stdout ?? "")));
+    execFile(claudeBin(), args, { timeout, env: childEnv(configDir), cwd, maxBuffer: 8 << 20, windowsHide: true }, (_e, stdout) => resolve(String(stdout ?? "")));
   });
 }
 

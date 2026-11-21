@@ -82,7 +82,7 @@ export type Runner = (cmd: string, args: string[], input: string, cwd?: string, 
 export function exec(cmd: string, args: string[], input: string, cwd?: string, timeoutMs = 600_000, env?: Record<string, string>, onLine?: (line: string) => void, exactEnv = false, watch?: IdleWatch): Promise<Proc> {
   return new Promise((resolve) => {
     // With a watchdog the child leads its own process group, so the stop reaches everything it started.
-    const p = spawn(cmd, args, { cwd, stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs, ...(watch && { detached: true }), ...(env && { env: exactEnv ? env : { ...process.env, ...env } }) });
+    const p = spawn(cmd, args, { cwd, stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs, windowsHide: true, ...(watch && { detached: true }), ...(env && { env: exactEnv ? env : { ...process.env, ...env } }) });
     let stdout = "", stderr = "";
     let partial = "";
     let last = Date.now(), idle = false, ended = false;
