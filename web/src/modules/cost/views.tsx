@@ -5,6 +5,7 @@ import type { CostReport, UsageTotals } from "../../api/types";
 import type { ViewProps } from "../../registry/types";
 import { day, num } from "../../lib/format";
 import { cn } from "../../ui/cn";
+import { PageTitle } from "../../shell/PageHeader";
 import { Block, Select, Stat, Th } from "../insight/parts";
 
 const tokens = (u: UsageTotals) => u.input + u.output + u.cacheRead + u.cacheWrite;
@@ -130,7 +131,7 @@ export function Cost(_: ViewProps) {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-[1180px] px-4 pb-12 pt-5 md:px-6">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <h1 className="text-xl font-semibold">Cost</h1>
+          <PageTitle title="Cost" />
           <Select
             label="Run"
             value={r.run}

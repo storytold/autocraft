@@ -2619,7 +2619,7 @@ export interface ReviewHistory { latest: OpusReviewEntry | null; earlier: OpusRe
 
 
 export type HistoryKind = "model" | "write" | "decision" | "event";
-export interface HistoryCall { label: string; kind: "model" | "tool"; costUsd: number | null; via?: RemoteVia }
+export interface HistoryCall { label: string; kind: "model" | "tool"; costUsd: number | null; via?: RemoteVia; runId?: number }
 export interface HistoryEntry {
   id: string;
   at: string;

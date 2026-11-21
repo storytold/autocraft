@@ -1,13 +1,11 @@
 import type { ViewDef } from "../../registry/types";
-import { InboxList } from "./InboxList";
+import { DecisionBrowse } from "./DecisionBrowse";
 import { PhoneInbox } from "./PhoneInbox";
-import { DecisionsToolbar } from "./Toolbar";
 
-/** The Decisions tab of the Needs you page: the list; a row opens the item page of its decision. */
+/** The Decisions tab of the Needs you page: one browse surface (filter rail, list, read-only preview). A row still opens the item page. */
 export const decisionsView: ViewDef = {
   id: "decisions",
   title: "Decisions",
-  toolbar: DecisionsToolbar,
+  panels: [{ id: "browse", title: "Decisions", component: DecisionBrowse, defaultSize: 100 }],
   phone: PhoneInbox,
-  panels: [{ id: "list", title: "Queue", component: InboxList, defaultSize: 100 }],
 };

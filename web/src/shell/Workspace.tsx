@@ -5,6 +5,7 @@ import type { PanelDef, ViewDef, ViewProps } from "../registry/types";
 import { layoutStorage } from "./layoutStorage";
 import { useIsPhone } from "./useMedia";
 import { cn } from "../ui/cn";
+import { PageTitleRegion } from "./PageHeader";
 
 /**
  * Lays out a view's panels: resizable and collapsible columns on desktop with the
@@ -25,9 +26,9 @@ export function Workspace({ view, props }: { view: ViewDef; props: ViewProps }) 
         )}
         {view.panels
           .filter((p) => !p.hideOnPhone)
-          .map((p) => (
+          .map((p, i) => (
             <section key={p.id} aria-label={p.title} className="border-b border-line">
-              <Suspense fallback={null}><p.component {...props} /></Suspense>
+              <PageTitleRegion primary={i === 0}><Suspense fallback={null}><p.component {...props} /></Suspense></PageTitleRegion>
             </section>
           ))}
       </div>
@@ -81,7 +82,7 @@ function PanelSlot({ def, index, last, props }: { def: PanelDef; index: number; 
           </button>
         ) : (
           <div className={cn("flex h-full min-h-0 flex-col")}>
-            <Suspense fallback={null}><def.component {...props} /></Suspense>
+            <PageTitleRegion primary={index === 0}><Suspense fallback={null}><def.component {...props} /></Suspense></PageTitleRegion>
             {def.collapsible && (
               <button
                 onClick={() => ref.current?.collapse()}

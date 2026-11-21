@@ -14,6 +14,7 @@ import { cn } from "../../ui/cn";
 import { num } from "../../lib/format";
 import { itemPath } from "../../lib/links";
 import { useUser } from "../../shell/UserContext";
+import { PageTitle } from "../../shell/PageHeader";
 import { KIND_ICON } from "../decisions/parts";
 import type { ViewProps } from "../../registry/types";
 
@@ -184,7 +185,7 @@ function ProjectHeader({ repo }: { repo: string | undefined }) {
       <Link to="/" className="inline-flex items-center gap-1 text-sm text-ink/60 hover:text-ink max-md:h-11">
         <ArrowLeftIcon size={14} /> Projects
       </Link>
-      <h1 className="text-xl font-semibold">{repo ?? "All projects"}</h1>
+      <PageTitle title={repo ?? "All projects"} />
     </div>
   );
 }

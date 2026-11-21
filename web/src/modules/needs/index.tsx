@@ -4,13 +4,13 @@ import { lazyView } from "../../registry/lazyView";
 import { decisionRedirectView } from "../decisions/DecisionRedirect";
 import { useNavSummary } from "./state";
 
-const Tabs = lazyView(() => import("./views"), "Tabs");
 const Body = lazyView(() => import("./views"), "Body");
+const PhoneBody = lazyView(() => import("./views"), "PhoneBody");
 
 const view: ViewDef = {
   id: "needs",
   title: "Needs you",
-  toolbar: Tabs,
+  phone: PhoneBody,
   panels: [{ id: "body", title: "Needs you", component: Body, defaultSize: 100 }],
 };
 

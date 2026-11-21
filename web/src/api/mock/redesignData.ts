@@ -167,12 +167,12 @@ const hist = (id: string, minAgo: number, step: string, outcome: string, model: 
 const HISTORY_1484: HistoryEntry[] = [
   hist("h1", 4 * D + 3 * H, "Classify", "missing feature, three of three agree", "Jev", 0.0, "model"),
   hist("h2", 4 * D + 2 * H, "Review", "Hold, unsure", "Opus", 1.1, "model", [{ label: "Read crates/spell/src/hu.rs", kind: "tool", costUsd: null }, { label: "Read data/hu/hyph.dic", kind: "tool", costUsd: null }, { label: "Opus, 38k tokens", via: { login: "kiri-n", harness: "claude", model: "claude-opus-4-5" }, kind: "model", costUsd: 1.1 }]),
-  hist("h3", 4 * D + 2 * H - 4, "Posted review on GitHub", "Review comment created", null, null, "write", [], "w1"),
+  hist("h3", 4 * D + 2 * H - 4, "Posted review on GitHub", "Review comment created", null, null, "write", [], "h3"),
   hist("h4", 3 * D + 4 * H, "Review", "Take with fixes, new head b72c4d8", "Opus", 0.74, "model", [{ label: "Read crates/spell/tests/hyphen.rs", kind: "tool", costUsd: null }, { label: "Opus, 29k tokens", kind: "model", costUsd: 0.74 }]),
-  hist("h5", 3 * D + 4 * H - 3, "Edited review on GitHub", "Review comment updated", null, null, "write", [], "w2"),
+  hist("h5", 3 * D + 4 * H - 3, "Edited review on GitHub", "Review comment updated", null, null, "write", [], "h5"),
   hist("h6", 2 * D, "Review", "Take with fixes, head e6a09b1", "Opus", 0.88, "model", [{ label: "Opus, 31k tokens", kind: "model", costUsd: 0.88 }]),
   hist("h7", 5 * H + 30, "Review", "Take, unsure", "Opus", 0.92, "model", [{ label: "Read crates/spell/src/hu.rs", kind: "tool", costUsd: null }, { label: "Opus, 33k tokens", kind: "model", costUsd: 0.92 }]),
-  hist("h8", 5 * H + 20, "Edited review on GitHub", "Review comment updated", null, null, "write", [], "w3"),
+  hist("h8", 5 * H + 20, "Edited review on GitHub", "Review comment updated", null, null, "write", [], "h8"),
   hist("h9", 5 * H, "Merge? asked", "Prepared options: Merge, Hold, Ask to use the language pack", "Opus", 0.31, "decision", [{ label: "Opus, 12k tokens", kind: "model", costUsd: 0.31 }]),
 ];
 
@@ -215,9 +215,9 @@ const GITHUB_1484: GithubSide = {
 const HISTORY_9981: HistoryEntry[] = [
   hist("h1", 5 * H, "Classify", "bug fix, three of three agree", "Jev", 0, "model"),
   hist("h2", 4 * H, "Review", "Take with fixes", "Opus", 1.9, "model", [{ label: "Read crates/crop/src/handles.rs", kind: "tool", costUsd: null }, { label: "Opus, 52k tokens", kind: "model", costUsd: 1.9 }]),
-  hist("h3", 4 * H - 3, "Posted review on GitHub", "Review comment created", null, null, "write", [], "w1"),
+  hist("h3", 4 * H - 3, "Posted review on GitHub", "Review comment created", null, null, "write", [], "h3"),
   hist("h4", 2 * H + 20, "Fix-up", "Pushed a1b2c3d: clamp skew", "Sonnet", 1.4, "model", [{ label: "Edit crates/crop/src/skew.rs", kind: "tool", costUsd: null }, { label: "cargo test -p crop", kind: "tool", costUsd: null }, { label: "Sonnet, 41k tokens", kind: "model", costUsd: 1.4 }]),
-  hist("h5", 2 * H + 18, "Pushed 1 commit", "a1b2c3d to the contributor's branch", null, null, "write", [], "w2"),
+  hist("h5", 2 * H + 18, "Pushed 1 commit", "a1b2c3d to the contributor's branch", null, null, "write", [], "h5"),
   hist("h6", 95, "Review", "Take", "Opus", 0.8, "model", [{ label: "Opus, 24k tokens", kind: "model", costUsd: 0.8 }]),
   hist("h7", 50, "Verify", "Passed on a1b2c3d", "Sonnet", 0.02, "model"),
   hist("h8", 46, "Queued", "In batch #41, waiting for CI", null, null, "event"),
@@ -240,9 +240,9 @@ const GITHUB_9981: GithubSide = {
 // ---- wordcraft#2214: an issue AutoCraft is fixing ----
 const HISTORY_2214: HistoryEntry[] = [
   hist("h1", 3 * H, "Classify", "bug, three of three agree", "Jev", 0, "model"),
-  hist("h2", 3 * H - 10, "Assigned", "Assigned to autocraft", null, null, "write", [], "w1"),
+  hist("h2", 3 * H - 10, "Assigned", "Assigned to autocraft", null, null, "write", [], "h2"),
   hist("h3", 2 * H + 30, "Fix", "Opened wordcraft#2231 with a first patch", "Opus", 2.31, "model", [{ label: "Read crates/export/src/pdf/links.rs", kind: "tool", costUsd: null }, { label: "Edit crates/export/src/pdf/links.rs", kind: "tool", costUsd: null }, { label: "Opus, 61k tokens", kind: "model", costUsd: 2.31 }]),
-  hist("h4", 2 * H + 25, "Opened pull request", "wordcraft#2231", null, null, "write", [], "w2"),
+  hist("h4", 2 * H + 25, "Opened pull request", "wordcraft#2231", null, null, "write", [], "h4"),
   hist("h5", 100, "Review of the patch", "Take with fixes: the link rect ignores the last line's descent", "Opus", 0.7, "model"),
   hist("h6", 70, "Fix-up", "Round 2 started on wordcraft#2231", "Sonnet", null, "model", [{ label: "Edit crates/export/src/pdf/links.rs", kind: "tool", costUsd: null }]),
 ];
@@ -262,7 +262,7 @@ const GITHUB_2214: GithubSide = {
 const HISTORY_9970: HistoryEntry[] = [
   hist("h1", 2 * D, "Review", "Take", "Opus", 0.9, "model"),
   hist("h2", 3 * H, "Verify", "Passed", "Sonnet", 0.02, "model"),
-  hist("h3", 100, "Merged", "In batch #40, merge commit 4f8a21c", null, null, "write", [], "w1"),
+  hist("h3", 100, "Merged", "In batch #40, merge commit 4f8a21c", null, null, "write", [], "h3"),
   hist("h4", 95, "Post-merge review", "No issues found", "Opus", 0.6, "model"),
 ];
 const GITHUB_9970: GithubSide = {

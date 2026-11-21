@@ -5,26 +5,33 @@ import type { ActionTag as Tag, ChoiceCore, ChoiceExtra, Decision, DecisionChoic
 import { ActionTag, tagWords } from "../../ui/atoms/ActionTag";
 import { Button } from "../../ui/atoms/Button";
 import { ErrorLine } from "../../ui/atoms/ErrorLine";
+import { Input } from "../../ui/atoms/Input";
+import { Textarea } from "../../ui/atoms/Textarea";
 import { CheckRow } from "../../ui/molecules/CheckRow";
 import { RadioRow } from "../../ui/molecules/RadioRow";
 import { StepDraft } from "../../ui/molecules/StepDraft";
 import { cn } from "../../ui/cn";
 import { canActOn } from "../decisions/access";
 import { markStarting } from "./starting";
+import { revealElement } from "../../lib/revealElement";
 import { localActions, useAnswer, useLocal } from "../decisions/state";
 import { useWorkflow } from "../decisions/Workflow";
 import { COMPOSER_ID } from "./Composer";
 
-/** The thread has one place to write to Opus: the composer at the bottom of the page. */
+/** The thread has one place to write to Opus: the composer at the bottom of the page, in whatever disclosure the page keeps it in. */
 const focusComposer = () => {
   const el = document.getElementById(COMPOSER_ID);
-  el?.scrollIntoView({ block: "center", behavior: "smooth" });
-  el?.focus({ preventScroll: true });
+  if (!el) return;
+  // The composer can sit inside a folded section: open its ancestors first so the focus is not moved into a hidden field.
+  revealElement(el);
+  el.focus({ preventScroll: true });
 };
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const NOTE_MAX = 500;
-const area = "block w-full [field-sizing:content] max-h-[60vh] min-h-24 resize-none rounded border border-line bg-sunken px-2.5 py-2 text-sm leading-5 outline-none focus:border-accent/60";
-const inputCls = "block h-8 w-full rounded border border-line bg-sunken px-2.5 text-sm outline-none focus:border-accent/60 max-md:h-11";
+/** A draft's multi-line editor: the Textarea atom carries the field metrics, this only sizes it. */
+const area = "min-h-24 max-h-[60vh] resize-none [field-sizing:content]";
+/** A one-line editor inside an extra (an issue title). */
+const field = "w-full";
 const quote = "whitespace-pre-wrap border-l-2 border-line-strong pl-3 leading-5 text-ink/75";
 /** The order the server runs the writes in. */
 const ORDER: Tag[] = ["comment", "label", "unlabel", "assign", "request_review", "open_issue", "push", "merge", "close", "reopen", "move"];
@@ -49,8 +56,12 @@ function NoteField({ d, required }: { d: Decision; required?: boolean }) {
   const text = required ? "Note" : "Add a note (optional)";
   return (
     <div>
-      <label className="flex h-8 min-w-0 items-center rounded border border-line bg-sunken px-2.5 focus-within:border-accent/60 max-md:h-11">
-        <input value={note} maxLength={NOTE_MAX} onChange={(e) => localActions.setNote(d.id, e.target.value)} placeholder={text} aria-label={text} className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-ink/40" />
+      <label className="block">
+        <span className="mb-1 flex items-baseline justify-between gap-2 text-2xs font-medium text-ink/60">
+          <span>Note</span>
+          <span className="font-normal text-ink/45">{required ? "Required" : "Optional"}</span>
+        </span>
+        <Input value={note} maxLength={NOTE_MAX} onChange={(e) => localActions.setNote(d.id, e.target.value)} placeholder={required ? "Why? This goes on the record" : "Anything Opus should know"} aria-label={text} className="w-full" />
       </label>
       {note.length >= NOTE_MAX - 100 && <p className={cn("mt-0.5 text-right text-2xs", note.length >= NOTE_MAX ? "text-bad" : "text-ink/50")}>{note.length}/{NOTE_MAX}</p>}
     </div>
@@ -289,8 +300,9 @@ function ChoiceForm({ d, user, choices, onAnswered }: { d: Decision; user: User;
           editing={isEditing("reason")}
           onToggle={() => cancelEdit("reason", (s) => ({ ...s, reason: undefined }))}
           disabled={busy || running}
+          label="Reason"
           preview={<blockquote className={quote}>{reason || "No reason"}</blockquote>}
-          editor={<textarea value={reason ?? ""} onChange={(e) => patch(c.key, (s) => ({ ...s, reason: e.target.value }))} rows={3} aria-label="Reason" disabled={busy || running} className={area} />}
+          editor={<Textarea value={reason ?? ""} onChange={(e) => patch(c.key, (s) => ({ ...s, reason: e.target.value }))} rows={3} aria-label="Reason" disabled={busy || running} className={area} />}
         />
       )}
       {c.params?.instructions !== undefined && (
@@ -299,8 +311,9 @@ function ChoiceForm({ d, user, choices, onAnswered }: { d: Decision; user: User;
           onToggle={() => cancelEdit("instructions", (s) => ({ ...s, instructions: undefined }))}
           disabled={busy || running}
           readOnly={!operator}
+          label="Fix-up instructions"
           preview={<blockquote className={quote}>{instructions}</blockquote>}
-          editor={<textarea value={instructions ?? ""} maxLength={1500} onChange={(e) => patch(c.key, (s) => ({ ...s, instructions: e.target.value }))} rows={5} aria-label="Fix-up instructions" disabled={busy || running} className={area} />}
+          editor={<Textarea value={instructions ?? ""} maxLength={1500} onChange={(e) => patch(c.key, (s) => ({ ...s, instructions: e.target.value }))} rows={5} aria-label="Fix-up instructions" disabled={busy || running} className={area} />}
         />
       )}
     </>
@@ -336,7 +349,7 @@ function ChoiceForm({ d, user, choices, onAnswered }: { d: Decision; user: User;
               type="button"
               disabled={busy || running}
               onClick={() => cancelEdit(x.id, (s) => ({ ...s, edits: Object.fromEntries(Object.entries(s.edits).filter(([k]) => k !== x.id)) }))}
-              className="flex h-9 shrink-0 items-center px-2 text-xs text-accent-ink hover:underline disabled:opacity-40 max-md:h-11"
+              className="mt-1 flex h-7 shrink-0 items-center rounded px-2 text-xs text-accent-ink hover:underline disabled:opacity-40 max-md:mt-0 max-md:h-11"
             >
               {editing ? "Cancel edit" : "Edit"}
             </button>
@@ -345,12 +358,21 @@ function ChoiceForm({ d, user, choices, onAnswered }: { d: Decision; user: User;
       >
         {!(editing && checked) && x.kind === "open_issue" && <blockquote className={quote}>{e.body}</blockquote>}
         {editing && checked && x.kind === "comment" && (
-          <textarea value={e.text ?? ""} onChange={(ev) => patch(core.key, (s) => ({ ...s, edits: { ...s.edits, [x.id]: { ...s.edits[x.id], text: ev.target.value } } }))} rows={5} aria-label="Comment text" disabled={busy || running} className={area} />
+          <label className="block">
+            <span className="mb-1 block text-2xs font-medium text-ink/60">Comment</span>
+            <Textarea value={e.text ?? ""} onChange={(ev) => patch(core.key, (s) => ({ ...s, edits: { ...s.edits, [x.id]: { ...s.edits[x.id], text: ev.target.value } } }))} rows={5} aria-label="Comment text" disabled={busy || running} className={area} />
+          </label>
         )}
         {editing && checked && x.kind === "open_issue" && (
-          <div className="space-y-1.5">
-            <input value={e.title ?? ""} maxLength={120} onChange={(ev) => patch(core.key, (s) => ({ ...s, edits: { ...s.edits, [x.id]: { ...s.edits[x.id], title: ev.target.value } } }))} aria-label="Issue title" disabled={busy || running} className={inputCls} />
-            <textarea value={e.body ?? ""} onChange={(ev) => patch(core.key, (s) => ({ ...s, edits: { ...s.edits, [x.id]: { ...s.edits[x.id], body: ev.target.value } } }))} rows={6} aria-label="Issue body" disabled={busy || running} className={area} />
+          <div className="space-y-2">
+            <label className="block">
+              <span className="mb-1 block text-2xs font-medium text-ink/60">Title</span>
+              <Input value={e.title ?? ""} maxLength={120} onChange={(ev) => patch(core.key, (s) => ({ ...s, edits: { ...s.edits, [x.id]: { ...s.edits[x.id], title: ev.target.value } } }))} aria-label="Issue title" disabled={busy || running} className={field} />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-2xs font-medium text-ink/60">Body</span>
+              <Textarea value={e.body ?? ""} onChange={(ev) => patch(core.key, (s) => ({ ...s, edits: { ...s.edits, [x.id]: { ...s.edits[x.id], body: ev.target.value } } }))} rows={6} aria-label="Issue body" disabled={busy || running} className={area} />
+            </label>
           </div>
         )}
       </CheckRow>

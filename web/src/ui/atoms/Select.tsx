@@ -6,7 +6,7 @@ export interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement
 }
 
 /** Class string of a native select, for the few places that cannot render `Select`. */
-export const selectCls = "h-8 rounded border border-line bg-sunken px-1.5 text-sm max-md:h-11";
+export const selectCls = "h-8 max-w-full rounded border border-line bg-sunken px-2.5 text-sm leading-5 outline-none focus:border-accent/60 disabled:opacity-60 max-md:h-11 max-md:text-[16px]";
 
 /** Native select on the sunken surface; 44 px high on phones. Children are `<option>`s. */
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select({ size = "md", className, ...rest }, ref) {

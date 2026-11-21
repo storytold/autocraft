@@ -5,6 +5,7 @@ import { saveTools } from "../src/agents/tools.ts";
 import { connect } from "../src/db.ts";
 import { syncActivity } from "../src/activity.ts";
 import { trace, traceDetail } from "../src/dash/api/trace.ts";
+import { itemPage } from "../src/dash/api/item-page.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { ItemTrace } from "../web/src/api/types.ts";
 
@@ -141,4 +142,42 @@ test("decision_items follows a decision that changes or goes away", () => {
   db.prepare("UPDATE decisions SET items = ? WHERE id = 'd'").run(JSON.stringify([{ repo: "photocraft", number: 2 }]));
   db.prepare("DELETE FROM decisions WHERE id = 'd'").run();
   assert.equal(n(), 0);
+});
+
+
+test("item history discloses only the reader's own-item calls and preserves unknown costs", async () => {
+  // The real trace-to-history join must not reintroduce a mixed hidden-repo run.
+  const db = connect(":memory:");
+  try {
+    db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at, head_oid) VALUES ('photocraft', 7, 'pr', 'OPEN', 'Own item', '2026-01-01T00:00:00Z', ?)").run("a".repeat(40));
+    db.prepare("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('pdfcraft', 'private') ON CONFLICT (name) DO UPDATE SET visibility = excluded.visibility").run();
+    const make = (promptId: string, items: { repo: string; number: number }[], at: string, costUsd: number | null) => {
+      const id = insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId, promptVersion: "1", provider: "claude", model: "opus", accountId: null, items, prompt: "private prompt" });
+      finishRun(db, id, { state: "done", output: "private output", costUsd });
+      db.prepare("UPDATE agent_runs SET started_at = ?, ended_at = ? WHERE id = ?").run(at, at, id);
+      return id;
+    };
+    const own = [{ repo: "photocraft", number: 7 }];
+    const standalone = make("classify", own, "2026-01-01T01:00:00Z", null);
+    const review = make("review.opus", own, "2026-01-01T02:00:00Z", 0.25);
+    const mixed = make("review.opus", [...own, { repo: "pdfcraft", number: 1 }], "2026-01-01T03:00:00Z", 2);
+    const other = make("classify", [{ repo: "photocraft", number: 8 }], "2026-01-01T01:30:00Z", 3);
+    db.prepare("INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason) VALUES ('photocraft', 7, ?, '2026-01-01T04:00:00Z', 'opus', 'full', 'hold', 1, 'private reason')").run("a".repeat(40));
+    const read = async (role: "viewer" | "maintainer" | "operator") => {
+      const request = { ...req(7), user: { login: "reader", role, canWrite: async () => false, canRead: async (repo: string) => repo !== "pdfcraft" } };
+      const page = await itemPage(db, request);
+      assert.ok("timeline" in page);
+      return page.timeline;
+    };
+    const staff = await read("maintainer");
+    const calls = staff.flatMap((entry) => entry.calls);
+    assert.deepEqual(new Set(calls.map((call) => call.runId)), new Set([standalone, review]));
+    assert.equal(calls.find((call) => call.runId === standalone)?.costUsd, null);
+    assert.equal(calls.find((call) => call.runId === review)?.costUsd, 0.25);
+    assert.deepEqual(staff.find((entry) => entry.reviewId)?.calls.map((call) => call.runId), [review]);
+    assert.ok(!JSON.stringify(staff).includes("private prompt") && !JSON.stringify(staff).includes("private output"));
+    assert.deepEqual((await read("viewer")).flatMap((entry) => entry.calls), []);
+    const operatorIds = (await read("operator")).flatMap((entry) => entry.calls.map((call) => call.runId));
+    assert.ok(operatorIds.includes(mixed) && !operatorIds.includes(other));
+  } finally { db.close(); }
 });

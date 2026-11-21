@@ -25,6 +25,8 @@ export function useHotkeys(handlers: Handlers, enabled = true) {
     let timer = 0;
     const on = (e: KeyboardEvent) => {
       const name = keyName(e);
+      // A dialog owns the Escape it consumed; closing it must not also clear a list selection.
+      if (name === "escape" && e.defaultPrevented) return;
       if (typing(e.target) && name !== "escape" && name !== "mod+enter") return;
       if ((e.metaKey || e.ctrlKey || e.altKey) && name !== "mod+enter" && name !== "mod+k") return;
       const h = ref.current;

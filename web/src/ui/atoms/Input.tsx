@@ -14,8 +14,9 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input({ s
       aria-invalid={invalid || undefined}
       {...rest}
       className={cn(
-        "min-w-0 rounded border bg-sunken outline-none placeholder:text-ink/40 focus:border-accent/60 max-md:h-11",
-        size === "sm" ? "h-7 px-2 text-xs" : "h-8 px-2.5 text-sm",
+        // 16 px on phones: below that iOS zooms the page when an editable field takes focus.
+        "min-w-0 rounded border bg-sunken text-sm leading-5 outline-none placeholder:text-ink/40 focus:border-accent/60 disabled:opacity-60 max-md:h-11 max-md:text-[16px]",
+        size === "sm" ? "h-7 px-2 text-xs" : "h-8 px-2.5",
         invalid ? "border-bad/60" : "border-line",
         className,
       )}

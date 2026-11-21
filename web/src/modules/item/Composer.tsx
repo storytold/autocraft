@@ -4,6 +4,7 @@ import { markStarting } from "./starting";
 import { useApi } from "../../api/client";
 import type { Decision, DecisionChoices, RepoName } from "../../api/types";
 import { Button } from "../../ui/atoms/Button";
+import { Textarea } from "../../ui/atoms/Textarea";
 import { FeedbackBox } from "../decisions/FeedbackBox";
 import { localActions } from "../decisions/state";
 
@@ -56,8 +57,9 @@ export function Composer({ repo, number, operator, commenter, exists, pending, f
   if (operator)
     return (
       <div className={shell}>
-        <div className="flex flex-col gap-2 md:flex-row md:items-end">
-          <textarea
+        <div className="flex flex-col gap-2">
+          {/* The field keeps the bar's full width at every size; the actions wrap under it rather than squeezing it. */}
+          <Textarea
             id={COMPOSER_ID}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -67,14 +69,14 @@ export function Composer({ repo, number, operator, commenter, exists, pending, f
             rows={2}
             placeholder={exists ? "Reply to Opus" : "Ask Opus about this item"}
             aria-label="Message to Opus"
-            className="block min-w-0 flex-1 resize-none rounded border border-line bg-sunken px-2.5 py-2 text-sm outline-none placeholder:text-ink/40 focus:border-accent/60"
+            className="max-h-40 resize-y"
           />
-          <div className="flex shrink-0 justify-end gap-2 md:flex-col md:gap-1.5">
-            <Button variant="primary" className="max-md:h-11" icon={PaperPlaneRightIcon} loading={sending} disabled={!draft.trim() || pending} onClick={() => void send(true)}>
-              Send
-            </Button>
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <Button variant="secondary" className="max-md:h-11" disabled={!draft.trim() || sending} onClick={() => void send(false)}>
               Post without Opus
+            </Button>
+            <Button variant="primary" className="max-md:h-11" icon={PaperPlaneRightIcon} loading={sending} disabled={!draft.trim() || pending} onClick={() => void send(true)}>
+              Send
             </Button>
           </div>
         </div>

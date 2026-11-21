@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { useSearchParams } from "react-router-dom";
+import { hasContinuation, nextCursor, pagesForScope, scopeString, scopedListKey, unwrapCursor } from "./list-scope";
 import { useApi, usePagedQuery, useQuery } from "../../api/client";
+import { usePageProject } from "../../api/scope";
+import { useUrlState } from "../../lib/hooks";
+import { readDecisionParam } from "./selection";
+import { parseScope } from "./needs-controls";
 import { useUser } from "../../shell/UserContext";
 import type { Decision, DecisionFilter, DecisionKind } from "../../api/types";
 
@@ -18,39 +22,111 @@ export const KINDS = Object.keys(KIND_LABEL) as DecisionKind[];
 /** The kinds the pipeline asks: a `backlog` decision is only ever answered, so it has no inbox filter. */
 export const ASKED_KINDS = KINDS.filter((k) => k !== "backlog");
 
-/** Filters live in the URL so a link reproduces the view. */
+/**
+ * Filters live in the URL so a link reproduces the view; `peek` is the preview selection, never part
+ * of the list's query key. Reads go through the shared live-URL hook (`lib/hooks.ts`), so a control
+ * follows the click rather than the router's transition, and the URL stays the one source of truth.
+ */
+/** The URL keys that are a cohort/filter change; a patch touching one also clears the selection. */
+const DOMAIN_KEYS = ["repo", "kind", "age", "all", "tab"] as const;
+
 export function useDecisionFilter() {
-  const [sp, setSp] = useSearchParams();
-  const filter: DecisionFilter = useMemo(
-    () => ({
-      repo: sp.get("repo")?.split(",").filter(Boolean),
-      kind: sp.get("kind")?.split(",").filter(Boolean) as DecisionKind[] | undefined,
-      minAge: sp.get("age") ? Number(sp.get("age")) : undefined,
-      all: sp.get("all") === "1",
-      status: sp.get("tab") === "answered" ? "answered" : sp.get("tab") === "backlog" ? "backlog" : sp.get("tab") === "snoozed" ? "snoozed" : sp.get("tab") === "opinions" ? "opinions" : "open",
-    }),
-    [sp],
-  );
-  const update = useCallback(
-    (patch: Record<string, string | null>) => {
-      const next = new URLSearchParams(sp);
-      for (const [k, v] of Object.entries(patch)) v ? next.set(k, v) : next.delete(k);
-      setSp(next, { replace: true });
-    },
-    [sp, setSp],
-  );
-  return { filter, update, search: sp.toString() };
+  const { search: live, update: rawUpdate } = useUrlState();
+  // One Needs-local cleanup owner: a recognised domain change appends decision:null, peek:null in the SAME
+  // transaction and passes the caller's options through unchanged. Selection/preview patches are not domain.
+  const update = useCallback((patch: Record<string, string | null>, opts?: { replace?: boolean }) => {
+    const domain = DOMAIN_KEYS.some((key) => key in patch);
+    rawUpdate(domain ? { ...patch, decision: null, peek: null } : patch, opts);
+  }, [rawUpdate]);
+  const params = useMemo(() => new URLSearchParams(live), [live]);
+  // ONE effective model for the request and for what the controls draw: the server's own arithmetic
+  // (positive fractional days apply, Infinity/number above the cap becomes 36500, NaN/non-positive is
+  // ignored, kinds are whitelisted). Invalid raw values stay in the URL but are never sent.
+  const filter: DecisionFilter = useMemo(() => {
+    const scope = parseScope(live, KINDS);
+    return {
+      repo: scope.repo.length ? scope.repo : undefined,
+      kind: scope.kind.length ? scope.kind : undefined,
+      minAge: scope.minAge,
+      all: scope.all,
+      status: params.get("tab") === "answered" ? "answered" : params.get("tab") === "backlog" ? "backlog" : params.get("tab") === "snoozed" ? "snoozed" : params.get("tab") === "opinions" ? "opinions" : "open",
+    };
+  }, [live, params]);
+  // Every URL key but `peek`: choosing a preview is not a filter, so it must not invalidate the list
+  // query, refetch its pages or reset "Load more".
+  // The list's query projection excludes the preview AND the selected decision: neither is a filter, so
+  // a selection must not refetch the list, reset its pages or add an observer.
+  const search = useMemo(() => {
+    const q = new URLSearchParams(params);
+    q.delete("peek");
+    q.delete("decision");
+    return q.toString();
+  }, [params]);
+  const peek = params.get("peek");
+  const setPeek = useCallback((id: string | null) => rawUpdate({ peek: id }), [rawUpdate]);
+  // The selected decision (a real opaque Decision.id). The raw URL value stays until the user closes it.
+  const decision = useMemo(() => readDecisionParam(live), [live]);
+  // Explicit activation/close pushes (Back reopens the detail); keyboard movement replaces. Clearing a
+  // lingering peek belongs to the SAME transaction, never a second decision entry.
+  const setDecision = useCallback((id: string | null, opts?: { clearPeek?: boolean; replace?: boolean }) => {
+    rawUpdate(opts?.clearPeek ? { decision: id, peek: null } : { decision: id }, { replace: opts?.replace ?? false });
+  }, [rawUpdate]);
+  const clearPeek = useCallback(() => rawUpdate({ peek: null }, { replace: true }), [rawUpdate]);
+  // A filter change: the open preview belongs to the old filter, so it closes with the change.
+  // Needs' View and scope controls push, so Back/Forward restore them; the
+  // shared hook's default stays replace for every other caller.
+  const setFilter = useCallback((patch: Record<string, string | null>, opts?: { replace?: boolean }) => update({ ...patch, peek: null }, opts), [update]);
+  return { filter, update, setFilter, search, peek, setPeek, decision, setDecision, clearPeek };
 }
 
 /** The loaded pages of the list; `loadMore` appends the next one. A change refetches every loaded page. */
+export type DecisionListQuery = ReturnType<typeof useDecisionList>;
+
 export function useDecisionList() {
   const { filter, search } = useDecisionFilter();
-  const q = usePagedQuery(`decisions?${search}`, (a, after) => a.decisions.list({ ...filter, after }), (p) => p.next, { keepPageMs: 30_000 });
-  const last = q.pages?.[q.pages.length - 1];
-  const all = useMemo(() => q.pages?.flatMap((p) => p.decisions), [q.pages]);
+  const user = useUser();
+  // The reader is part of what a page means: the same filter asked by another login or role is another
+  // list. The key keeps the `decisions?` prefix so live-topic invalidation still matches (api/topics.ts),
+  // and each loaded page carries a client-only receipt naming the scope it was fetched for.
+  const project = usePageProject();
+  const scope = useMemo(() => scopeString({ login: user.login, role: user.role, search, project }), [user.login, user.role, search, project]);
+  const q = usePagedQuery(
+    scopedListKey({ login: user.login, role: user.role, search, project }),
+    async (a, after) => {
+      // `undefined` is the first page. Anything else must be a continuation this scope minted: a
+      // malformed, foreign-scope or empty continuation fails closed HERE, before any request, so no
+      // other reader's or filter's page is read and no empty continuation is ever sent as a cursor.
+      const unwrapped = unwrapCursor(after, scope);
+      if (!unwrapped.ok) throw new Error(`invalid continuation (${unwrapped.reason})`);
+      const page = await a.decisions.list({ ...filter, after: unwrapped.cursor });
+      return { scope, page };
+    },
+    // Only a real, non-empty server cursor becomes a continuation; null/empty ends the list.
+    (receipt) => nextCursor(scope, receipt.page),
+    { keepPageMs: 30_000 },
+  );
+  // Only this scope's pages are exposed: a placeholder from the previous reader or filter is never shown,
+  // and nothing derived from it (counts, hasMore, actions) leaks while the new scope is unsettled.
+  const receipts = pagesForScope(q.pages, scope);
+  const pages = useMemo(() => receipts?.map((r) => r.page), [receipts]);
+  const all = useMemo(() => pages?.flatMap((p) => p.decisions), [pages]);
   const decisions = useFolded(all);
+  const last = pages?.[pages.length - 1];
   const data = last && { ...last, decisions: decisions ?? [] };
-  return { data, error: q.error, loading: q.loading, refetch: q.refetch, hasMore: q.hasMore, loadMore: q.loadMore, loadingMore: q.loadingMore };
+  const settled = pages !== undefined && !q.error;
+  const more = settled && hasContinuation(last);
+  return {
+    data,
+    readReceipts: receipts,
+    error: q.error,
+    loading: q.loading,
+    refetch: q.refetch,
+    hasMore: more,
+    // Gated on the CURRENT settled scope with a real continuation: no old/failed/placeholder page can
+    // start a fetch, and an empty or invalid continuation never reaches the API.
+    loadMore: useCallback(() => { if (more && !q.loadingMore) q.loadMore(); }, [more, q.loadingMore, q.loadMore]),
+    loadingMore: q.loadingMore,
+  };
 }
 
 // ---- view-local state shared by the list, detail and thread panels ----

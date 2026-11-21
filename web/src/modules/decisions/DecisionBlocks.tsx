@@ -55,44 +55,23 @@ function Section({ title, children }: { title: ReactNode; children: ReactNode })
 }
 
 /** Key facts, a batch's items and the details disclosures. */
-export function DecisionDetails({ d }: { d: Decision }) {
-  const isBatch = d.number === null;
-  return (
+export function DecisionDetails({ d, flat = false, canOverride = true }: { d: Decision; flat?: boolean; canOverride?: boolean }) {
+  const more = (
     <>
-      {d.facts.length > 0 && (
-        <Section title="Key facts">
-          <div className="rounded-md border border-line px-3 py-2.5">
-            <Facts facts={d.facts} repo={d.repo} />
-          </div>
-        </Section>
-      )}
-      {isBatch && (
-        <div className="mt-4">
-          <Disclosure title="Items" count={d.items.length} defaultOpen>
-            <BatchItems d={d} />
-          </Disclosure>
-        </div>
-      )}
-      <div className="mt-4">
-        <Disclosure title="Details">
       {d.context.length > 0 && (
-        <Disclosure title="Context">
+        <DetailSection flat={flat} title="Context">
           <div className="space-y-1 text-sm leading-6 text-ink/80">
-            {d.context.map((c, i) => (
-              <p key={i}>
-                <Refs text={c} repo={d.repo} />
-              </p>
-            ))}
+            {d.context.map((c, i) => <p key={i}><Refs text={c} repo={d.repo} /></p>)}
           </div>
-        </Disclosure>
+        </DetailSection>
       )}
       {d.publicText && (
-        <Disclosure title={d.kind === "merge" ? "Comment posted on GitHub if closed" : "Comment posted on GitHub"}>
+        <DetailSection flat={flat} title={d.kind === "merge" ? "Comment posted on GitHub if closed" : "Comment posted on GitHub"}>
           <blockquote className="whitespace-pre-wrap border-l-2 border-line-strong pl-3 text-sm leading-6 text-ink/75">{d.publicText}</blockquote>
-        </Disclosure>
+        </DetailSection>
       )}
       {d.optionTexts?.length > 0 && (
-        <Disclosure title="Comments posted on GitHub" defaultOpen>
+        <DetailSection flat={flat} title="Comments posted on GitHub" defaultOpen>
           <div className="space-y-3">
             {d.optionTexts.map((ot) => (
               <div key={ot.option}>
@@ -100,32 +79,38 @@ export function DecisionDetails({ d }: { d: Decision }) {
                 {ot.texts.length === 0 && <p className="text-sm text-ink/60">No comments.</p>}
                 {ot.texts.map((t) => (
                   <div key={`${t.number}:${t.step}`} className="mt-1">
-                    <div className="text-xs text-ink/50">
-                      {t.step === "suggestion" ? "If the branch cannot be pushed to, on" : "On"} #{t.number}
-                    </div>
+                    <div className="text-xs text-ink/50">{t.step === "suggestion" ? "If the branch cannot be pushed to, on" : "On"} #{t.number}</div>
                     <blockquote className="whitespace-pre-wrap border-l-2 border-line-strong pl-3 text-sm leading-6 text-ink/75">{t.text}</blockquote>
                   </div>
                 ))}
               </div>
             ))}
           </div>
-        </Disclosure>
+        </DetailSection>
       )}
-      <Disclosure title="Classifiers" count={d.classifications.length}>
-        <ClassifierLines d={d} />
-      </Disclosure>
-      {d.related.length > 0 && (
-        <Disclosure title="Related" count={d.related.length}>
-          <RelatedList d={d} />
-        </Disclosure>
+      <DetailSection flat={flat} title="Classifiers" count={d.classifications.length}><ClassifierLines d={d} /></DetailSection>
+      {d.related.length > 0 && <DetailSection flat={flat} title="Related" count={d.related.length}><RelatedList d={d} /></DetailSection>}
+    </>
+  );
+  return (
+    <>
+      {d.facts.length > 0 && <Section title="Key facts"><div className="rounded-md border border-line px-3 py-2.5"><Facts facts={d.facts} repo={d.repo} /></div></Section>}
+      {d.number === null && (
+        <div className="mt-4">
+          <DetailSection flat={flat} title="Items" count={d.items.length} defaultOpen><BatchItems d={d} canOverride={canOverride} /></DetailSection>
+        </div>
       )}
-        </Disclosure>
-      </div>
+      <div className="mt-4">{flat ? more : <Disclosure title="Details">{more}</Disclosure>}</div>
     </>
   );
 }
 
-function BatchItems({ d }: { d: Decision }) {
+/** A task already has its Evidence fold; other consumers keep their existing nested disclosures. */
+function DetailSection({ flat, title, count, defaultOpen, children }: { flat: boolean; title: string; count?: number; defaultOpen?: boolean; children: ReactNode }) {
+  return flat ? <Section title={<>{title}{count !== undefined ? ` (${count})` : ""}</>}>{children}</Section> : <Disclosure title={title} count={count} defaultOpen={defaultOpen}>{children}</Disclosure>;
+}
+
+function BatchItems({ d, canOverride }: { d: Decision; canOverride: boolean }) {
   const loc = useLocal();
   const ov = loc.overrides[d.id] ?? {};
   return (
@@ -135,7 +120,7 @@ function BatchItems({ d }: { d: Decision }) {
         return (
           <li key={ref} className="flex min-h-[34px] items-start gap-3 border-b border-line px-3 py-1.5 last:border-0">
             <ItemRef repo={it.repo} number={it.number} kind={it.kind} state={it.state} title={it.title} className="flex-1" />
-            <select
+            {canOverride && <select
               aria-label={`Answer for ${ref}`}
               value={ov[ref] ?? ""}
               onChange={(e) => localActions.setOverride(d.id, ref, e.target.value || null)}
@@ -147,7 +132,7 @@ function BatchItems({ d }: { d: Decision }) {
                   {o.label}
                 </option>
               ))}
-            </select>
+            </select>}
           </li>
         );
       })}

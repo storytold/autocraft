@@ -8,8 +8,7 @@ export function can(user: User, p: Permission): boolean {
   return user.writeRepos.includes(p.slice("write:".length));
 }
 
-/** Viewers are read-only; maintainers and operators leave comments and suggestions. */
-export const canComment = (user: User): boolean => user.role !== "viewer";
+export { canComment } from "./roles.ts";
 
 /** GitHub write on every repo involved, for an operator or a maintainer; whether the role settles a decision is the decision's `canSettle`. Everyone else leaves feedback. */
 export function canAct(user: User, repos: string[]): boolean {

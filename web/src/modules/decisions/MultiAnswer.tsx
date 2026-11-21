@@ -23,7 +23,7 @@ export function MultiAnswer({ ds, user }: { ds: Decision[]; user: User }) {
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[720px] px-6 pb-10 pt-5">
-          <h1 className="text-lg font-semibold">{same && operator ? `Answer ${ds.length} ${ds[0].kind} decisions together` : same ? `${ds.length} ${ds[0].kind} decisions selected` : "These decisions ask different questions"}</h1>
+          <h2 className="text-lg font-semibold">{same && operator ? `Answer ${ds.length} ${ds[0].kind} decisions together` : same ? `${ds.length} ${ds[0].kind} decisions selected` : "These decisions ask different questions"}</h2>
           <p className="mt-1 text-sm text-ink/60">{!operator ? "Open one decision to leave a comment." : same ? "One answer for all of them. Change single items afterwards from their own page." : "Select decisions of one kind to answer them together."}</p>
           <ul className="mt-4 overflow-hidden rounded-md border border-line">
             {ds.map((d) => (

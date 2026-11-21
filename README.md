@@ -44,6 +44,10 @@ The image is the dashboard's home page (mock data). Each column is a stage with 
 
 See [Trust boundary](docs/pipeline.md#trust-boundary).
 
+### Dashboard browsing
+
+The dashboard keeps project homes, the Live board and the project-scoped navigation picker. Items uses one filterable browser with read-only inline details; Needs you keeps its queue beside a focused question, answer controls and expandable Evidence, Discussion and the latest four supplied item events. That excerpt is not a full cross-decision history. Merge queue keeps its table, Queue items, weighted fast track, Recently merged and Steps. See [the UI design](docs/ui-design.md) for layouts and scope behavior.
+
 ## Setup
 
 ### Requirements

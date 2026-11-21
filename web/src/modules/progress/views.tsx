@@ -8,6 +8,7 @@ import type { ViewProps } from "../../registry/types";
 import { cn } from "../../ui/cn";
 import { day, num, pct } from "../../lib/format";
 import { DoneSplit, FunnelChart, OUTCOMES, Sparkline, StackBar, Throughput, DONE_PARTS } from "./charts";
+import { PageTitle } from "../../shell/PageHeader";
 import { useIsPhone } from "../../shell/useMedia";
 
 const doneTotal = (d: RepoProgress["done"]) => d.mergedByPipeline + d.closedByPipeline + d.closedByOthers;
@@ -50,7 +51,7 @@ export function Overview(_: ViewProps) {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-[1180px] px-4 pb-12 pt-5 md:px-6">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-          <h1 className="text-xl font-semibold">Progress</h1>
+          <PageTitle title="Progress" />
           <span className="text-sm text-ink/55">
             Tracking since {since} · {p.repos.length} repos
           </span>

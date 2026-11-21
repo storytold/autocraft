@@ -4,19 +4,18 @@ import { ArrowSquareOutIcon, ChatCircleIcon, CheckCircleIcon, GitMergeIcon, Gith
 import type { Icon } from "@phosphor-icons/react";
 import { Link } from "react-router-dom";
 import { useApi } from "../../../api/client";
-import type { Conversation, ItemPageData, OpusReviewEntry, ReviewVerdict, TimelineEntry } from "../../../api/types";
-import { Badge } from "../../../ui/atoms/Badge";
+import type { Conversation, ItemPageData, OpusReviewEntry, TimelineEntry } from "../../../api/types";
 import { Button } from "../../../ui/atoms/Button";
 import { ErrorLine } from "../../../ui/atoms/ErrorLine";
 import { ConfirmButton } from "../../../ui/molecules/ConfirmButton";
-import { ItemRef } from "../../../ui/molecules/ItemRef";
-import { Markdown } from "../../../ui/molecules/Markdown";
-import { RemoteVia } from "../../../ui/molecules/RemoteVia";
+import { HistoryCallDetail } from "./HistoryCallDetail";
+import { ExpandableText } from "../../../ui/molecules/ExpandableText";
+import { ReviewDetail } from "./ReviewDetail";
 import { StoryLine } from "../../../ui/molecules/StoryLine";
 import { cn } from "../../../ui/cn";
 import { clock, nowMs } from "../../../lib/format";
 import { formatCost } from "../../../lib/trace";
-import { githubBlobUrl, githubCommitUrl } from "../../../lib/links";
+import { githubCommitUrl } from "../../../lib/links";
 import { useUser } from "../../../shell/UserContext";
 import { canAct } from "../../../registry/permissions";
 import { localActions } from "../../decisions/state";
@@ -24,7 +23,6 @@ import { markStarting } from "../starting";
 import { useJump } from "./ItemPage";
 
 const ICON: Record<TimelineEntry["icon"], Icon> = { review: ListChecksIcon, fixup: WrenchIcon, merge: GitMergeIcon, push: UploadSimpleIcon, github: GithubLogoIcon, check: CheckCircleIcon, job: RobotIcon, chat: ChatCircleIcon, person: UserIcon };
-const TRIGGER: Record<string, string> = { "new-head": "new head", discussion: "discussion", operator: "asked by an operator", base: "base branch changed", "model-change": "model change" };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const dayKey = (iso: string) => {
   const d = new Date(iso);
@@ -34,7 +32,6 @@ const dateOf = (iso: string) => {
   const d = new Date(iso);
   return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 };
-const FOLD_CHARS = 500;
 const RUN_GAP_MS = 20 * 60_000;
 
 type Row = { t: "line"; e: TimelineEntry } | { t: "run"; es: TimelineEntry[] };
@@ -73,8 +70,9 @@ export function Story({ d, flash, conv }: { d: ItemPageData; flash: string | nul
     return show ? dateOf(at) : undefined;
   };
   return (
-    <section aria-label="What happened" className="px-4 pb-2 pt-3 md:px-6">
+    <section aria-label="What happened" className="px-4 pb-2 pt-4 md:px-5">
       {staff && d.costUsd > 0 && <p className="num mb-1 text-right text-xs text-ink/45">{formatCost(d.costUsd)} in all</p>}
+      {rows.length === 0 && <p className="pb-3 text-sm text-ink/50">No activity recorded yet.</p>}
       <ol>
         {rows.map((r) =>
           r.t === "line" ? (
@@ -89,11 +87,12 @@ export function Story({ d, flash, conv }: { d: ItemPageData; flash: string | nul
 }
 
 function Run({ es, d, conv, date, flash }: { es: TimelineEntry[]; d: ItemPageData; conv: Conversation | undefined; date?: string; flash: string | null }) {
-  const cost = es.reduce((s, e) => s + (e.costUsd ?? 0), 0);
+  const cost = useUser().role === "viewer" || !es.some((e) => e.costUsd != null)
+    ? null : formatCost(es.reduce((s, e) => s + (e.costUsd ?? 0), 0));
   const first = es[0]!, last = es[es.length - 1]!;
   const span = clock(first.at) === clock(last.at) ? clock(first.at) : `${clock(first.at)}–${clock(last.at)}`;
   const hit = flash !== null && es.some((e) => flash === `hist-${e.id}`);
-  const words = [`${es.length} steps`, span, formatCost(cost)].filter(Boolean).join(" · ");
+  const words = [`${es.length} steps`, span, cost].filter(Boolean).join(" · ");
   return (
     <StoryLine time={clock(first.at)} date={date} icon={RobotIcon} text={words} open={hit}>
       <ol className="border-l border-line pl-2">
@@ -159,17 +158,6 @@ function PreapprovalActions({ repo, number, p }: { repo: string; number: number;
   );
 }
 
-function Folded({ text, markdown }: { text: string; markdown: boolean }) {
-  const [all, setAll] = useState(text.length <= FOLD_CHARS);
-  const shown = all ? text : `${text.slice(0, FOLD_CHARS).trimEnd()}…`;
-  return (
-    <div className="max-w-prose leading-6 text-ink/85">
-      {markdown ? <Markdown source={shown} /> : <p className="whitespace-pre-wrap break-words">{shown}</p>}
-      {!all && <button onClick={() => setAll(true)} className="text-xs font-medium text-accent-ink hover:underline max-md:min-h-11">More</button>}
-    </div>
-  );
-}
-
 const linkCls = "inline-flex h-7 items-center gap-1 text-xs font-medium text-accent-ink hover:underline max-md:h-11";
 
 function Detail({ e, d, review, conv, operator }: { e: TimelineEntry; d: ItemPageData; review: OpusReviewEntry | null; conv: Conversation | undefined; operator: boolean }) {
@@ -178,11 +166,11 @@ function Detail({ e, d, review, conv, operator }: { e: TimelineEntry; d: ItemPag
   return (
     <div className="space-y-2 pt-0.5">
       {review && <ReviewDetail repo={d.repo} r={review} viewer={viewer} />}
-      {e.body && <Folded text={e.body} markdown={e.markdown} />}
+      {e.body && <ExpandableText text={e.body} markdown={e.markdown} />}
       {e.lines.length > 0 && <ul className="space-y-0.5 text-xs leading-5 text-ink/65">{e.lines.map((l, i) => <li key={i} className="break-words">{l}</li>)}</ul>}
-      {e.calls.length > 0 && (
+      {!viewer && e.calls.length > 0 && (
         <ul className="space-y-0.5 border-l border-line pl-3 text-xs text-ink/60">
-          {e.calls.map((c, i) => <li key={i} className="flex gap-2"><span className="min-w-0 flex-1">{c.label}{c.via && <RemoteVia via={c.via} className="ml-2" />}</span>{formatCost(c.costUsd) && <span className="num">{formatCost(c.costUsd)}</span>}</li>)}
+          {e.calls.map((c, i) => <li key={JSON.stringify([c.runId, i])}><HistoryCallDetail call={c} repo={d.repo} number={d.number} /></li>)}
         </ul>
       )}
       {e.feedback && <FeedbackActions e={e} d={d} conv={conv} operator={operator} />}
@@ -234,44 +222,4 @@ function FeedbackActions({ e, d, conv, operator }: { e: TimelineEntry; d: ItemPa
     </div>
   );
 }
-
-const VERDICT_LABEL: Record<ReviewVerdict, string> = { take: "Take", "take-fix": "Take with fixes", hold: "Hold", close: "Close" };
-
-function ReviewDetail({ repo, r, viewer }: { repo: string; r: OpusReviewEntry; viewer: boolean }) {
-  return (
-    <div className="space-y-2 text-sm">
-      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink/55">
-        <Badge>{VERDICT_LABEL[r.verdict]}</Badge>
-        <span>of <span className="code">{r.head}</span> ({r.current ? "current head" : "head has moved"})</span>
-        {r.why && <span>· {r.why} ({TRIGGER[r.trigger]})</span>}
-      </p>
-      {r.summary && <Folded text={r.summary} markdown={false} />}
-      {r.blockedBy.length > 0 && (
-        <div>
-          <div className="text-xs font-medium text-ink/65">Must land first</div>
-          <ul className="mt-1 space-y-1">{r.blockedBy.map((b) => <li key={`${b.repo}#${b.number}`}><ItemRef repo={b.repo} number={b.number} title={null} size="sm" /></li>)}</ul>
-        </div>
-      )}
-      {!viewer && r.fixes.length > 0 && <List title="Fixes" items={r.fixes} />}
-      {!viewer && r.risks.length > 0 && <List title="Risks" items={r.risks} />}
-      {!viewer && r.claims.length > 0 && (
-        <ul className="space-y-1.5">
-          {r.claims.map((c) => (
-            <li key={`${c.path}:${c.line}`} className="text-xs leading-5">
-              <a href={githubBlobUrl(repo, r.head, c.path, c.line)} target="_blank" rel="noopener noreferrer" className="code break-all text-accent-ink hover:underline">{c.path}:{c.line}</a>
-              <span className="text-ink/65"> {c.text}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-const List = ({ title, items }: { title: string; items: string[] }) => (
-  <div>
-    <div className="text-xs font-medium text-ink/65">{title}</div>
-    <ul className="mt-0.5 list-disc space-y-0.5 pl-5 text-ink/85">{items.map((i) => <li key={i}>{i}</li>)}</ul>
-  </div>
-);
 

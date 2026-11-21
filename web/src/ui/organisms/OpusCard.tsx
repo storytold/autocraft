@@ -2,13 +2,16 @@ import { useState } from "react";
 import { CheckIcon, HourglassIcon, SpinnerIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import type { CardEdit, ConversationCard } from "../../api/types";
 import { Button } from "../atoms/Button";
+import { Input } from "../atoms/Input";
+import { Textarea } from "../atoms/Textarea";
 import { TimeAgo } from "../atoms/TimeAgo";
 import { StepDraft } from "../molecules/StepDraft";
 import { QueuedPress } from "../molecules/QueuedPress";
 import { cn } from "../cn";
 import { safeHref } from "../safeHref";
 
-const area = "block w-full [field-sizing:content] max-h-[60vh] min-h-24 resize-none rounded border border-line bg-sunken px-2.5 py-2 text-sm leading-5 outline-none focus:border-accent/60";
+/** A draft's multi-line editor: the Textarea atom carries the field metrics, this only sizes it. */
+const area = "min-h-24 max-h-[60vh] resize-none [field-sizing:content]";
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /**
@@ -107,6 +110,7 @@ export function OpusCard({ card: a, operator, viewer, editInstructions = true, o
                   editing={isEditing("issue")}
                   onToggle={() => toggle("issue")}
                   disabled={locked}
+                  label="Issue"
                   preview={
                     <div className="border-l-2 border-line-strong pl-3 text-ink/75">
                       <p className="font-medium text-ink/90">{issue.title}</p>
@@ -114,9 +118,15 @@ export function OpusCard({ card: a, operator, viewer, editInstructions = true, o
                     </div>
                   }
                   editor={
-                    <div className="space-y-1.5">
-                      <input value={issue.title} maxLength={120} disabled={locked} onChange={(e) => setVals((v) => ({ ...v, issue: { ...issue, title: e.target.value } }))} aria-label="Issue title" className="block h-8 w-full rounded border border-line bg-sunken px-2.5 text-sm outline-none focus:border-accent/60 max-md:h-11" />
-                      <textarea value={issue.body} disabled={locked} onChange={(e) => setVals((v) => ({ ...v, issue: { ...issue, body: e.target.value } }))} rows={6} aria-label="Issue body" className={area} />
+                    <div className="space-y-2">
+                      <label className="block">
+                        <span className="mb-1 block text-2xs font-medium text-ink/60">Title</span>
+                        <Input value={issue.title} maxLength={120} disabled={locked} onChange={(e) => setVals((v) => ({ ...v, issue: { ...issue, title: e.target.value } }))} aria-label="Issue title" className="w-full" />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-2xs font-medium text-ink/60">Body</span>
+                        <Textarea value={issue.body} disabled={locked} onChange={(e) => setVals((v) => ({ ...v, issue: { ...issue, body: e.target.value } }))} rows={6} aria-label="Issue body" className={area} />
+                      </label>
                     </div>
                   }
                 />
@@ -127,8 +137,9 @@ export function OpusCard({ card: a, operator, viewer, editInstructions = true, o
                   onToggle={() => toggle("fixup")}
                   disabled={locked}
                   readOnly={!editInstructions}
+                  label="Fix-up"
                   preview={<blockquote className="whitespace-pre-wrap border-l-2 border-line-strong pl-3 text-ink/75">{instructions}</blockquote>}
-                  editor={<textarea value={instructions} maxLength={1500} disabled={locked} onChange={(e) => setVals((v) => ({ ...v, instructions: e.target.value }))} rows={5} aria-label="Fix-up instructions" className={area} />}
+                  editor={<Textarea value={instructions} maxLength={1500} disabled={locked} onChange={(e) => setVals((v) => ({ ...v, instructions: e.target.value }))} rows={5} aria-label="Fix-up instructions" className={area} />}
                 />
               )}
             </li>
@@ -138,14 +149,17 @@ export function OpusCard({ card: a, operator, viewer, editInstructions = true, o
       {resolution && proposed && <p className="mt-2 text-xs text-ink/60">{a.settles}</p>}
       {a.text !== undefined && a.state !== "dismissed" &&
         (isEditing("text") ? (
-          <textarea
-            value={text}
-            disabled={locked}
-            onChange={(e) => setVals((v) => ({ ...v, text: e.target.value }))}
-            rows={5}
-            aria-label="Comment text"
-            className={cn(area, "mt-2")}
-          />
+          <div className="mt-2">
+            <div className="mb-1 text-2xs font-medium text-ink/60">Comment</div>
+            <Textarea
+              value={text}
+              disabled={locked}
+              onChange={(e) => setVals((v) => ({ ...v, text: e.target.value }))}
+              rows={5}
+              aria-label="Comment text"
+              className={area}
+            />
+          </div>
         ) : (
           <blockquote className={cn("mt-2 whitespace-pre-wrap border-l-2 border-line-strong pl-3 leading-5 text-ink/75", resolution ? "text-sm" : "text-xs")}>{text}</blockquote>
         ))}

@@ -2,6 +2,7 @@ import { Navigate, useLocation } from "react-router-dom";
 import { useQuery } from "../../api/client";
 import type { DecisionKind } from "../../api/types";
 import type { ViewDef, ViewProps } from "../../registry/types";
+import { PageTitle } from "../../shell/PageHeader";
 import { Pending } from "../../ui/atoms/Pending";
 import { decisionPath, itemPath, parseDecisionRoute } from "../../lib/links";
 import { Refs } from "./Refs";
@@ -35,7 +36,8 @@ function DecisionRedirect({ params }: ViewProps) {
   if (!to.startsWith("/needs/decisions/")) return <Navigate to={withQuery(to, loc.search)} replace />;
   return (
     <div className="mx-auto max-w-[720px] px-4 py-6 md:px-6">
-      <h1 className="text-lg font-semibold">{d.title}</h1>
+      <PageTitle title="Decision" />
+      <h2 className="text-lg font-semibold">{d.title}</h2>
       <p className="mt-2 text-sm font-semibold">
         <Refs text={d.question} repo={d.repo} />
       </p>

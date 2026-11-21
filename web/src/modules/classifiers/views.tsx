@@ -5,6 +5,7 @@ import { Pending } from "../../ui/atoms/Pending";
 import type { Agreement, ClassifierReport } from "../../api/types";
 import type { ViewProps } from "../../registry/types";
 import { cn } from "../../ui/cn";
+import { PageTitle } from "../../shell/PageHeader";
 import { ItemRef } from "../../ui/molecules/ItemRef";
 import { day, num } from "../../lib/format";
 import { Block, RateBar, Select, Stat, Th, rate } from "../insight/parts";
@@ -168,7 +169,7 @@ export function Classifiers(_: ViewProps) {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-[1180px] px-4 pb-12 pt-5 md:px-6">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <h1 className="text-xl font-semibold">Classifiers</h1>
+          <PageTitle title="Classifiers" />
           <Select label="Run" value={r.run} onChange={(v) => set({ run: v, a: "", b: "", label: "", band: "" })} options={r.runs.map((x) => ({ value: x.id, label: `${x.id} · ${day(x.at)}` }))} />
           <Select
             label="Pair"

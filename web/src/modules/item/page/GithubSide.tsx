@@ -1,5 +1,5 @@
 // The GitHub side, drawn like GitHub's own sections. AutoCraft's writes carry a brand-blue edge, the identity they were made as, and a link to the run.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CheckCircleIcon, CircleNotchIcon, GitCommitIcon, GitMergeIcon, GithubLogoIcon, TagIcon, XCircleIcon, ChatCircleIcon, UploadSimpleIcon, EyeIcon, CircleIcon } from "@phosphor-icons/react";
 import type { CiState, GithubEvent, GithubTab, ItemPageData } from "../../../api/types";
 import { Avatar } from "../../../ui/atoms/Avatar";
@@ -16,6 +16,8 @@ const EVENT_ICON: Record<GithubEvent["type"], typeof TagIcon> = { opened: Circle
 export function GithubSide({ d, flash }: { d: ItemPageData; flash: string | null }) {
   const g = d.github;
   const [tab, setTab] = useState<GithubTab>("conversation");
+  const { request } = useJump();
+  useEffect(() => { if (request?.side === "github") setTab("conversation"); }, [request]);
   const isPr = d.kind === "pr";
   const tabs = TABS.filter(([k]) => isPr || k === "conversation");
   const counts: Record<GithubTab, number> = { conversation: g.events.length, commits: g.commits.length, checks: g.checks.length, files: g.files.length };

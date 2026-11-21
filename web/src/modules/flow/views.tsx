@@ -6,6 +6,7 @@ import { Dialog } from "radix-ui";
 import { useQuery } from "../../api/client";
 import type { Flow } from "../../api/types";
 import type { ViewProps } from "../../registry/types";
+import { PageTitle } from "../../shell/PageHeader";
 import { useMedia } from "../../shell/useMedia";
 import { RepoSelect } from "../../ui/molecules/RepoSelect";
 import { num } from "../../lib/format";
@@ -85,7 +86,7 @@ export function FlowView(_: ViewProps) {
         <div className="mx-auto max-w-[1400px] px-4 pb-12 pt-5 md:px-6">
           <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
             <div className="min-w-0 flex-1">
-              <h1 className="text-xl font-semibold">Pipeline flow</h1>
+              <PageTitle title="Pipeline flow" />
               {flow && (
                 <p className="mt-0.5 text-sm text-ink/55">
                   {num(open)} open items{repo ? ` in ${repo}` : ""} · last sync {flow.lastSync ? <><TimeAgo iso={flow.lastSync} /></> : "never"}

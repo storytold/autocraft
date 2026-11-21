@@ -540,7 +540,7 @@ export interface Query<T> {
  * previous data stays while a refetch is in flight so lists don't flash. `pollMs` is for views that
  * change without a database write (a log file being written); it runs only while the tab is visible.
  */
-export function useQuery<T>(key: string, fn: (api: Api) => Promise<T>, opts: { pollMs?: number | false | ((data: T | undefined) => number | false); enabled?: boolean; project?: string | null } = {}): Query<T> {
+export function useQuery<T>(key: string, fn: (api: Api) => Promise<T>, opts: { pollMs?: number | false | ((data: T | undefined) => number | false); enabled?: boolean; project?: string | null; gcTime?: number } = {}): Query<T> {
   const api = useApi();
   // The project (the page's unless `project` is given) is part of the key: the same view of another project is another entry.
   const page = usePageProject();
@@ -551,6 +551,7 @@ export function useQuery<T>(key: string, fn: (api: Api) => Promise<T>, opts: { p
     meta: { topics: topicsFor(key) },
     placeholderData: keepPreviousData,
     enabled: opts.enabled ?? true,
+    ...(opts.gcTime !== undefined ? { gcTime: opts.gcTime } : {}),
     refetchInterval: typeof opts.pollMs === "function" ? (query) => (opts.pollMs as (d: T | undefined) => number | false)(query.state.data) : opts.pollMs || false,
   });
   const { refetch } = q;

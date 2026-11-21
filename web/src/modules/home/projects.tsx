@@ -1,6 +1,7 @@
 // Projects: the start page. One tile per tracked repo, plus "All projects"; a tile picks that project and opens its home.
 import { ALL, isFirstPage, leftFirstPage, setScope, useScope } from "../../api/scope";
 import { projectPath } from "../../shell/ScopePicker";
+import { PageTitle } from "../../shell/PageHeader";
 import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { MagnifyingGlassIcon, SquaresFourIcon } from "@phosphor-icons/react";
@@ -87,7 +88,7 @@ export function ProjectsView(_: ViewProps) {
       <div className="mx-auto max-w-[1180px] px-4 pb-12 pt-5 md:px-6">
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <div>
-            <h1 className="text-xl font-semibold">Projects</h1>
+            <PageTitle title="Projects" />
             <p className="text-sm text-ink/55">Pick the repo to work on, or all of them.</p>
           </div>
           {tiles.length > 8 && (

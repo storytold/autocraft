@@ -9,6 +9,7 @@ import { can, roleLabel } from "../registry/permissions";
 import type { NavEntry, Permission, RouteDef } from "../registry/types";
 import { useUser } from "./UserContext";
 import { Workspace } from "./Workspace";
+import { PageHeaderProvider, ShellPageTitle } from "./PageHeader";
 import { useIsPhone } from "./useMedia";
 import { useTheme, type ThemePref } from "./theme";
 import { usePref } from "./layoutStorage";
@@ -42,6 +43,7 @@ const PHONE_TABS = ["/", "/next", "/needs", "/items"];
 export function AppShell() {
   useStalePickCleared();
   const user = useUser();
+  const location = useLocation();
   const phone = useIsPhone();
   const navigate = useNavigate();
   const [theme, setTheme] = useTheme();
@@ -55,7 +57,16 @@ export function AppShell() {
   const entries = visible.flatMap((m) => (m.nav ? [m.nav] : []));
   const rail = [{ label: "", entries: MAIN.flatMap((p) => entries.filter((e) => e.to === p)) }];
   const routes = visible.flatMap((m) => m.routes);
-  const hiddenPaths = useMemo(() => modules.filter((m) => !can(user, m.permission)).flatMap((m) => m.routes.map((r) => ({ path: r.path, permission: m.permission }))), [user]);
+  const hiddenPaths = useMemo(() => modules.filter((m) => !can(user, m.permission)).flatMap((m) => m.routes.map((r) => ({ path: r.path, permission: m.permission, title: r.view.title }))), [user]);
+  const active = routes.map((route) => ({ route, match: matchPath({ path: route.path === "/" ? "/" : `/${route.path}`, end: true }, location.pathname) })).find((r) => r.match);
+  const hidden = hiddenPaths.find((r) => matchPath({ path: `/${r.path}`, end: true }, location.pathname));
+  let fallbackTitle = active?.route.view.title ?? hidden?.title ?? "Not found";
+  if (active?.route.view.id === "item-page" && active.match) fallbackTitle = `Item · ${active.match.params.repo}#${active.match.params.number}`;
+  if (active?.route.view.id === "repo-detail" && active.match) fallbackTitle = active.match.params.name ?? "Repo";
+  if (active?.route.view.id === "batch" && active.match) fallbackTitle = `Batch #${active.match.params.id}`;
+  if (active?.route.view.id === "security-scan" && active.match) fallbackTitle = `Scan ${active.match.params.id}`;
+  const titleScope = `${user.login}:${user.role}:${location.pathname}`;
+  const frame = (children: ReactNode) => <PageHeaderProvider scope={titleScope} fallback={fallbackTitle}>{children}</PageHeaderProvider>;
 
   useHotkeys({
     "/": () => (phone ? setSearchOpen(true) : document.getElementById("global-search")?.focus()),
@@ -88,23 +99,28 @@ export function AppShell() {
   );
 
   if (phone) {
-    return (
+    return frame(
       <div className="flex h-full flex-col bg-panel">
-        <header className="flex h-12 shrink-0 items-center gap-1 border-b border-line bg-bg pl-1 pr-1.5">
-          <button id="nav-toggle" aria-label="Open navigation" onClick={() => setNavOpen(true)} className="flex size-11 shrink-0 items-center justify-center text-ink/70">
-            <ListIcon className="text-[20px]" />
-          </button>
-          <NavLink to="/" aria-label="AutoCraft home" className="flex size-11 shrink-0 items-center justify-center"><Logo size={20} /></NavLink>
-          <div className="flex-1" />
-          <MainCiDots />
-          <LiveDot />
-          <HealthMenu />
-          <button aria-label="Search" onClick={() => setSearchOpen(true)} className="flex size-11 items-center justify-center text-ink/70">
-            <MagnifyingGlassIcon className="text-[18px]" />
-          </button>
-          <UserMenu theme={theme} setTheme={setTheme} onHelp={() => setHelp(true)} />
+        <header className="shrink-0 border-b border-line bg-bg" data-page-header>
+          <div className="flex h-12 items-center gap-1 pl-1 pr-1.5">
+            <button id="nav-toggle" aria-label="Open navigation" onClick={() => setNavOpen(true)} className="flex size-11 shrink-0 items-center justify-center text-ink/70">
+              <ListIcon className="text-[20px]" />
+            </button>
+            <div className="flex-1" />
+            <MainCiDots />
+            <LiveDot />
+            <HealthMenu />
+            <button aria-label="Search" onClick={() => setSearchOpen(true)} className="flex size-11 items-center justify-center text-ink/70">
+              <MagnifyingGlassIcon className="text-[18px]" />
+            </button>
+            <UserMenu theme={theme} setTheme={setTheme} onHelp={() => setHelp(true)} />
+          </div>
+          <div className="flex min-h-10 items-center gap-2 px-4 pb-2">
+            <NavLink to="/" aria-label="AutoCraft home" className="flex size-6 shrink-0 items-center justify-center"><Logo size={20} /></NavLink>
+            <ShellPageTitle />
+          </div>
         </header>
-        <main className="min-h-0 flex-1">{content}</main>
+        <main className="min-h-0 flex-1" aria-labelledby="page-title">{content}</main>
         <PhoneTabs rail={rail} />
         <NavDrawer open={navOpen} onOpenChange={setNavOpen} rail={rail} />
         <Dialog.Root open={searchOpen} onOpenChange={setSearchOpen}>
@@ -124,7 +140,7 @@ export function AppShell() {
     );
   }
 
-  return (
+  return frame(
     <div className="flex h-full bg-bg">
       <aside className={cn("flex shrink-0 flex-col border-r border-line bg-bg transition-[width] duration-base ease-out", railOpen ? "w-[220px]" : "w-[52px]")}>
         <div className={cn("flex h-11 shrink-0 items-center px-4", !railOpen && "justify-center px-0")}>{railOpen ? <Wordmark /> : <Logo size={20} />}</div>
@@ -149,8 +165,9 @@ export function AppShell() {
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-11 shrink-0 items-center gap-2 border-b border-line bg-bg pl-4 pr-2">
-          <div className="mx-auto w-full max-w-[440px]">
+        <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-3 border-b border-line bg-bg py-2 pl-5 pr-2 lg:flex-nowrap" data-page-header>
+          <div className="min-w-0 basis-full shrink-0 lg:max-w-[42%] lg:basis-auto"><ShellPageTitle /></div>
+          <div className="ml-auto min-w-[140px] max-w-[440px] flex-1">
             <SearchBox />
           </div>
           <MainCiDots />
@@ -158,7 +175,7 @@ export function AppShell() {
           <HealthMenu />
           <UserMenu theme={theme} setTheme={setTheme} onHelp={() => setHelp(true)} />
         </header>
-        <main className="min-h-0 flex-1 bg-panel">{content}</main>
+        <main className="min-h-0 flex-1 bg-panel" aria-labelledby="page-title">{content}</main>
       </div>
       <ShortcutSheet open={help} onOpenChange={setHelp} />
     </div>

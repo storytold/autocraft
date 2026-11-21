@@ -17,6 +17,7 @@ import { FINDING_STATE, SCAN_TEST, SEVERITY } from "../../lib/security";
 import { formatCost } from "../../lib/trace";
 import { findingPath, githubBlobUrl } from "../../lib/links";
 import { useUser } from "../../shell/UserContext";
+import { PageTitle } from "../../shell/PageHeader";
 import { useIsPhone } from "../../shell/useMedia";
 import type { ViewProps } from "../../registry/types";
 import { safeHref } from "../../ui/safeHref";
@@ -104,13 +105,14 @@ export function FindingPageView({ params }: ViewProps) {
   );
   return (
     <div className={cn("flex min-h-0 flex-col", "h-full", phone && "overflow-y-auto")}>
+      <PageTitle title={`${repo} finding ${n}`} />
       <header className="shrink-0 border-b border-line px-4 pb-3 pt-3 md:px-6">
         <Link to="/security" className="inline-flex h-7 items-center gap-1 text-xs text-ink/60 hover:text-ink max-md:h-11"><ArrowLeftIcon /> Security</Link>
-        <h1 className="mt-1 text-lg font-semibold leading-6 md:text-xl md:leading-7">
+        <h2 className="mt-1 text-lg font-semibold leading-6 md:text-xl md:leading-7">
           <ShieldWarningIcon className="mr-2 inline-block align-[-2px] text-bad" />
           <span className="code mr-2 text-ink/60">{f.repo} finding {f.number}</span>
           {f.title}
-        </h1>
+        </h2>
         <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-ink/55">
           <Badge tone={sev.tone}>{sev.label}</Badge>
           <Badge tone={st.tone}>{st.label}</Badge>

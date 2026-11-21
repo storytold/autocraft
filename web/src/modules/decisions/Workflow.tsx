@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Decision, User } from "../../api/types";
 import { Button } from "../../ui/atoms/Button";
+import { Input } from "../../ui/atoms/Input";
 import { Kbd } from "../../ui/atoms/Kbd";
 import { cn } from "../../ui/cn";
 import { canActOn } from "./access";
@@ -134,8 +135,12 @@ export function WorkflowBox({
             );
           })}
         </div>
-        <label className={cn("mt-2 flex h-8 min-w-0 items-center gap-2 rounded border border-line bg-sunken px-2.5 focus-within:border-accent/60 max-md:h-11")}>
-          <input
+        <label className="mt-2 block">
+          <span className="mb-1 flex items-baseline justify-between gap-2 text-2xs font-medium text-ink/60">
+            <span>Note <span className="font-normal text-ink/45">optional</span></span>
+            {!phone && <Kbd keys="n" />}
+          </span>
+          <Input
             ref={noteRef}
             value={loc.notes[d.id] ?? ""}
             onChange={(e) => localActions.setNote(d.id, e.target.value)}
@@ -144,9 +149,8 @@ export function WorkflowBox({
             }}
             placeholder="Note, kept with the answer (optional)"
             aria-label="Note"
-            className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-ink/40"
+            className="w-full"
           />
-          {!phone && <Kbd keys="n" />}
         </label>
         <Button
           variant="primary"

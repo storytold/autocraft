@@ -1,8 +1,23 @@
 import { useQuery } from "../../api/client";
-import { useNavProject } from "../../api/scope";
+import { useNavProject, usePageProject } from "../../api/scope";
+import type { NeedsPage } from "../../api/types";
+import { useUser } from "../../shell/UserContext";
 
-/** Counts for the tabs and the stopped rows; one cache entry for the toolbar, the badge and the Stopped tab. */
-export const useSummary = () => useQuery("needs:summary", (api) => api.needs({}));
+/** A summary receipt is specific to both its reader and the effective project. */
+function useProjectSummary(project: string | null) {
+  const user = useUser();
+  const scope = JSON.stringify([user.login, user.role, project]);
+  const query = useQuery(`needs:summary:${scope}`, async (api): Promise<{ scope: string; page: NeedsPage }> => ({ scope, page: await api.needs({}) }), { project, gcTime: 0 });
+  const receipt = !query.error && query.data?.scope === scope ? query.data.page : undefined;
+  return { ...query, data: receipt, loading: query.loading || (!receipt && !query.error) };
+}
 
-/** The summary for the navigation badge: the page's project, or the pick where the page has none. */
-export const useNavSummary = () => useQuery("needs:summary", (api) => api.needs({}), { project: useNavProject() });
+/** Page tabs and stopped rows follow the copied list URL, not a different saved pick. */
+export function useSummary() {
+  return useProjectSummary(usePageProject());
+}
+
+/** The badge counts the project its navigation link opens, including on an unscoped page. */
+export function useNavSummary() {
+  return useProjectSummary(useNavProject());
+}
