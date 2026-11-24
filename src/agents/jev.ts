@@ -17,7 +17,7 @@ import { deleteSetting, setting, writeSetting } from "../settings-read.ts";
 export const JEV_ENABLED_KEY = "jev_enabled";
 export const JEV_UNAVAILABLE_KEY = "jev_unavailable";
 /** How long after the last account failure the next pass tries Jev again. */
-export const JEV_RETRY_MS = 60 * 60_000;
+export const JEV_RETRY_MS = 5 * 60_000;
 
 /** Consecutive Jev runs recorded as an unreadable answer that count as an outage. */
 export const JEV_UNREADABLE_LIMIT = 20;
@@ -130,8 +130,11 @@ export function jevFailure(r: { code: number | null; stderr: string }): { kind: 
   const line = r.stderr.split("\n").find((l) => l.startsWith("jev: ")) ?? "";
   const status = /API error status=(\d+)/.exec(line)?.[1];
   // With a status, the status decides: a 429 "quota" or a 503 "insufficient capacity" is not an account problem.
-  if (status !== undefined) return status === "402" ? { kind: "account", reason: "out of credit" } : status === "401" || status === "403" ? { kind: "account", reason: "key rejected" } : null;
-  if (/credit|balance|billing|payment|insufficient|quota/i.test(line)) return { kind: "account", reason: "out of credit" };
+  if (status !== undefined && !/^2\d\d$/.test(status)) return status === "402" ? { kind: "account", reason: "out of credit" } : status === "401" || status === "403" ? { kind: "account", reason: "key rejected" } : null;
+  if (/rate.?limit|too many requests|quota exceeded|insufficient capacity/i.test(line)) return null;
+  if (/\b(out of credits?|insufficient (credit|credits|balance|funds)|billing|payment required)\b/i.test(line)) {
+    return { kind: "account", reason: line.replace(/^jev:\s*/i, "").slice(0, 120) || "out of credit" };
+  }
   if (/api key/i.test(line)) return { kind: "account", reason: "key rejected" };
   return null;
 }

@@ -99,13 +99,19 @@ export function JevLine({ operator }: { operator: boolean }) {
   const q = useQuery<JevStatus>("accounts-jev", (a) => a.accounts.jev());
   if (!q.data) return <ErrorLine error={q.error?.message} />;
   const { enabled, unavailable } = q.data;
+  const jevBusy = write.busy === "jev" || write.busy === "jev-retry";
   return (
     <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
       <span className="text-ink/60">
         {unavailable ? `Jev unavailable (${unavailable.reason}) since ${clock(unavailable.since)} — Haiku does Jev's work` : "Jev in use"}
       </span>
+      {operator && enabled && unavailable && (
+        <Button variant="secondary" size="sm" disabled={jevBusy} loading={write.busy === "jev-retry"} onClick={() => void write.run("jev-retry", () => api.accounts.setJev({ enabled: true })).then((ok) => ok && q.refetch())} className="max-md:h-11">
+          Retry Jev now
+        </Button>
+      )}
       {operator && (
-        <Button variant="secondary" size="sm" loading={write.busy === "jev"} onClick={() => void write.run("jev", () => api.accounts.setJev({ enabled: !enabled })).then((ok) => ok && q.refetch())} className="max-md:h-11">
+        <Button variant="secondary" size="sm" disabled={jevBusy} loading={write.busy === "jev"} onClick={() => void write.run("jev", () => api.accounts.setJev({ enabled: !enabled })).then((ok) => ok && q.refetch())} className="max-md:h-11">
           {enabled ? "Turn Jev off" : "Turn Jev on"}
         </Button>
       )}

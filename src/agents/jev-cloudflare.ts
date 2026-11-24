@@ -59,7 +59,7 @@ export async function askJevCloudflare(cfg: JevCloudflareConfig, body: string, t
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { return { code: 0, stdout: text, stderr: "" }; }
   const env = parsed as { result?: unknown; success?: boolean; errors?: { message?: string }[] } | null;
-  if (env && typeof env === "object" && "success" in env && env.success === false) return fail(1, null, (env.errors ?? []).map((x) => x.message).filter(Boolean).join("; ").slice(0, 200) || "request failed");
+  if (env && typeof env === "object" && "success" in env && env.success === false) return fail(1, res.ok ? null : res.status, (env.errors ?? []).map((x) => x.message).filter(Boolean).join("; ").slice(0, 200) || "request failed");
   const outer = env && typeof env === "object" && "result" in env && env.result && typeof env.result === "object" ? env.result as Record<string, unknown> : parsed as Record<string, unknown>;
   // Workers AI may wrap the model's own reply in a second envelope, `{ state, result: { answers, usage } }`.
   const inner = "state" in outer && outer.result && typeof outer.result === "object" ? outer.result as Record<string, unknown> : outer;
