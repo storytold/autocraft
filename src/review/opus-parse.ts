@@ -7,7 +7,7 @@ import type { PostmergeReviewRow, RelatedItem } from "../postmerge/parse.ts";
 import type { LintProblem } from "../replylint.ts";
 import { safePath } from "../fixup/patch.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
-import { dropMarkup } from "./public-text.ts";
+import { codeParts, dropMarkup } from "./public-text.ts";
 
 export type EarlierOpus = { head: string; verdict: string; sure: boolean; reason: string; fixes: { file: string; change: string }[] };
 
@@ -127,20 +127,62 @@ export type Claim = { claim: string; status: ClaimStatus; evidence: string; impa
 export const MAX_CLAIMS = 12;
 export const CLAIM_CHARS = 300;
 export const CLAIM_EVIDENCE_CHARS = 600;
-/**
- * A claim's evidence names code as `path:line`. The path is repo-relative with a directory or has a known source extension, and
- * does not follow a scheme or a `/` ("v2.0:1" and URLs do not count). Groups: path, line.
- */
-export const EVIDENCE_AT = /(?<![\w./:-])((?:[\w.-]+\/)+[\w.-]+\.\w+|[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|py|go|java|kt|swift|c|h|cpp|cs|rb|php|sql|json|toml|ya?ml|md|css|html|sh)):(\d+)/;
-/** The `path:line` an evidence text names, or null: a path of EVIDENCE_AT, or one of the PR's changed `files` (which may have no directory or listed extension). */
-export function evidenceAt(evidence: string, files: readonly string[] = []): { path: string; line: number } | null {
-  const m = EVIDENCE_AT.exec(evidence);
-  if (m) return { path: m[1]!, line: Number(m[2]) };
-  for (const f of files) {
-    const k = new RegExp(`(?<![\\w./:-])${f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:(\\d+)`).exec(evidence);
-    if (k) return { path: f, line: Number(k[1]) };
+// Without a delimiter, require a directory, a recognizable root filename, or a known changed file.
+// A code span delimits paths with spaces or punctuation without guessing where the prose ends.
+const PATH_CHAR = String.raw`[\p{L}\p{M}\p{N}_@+.-]`;
+const PATH_WORD = String.raw`${PATH_CHAR}+`;
+const PATH_PART = String.raw`${PATH_WORD}(?: +${PATH_WORD})*`;
+const ROOT_EXTENSION = "ts|tsx|js|jsx|mjs|cjs|rs|py|go|java|kt|swift|c|h|cpp|cs|rb|php|sql|json|toml|ya?ml|md|css|html|sh";
+const NESTED_OR_DOT_PATH = String.raw`/?${PATH_WORD}/(?:${PATH_PART}/)*${PATH_PART}|/?\.[\p{L}_]${PATH_CHAR}*`;
+// With a checkout, the filesystem can distinguish an unfamiliar extension from a missing file.
+const FILE_EXTENSION = String.raw`[\p{L}][\p{L}\p{M}\p{N}_-]*`;
+const LINE_TOKEN = String.raw`[+-]?\d+(?:\.\d+|[\p{L}\p{M}_][\p{L}\p{M}\p{N}_]*)?`;
+type ClaimLocation = { path: string; line: number };
+export type ClaimLocationCheck = (location: ClaimLocation) => boolean;
+
+const MAX_CITATION_SCAN_CHARS = 16_000;
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+function citation(path: string, line: string): ClaimLocation {
+  return { path: path.replace(/^\/repo\//, ""), line: /^\d+$/.test(line) ? Number(line) : NaN };
+}
+
+function* evidenceLocations(evidence: string, files: readonly string[], withCheckout = false): Generator<ClaimLocation, void> {
+  // An overlong reply remains unverified. Scanning only a prefix could miss a citation.
+  if (evidence.length > MAX_CITATION_SCAN_CHARS) return;
+  const known = files.filter((path) => evidence.includes(`${path}:`))
+    .sort((a, b) => b.length - a.length)
+    .map((path) => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const extension = withCheckout ? FILE_EXTENSION : ROOT_EXTENSION;
+  const rootPath = String.raw`/?${PATH_WORD}\.(?:${extension})`;
+  const bare = [...known, NESTED_OR_DOT_PATH, rootPath].join("|");
+  const pattern = new RegExp(String.raw`(?<![\p{L}\p{M}\p{N}_@+./:-])(${bare}):(${LINE_TOKEN})`, "gu");
+
+  for (const [i, part] of codeParts(evidence).entries()) {
+    if (i % 2 === 1) {
+      // Code fences are examples. An inline code span is one literal path:line candidate.
+      if (/^ {0,3}(?:`{3,}|~{3,})[^\n]*\n/.test(part)) continue;
+      const ticks = /^`+/.exec(part)?.[0].length ?? 0;
+      const text = part.slice(ticks, -ticks).trim();
+      const colon = text.lastIndexOf(":");
+      if (colon < 0 || URL_SCHEME.test(text)) continue;
+      const line = text.slice(colon + 1);
+      if (/^[+-]?\d/.test(line)) yield citation(text.slice(0, colon), line);
+      continue;
+    }
+
+    // The Markdown parser leaves an unclosed span in prose. Its contents should not become bare citations.
+    const unclosed = /(?:^|[^\\])(?:\\\\)*`/.exec(part);
+    const end = unclosed ? unclosed.index + unclosed[0].length - 1 : part.length;
+    for (const match of part.slice(0, end).matchAll(pattern)) yield citation(match[1]!, match[2]!);
+    if (unclosed && /:[+-]?\d/.test(part.slice(end))) yield { path: "", line: NaN };
   }
-  return null;
+}
+
+/** The first repository-relative citation, including changed files without a familiar extension. */
+function evidenceAt(evidence: string, files: readonly string[] = []): ClaimLocation | null {
+  const first = evidenceLocations(evidence, files).next();
+  return first.done ? null : first.value;
 }
 const SANDBOX_PREFIX = new RegExp(`(^|[^\\w./-])${REPO_PATH}/`, "g");
 /** The model reads the repository at the sandbox path; the posted text names repo-relative paths. */
@@ -155,37 +197,58 @@ export type ParsedClaims = {
   claims: Claim[];
   /** The position of each claim in the reply's array. */
   indexes: number[];
+  /** The location for a pre-merge finding, in the same order as claims. */
+  findingLocations: (ClaimLocation | null)[];
   /** Entries that are not a claim (no text, unknown status, not an object) and entries past MAX_CLAIMS: the claims list was not fully read. */
   rejected: number;
+  /** Claim fixes withheld because their citations did not resolve. */
+  withheldFixes: NonNullable<Claim["fix"]>[];
 };
 
 /**
  * The `claims` of a reply, or null when it is not an array. Every valid entry is returned, so each one reaches the verdict:
  * it needs a claim and a status. Entries that are not valid, and those past MAX_CLAIMS, are counted in `rejected`.
  * Every claim needs file:line evidence: without it a "verified" counts as unverified and any impact is "unknown", so a claim is
- * only settled when the model points at code. A contradicted or unverified claim carries the model's `impact` judgment; a missing
+ * only settled when the model points at code. With a checkout, every citation must also resolve there.
+ * A contradicted or unverified claim carries the model's `impact` judgment; a missing
  * or invalid one is "unknown". Status and impact are judged on the evidence as written; the returned texts are the ones that
  * are stored and posted: a text that mentions the reference documentation or is in `drop` is replaced by a neutral line
  * (`keep`: leave them, for the lint). Evidence and fix files are repo-relative; a fix with an unsafe path is dropped.
  */
-export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), keep = false, files: readonly string[] = []): ParsedClaims | null {
+export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), keep = false, files: readonly string[] = [], checkLocation?: ClaimLocationCheck): ParsedClaims | null {
   if (!Array.isArray(v)) return null;
-  const out: ParsedClaims = { claims: [], indexes: [], rejected: Math.max(0, v.length - MAX_CLAIMS) };
+  const out: ParsedClaims = { claims: [], indexes: [], findingLocations: [], rejected: Math.max(0, v.length - MAX_CLAIMS), withheldFixes: [] };
   v.slice(0, MAX_CLAIMS).forEach((x, index) => {
     const o = x as Record<string, unknown> | null;
     const text = o && typeof o === "object" && typeof o.claim === "string" ? squashText(stripSandboxPath(o.claim)).slice(0, CLAIM_CHARS) : "";
     if (!o || !text || (o.status !== "verified" && o.status !== "contradicted" && o.status !== "unverified")) { out.rejected++; return; }
-    const proof = typeof o.evidence === "string" ? squashText(stripSandboxPath(o.evidence)).slice(0, CLAIM_EVIDENCE_CHARS) : "";
+    const fullProof = typeof o.evidence === "string" ? o.evidence : "";
+    const displayProof = squashText(stripSandboxPath(fullProof));
+    const prefix = displayProof.slice(0, CLAIM_EVIDENCE_CHARS);
+    // A clipped line number can look like a different, valid location.
+    const proof = /\S/.test(displayProof[CLAIM_EVIDENCE_CHARS] ?? "") ? prefix.replace(/\S+$/, "").trimEnd() : prefix;
     const claim = !keep && (REFERENCE_LEAK.test(text) || drop.has(text)) ? NEUTRAL_CLAIM : text;
     const evidence = !keep && (REFERENCE_LEAK.test(proof) || drop.has(proof)) ? NEUTRAL_EVIDENCE : proof;
-    const status: ClaimStatus = o.status === "verified" && !evidenceAt(proof, files) ? "unverified" : o.status;
+    const locations = evidenceLocations(checkLocation ? fullProof : proof, files, !!checkLocation);
+    const first = locations.next();
+    const supported = !first.done && (checkLocation
+      ? checkLocation(first.value) && [...locations].every(checkLocation)
+      : safePath(first.value.path) && Number.isSafeInteger(first.value.line) && first.value.line > 0);
+    const status: ClaimStatus = !supported && (o.status === "verified" || checkLocation) ? "unverified" : o.status;
     const f = o.fix as { file?: unknown; change?: unknown } | null | undefined;
-    const file = f && typeof f === "object" && typeof f.file === "string" ? stripSandboxPath(f.file.trim()) : "";
+    const file = f && typeof f === "object" && typeof f.file === "string" ? fixFile(f.file) : "";
     const fix = f && typeof f === "object" && typeof f.change === "string" && f.change.trim() && !drop.has(f.change) && safePath(file) && !REFERENCE_LEAK.test(file + f.change)
       ? { file: file.slice(0, 200), change: f.change.trim().slice(0, 800) } : undefined;
+    if (checkLocation && !supported && o.status !== "verified" && o.impact === "code-wrong" && fix) out.withheldFixes.push(fix);
     out.indexes.push(index);
+    const impact: ClaimImpact = supported && (o.impact === "code-wrong" || o.impact === "description-only") ? o.impact : "unknown";
+    let findingLocation: ClaimLocation | null = null;
+    if (status !== "verified" && impact === "code-wrong" && evidence !== NEUTRAL_EVIDENCE) {
+      const at = checkLocation && !first.done ? first.value : evidenceAt(evidence, files);
+      if (at && safePath(at.path) && !REFERENCE_LEAK.test(at.path) && dropMarkup(at.path) === at.path) findingLocation = at;
+    }
+    out.findingLocations.push(findingLocation);
     if (status === "verified") { out.claims.push({ claim, status, evidence }); return; }
-    const impact: ClaimImpact = evidenceAt(proof, files) && (o.impact === "code-wrong" || o.impact === "description-only") ? o.impact : "unknown";
     out.claims.push(fix && impact === "code-wrong" ? { claim, status, evidence, impact, fix } : { claim, status, evidence, impact });
   });
   return out;
@@ -217,6 +280,7 @@ export function parsePublic(v: unknown, drop: ReadonlySet<string> = new Set()): 
 
 export const OPUS_REASON_WORDS = 60;
 export const OPUS_MAX_FIXES = 20;
+const fixFile = (file: string): string => stripSandboxPath(file.trim()).replace(/^\.\//, "");
 const words = (s: string, n: number) => s.trim().split(/\s+/).slice(0, n).join(" ");
 
 /** The reply's one JSON object (a one-element array is read too), or null. */
@@ -234,7 +298,7 @@ function replyObject(text: string): unknown {
  * `claims` list for a PR with a body (`body`), makes a take or take-fix unsure.
  * `files`: the PR's changed files, accepted as evidence paths. `drop`: see parsePublic. `keepLeaky`: keep fixes that mention the reference (the lint checks validity this way, so the fix turn can handle them; the stored review always drops them).
  */
-export function parseOpusReply(text: string, ref: string, last = true, drop: ReadonlySet<string> = new Set(), keepLeaky = false, known: readonly OwnerStatement[] = [], body = "", files: readonly string[] = []): OpusReview | null {
+export function parseOpusReply(text: string, ref: string, last = true, drop: ReadonlySet<string> = new Set(), keepLeaky = false, known: readonly OwnerStatement[] = [], body = "", files: readonly string[] = [], checkLocation?: ClaimLocationCheck): OpusReview | null {
   const o = replyObject(text);
   if (!o || typeof o !== "object") return null;
   const r = o as Record<string, unknown>;
@@ -242,20 +306,23 @@ export function parseOpusReply(text: string, ref: string, last = true, drop: Rea
   const verdict = r.verdict;
   if (typeof verdict !== "string" || !(VERDICTS as readonly string[]).includes(verdict)) return null;
   if (typeof r.reason !== "string" || !r.reason.trim() || typeof r.sure !== "boolean") return null;
+  const parsed = parseClaims(r.claims, drop, keepLeaky, files, checkLocation), listed = parsed?.claims ?? [];
   const fixes = (Array.isArray(r.fixes) ? r.fixes : [])
-    .map((f) => (f && typeof f.file === "string" && typeof f.change === "string" ? { file: stripSandboxPath(f.file.trim()).replace(/^\.\//, ""), change: f.change } : null))
+    .map((f) => (f && typeof f.file === "string" && typeof f.change === "string" ? { file: fixFile(f.file), change: f.change } : null))
     .filter((f): f is { file: string; change: string } => !!f && safePath(f.file) && !!f.change.trim() && !drop.has(f.change) && (keepLeaky || (!REFERENCE_LEAK.test(f.file) && !REFERENCE_LEAK.test(f.change))))
-    .slice(0, OPUS_MAX_FIXES).map((f) => ({ file: f.file.slice(0, 200), change: f.change.slice(0, 800) }));
+    .slice(0, OPUS_MAX_FIXES)
+    .filter((f) => !parsed?.withheldFixes.some((fix) => fix.file === f.file.slice(0, 200) && fix.change === f.change.trim().slice(0, 800)))
+    .map((f) => ({ file: f.file.slice(0, 200), change: f.change.slice(0, 800) }));
   const risks = Array.isArray(r.risks) ? r.risks.filter((x): x is string => typeof x === "string").slice(0, 8).map((x) => x.slice(0, 300)) : [];
   const summary = proseField(r.summary, SUMMARY_MAX_WORDS, last), why = proseField(r.why, WHY_MAX_WORDS, last);
   if (!summary.ok || !why.ok) return null;
-  const parsed = parseClaims(r.claims, drop, keepLeaky, files), listed = parsed?.claims ?? [];
   // Every valid claim reaches the verdict; only the texts stored and posted are cleaned. A list that was not fully read leaves the review unsure.
   const bad = listed.filter((c) => c.impact === "code-wrong"), unknownClaim = listed.find((c) => c.impact === "unknown");
-  // A take-fix needs a fix: its own list, or the fix of every claim that shows wrong code.
-  if (verdict === "take-fix" && !fixes.length && !(bad.length && bad.every((c) => c.fix))) return null;
+  // A take-fix needs a fix. If citation checking withheld it, keep the review for an operator.
+  const noFix = verdict === "take-fix" && !fixes.length && !(bad.length && bad.every((c) => c.fix));
+  if (noFix && !parsed?.withheldFixes.length) return null;
   const unproven = parsed === null ? !!body.trim() : parsed.rejected > 0 || !!unknownClaim;
-  let outVerdict = verdict as ReviewVerdict, outFixes = verdict === "take-fix" ? fixes : [], outReason = r.reason, sure = r.sure;
+  let outVerdict = (noFix ? "take" : verdict) as ReviewVerdict, outFixes = verdict === "take-fix" ? fixes : [], outReason = r.reason, sure = r.sure;
   const notes: string[] = [];
   if (bad.length && (outVerdict === "take" || outVerdict === "take-fix")) {
     const withFix = bad.filter((c) => c.fix);

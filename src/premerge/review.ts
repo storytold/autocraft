@@ -131,7 +131,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
       const dir = referenceDir(repo);
       const semantic: SemanticDeps | undefined = dir ? deps.semantic ?? defaultSemanticDeps(db, ref) : undefined;
       const r = await runModelStep(db, PREMERGE_OPUS, input, {
-        model: deps.model, checkout, reference: checkout ? dir : undefined, ctx: { dir, semantic },
+        model: deps.model, checkout, reference: checkout ? dir : undefined, ctx: { dir, semantic, checkout },
         usage: { run: runId, agent: `premerge-${ref.replace("#", "-")}`, stage: "premerge", items: (ok) => (ok ? 1 : 0) },
         onReply: (reply) => { if (reply.fixTurn) log(`  ${ref}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
       });

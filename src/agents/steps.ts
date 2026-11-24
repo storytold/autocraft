@@ -11,6 +11,7 @@ import type { ReferenceLintInput } from "../replylint.ts";
 import type { ClaudeStep, JevStep, TieredStep } from "./step.ts";
 import { parseRefereeReply, type Referee } from "../classify/parse.ts";
 import { lintOpusReply, parseOpusReply, publicTexts as opusTexts, rawReason, type OpusPr, type OpusReview } from "../review/opus-parse.ts";
+import { checkoutClaimLocation } from "../review/citation-check.ts";
 import { lintPremerge, parsePremerge, premergeTexts, type PremergeReview } from "../premerge/parse.ts";
 import { lintReply, parseFindings, publicTexts as postmergeTexts, type Finding, type PostmergePr } from "../postmerge/parse.ts";
 import { commentTexts } from "../conversations/cards.ts";
@@ -161,11 +162,12 @@ export const REFERENCE_HAIKU: ClaudeStep<ReferenceLintInput[], boolean> = {
 
 /** What the reference lint of a public-text reply needs: the repo's reference folder (absent: no check) and the semantic check. */
 export type ReferenceCtx = { dir: string | undefined; semantic: SemanticDeps | undefined };
+type ReviewCtx = ReferenceCtx & { checkout?: string };
 
 // A reply that is not valid is lint-free: it keeps the whole-call retry. Problems of a valid one go back to the model as one fix turn.
 // Whatever the lint still finds after it is left out (reference text) or cut to its first sentence (long summary or why); the call is never repeated for it.
 export type OpusValue = { review: OpusReview; text: string };
-export const REVIEW_OPUS: ClaudeStep<OpusPr, OpusValue, ReferenceCtx> = {
+export const REVIEW_OPUS: ClaudeStep<OpusPr, OpusValue, ReviewCtx> = {
   provider: "claude", id: "review.opus",
   toPrompt: (x) => [x], size: () => 1,
   lint: { fields: ["summary", "why", "public texts", "claims", "fixes"], make: (x, c) => async (text, stage) => {
@@ -175,14 +177,14 @@ export const REVIEW_OPUS: ClaudeStep<OpusPr, OpusValue, ReferenceCtx> = {
     const texts = opusTexts(text), stated = statementProblems(texts, x.statements);
     return [...own, ...stated, ...await referenceProblems(texts, c.dir, c.semantic, { stage, otherProblems: own.length + stated.length })];
   } },
-  parse: async (text, x, ctx) => {
-    const review = parseOpusReply(text, x.ref, true, dropTexts(ctx.problems), false, x.statements, x.body, x.files);
+  parse: async (text, x, ctx, { checkout }) => {
+    const review = parseOpusReply(text, x.ref, true, dropTexts(ctx.problems), false, x.statements, x.body, x.files, checkout ? checkoutClaimLocation(checkout) : undefined);
     return review === null ? null : { value: { review, text } };
   },
 };
 export { rawReason };
 
-export const PREMERGE_OPUS: ClaudeStep<OpusPr & { ref: string }, PremergeReview, ReferenceCtx> = {
+export const PREMERGE_OPUS: ClaudeStep<OpusPr & { ref: string }, PremergeReview, ReviewCtx> = {
   provider: "claude", id: "premerge.opus",
   toPrompt: (x) => [x], size: () => 1,
   lint: { fields: ["findings", "claims"], make: (x, c) => async (text, stage) => {
@@ -192,17 +194,23 @@ export const PREMERGE_OPUS: ClaudeStep<OpusPr & { ref: string }, PremergeReview,
     const texts = premergeTexts(text, x.ref), stated = statementProblems(texts, x.statements);
     return [...own, ...stated, ...await referenceProblems(texts, c.dir, c.semantic, { stage, otherProblems: own.length + stated.length })];
   } },
-  parse: async (text, x, ctx) => { const r = parsePremerge(text, x.ref, dropTexts(ctx.problems), x.statements, x.body, x.files); return r === null ? null : { value: r }; },
+  parse: async (text, x, ctx, { checkout }) => {
+    const r = parsePremerge(text, x.ref, dropTexts(ctx.problems), x.statements, x.body, x.files, checkout ? checkoutClaimLocation(checkout) : undefined);
+    return r === null ? null : { value: r };
+  },
 };
 
-export const POSTMERGE_OPUS: ClaudeStep<PostmergePr, Finding[], ReferenceCtx> = {
+export const POSTMERGE_OPUS: ClaudeStep<PostmergePr, Finding[], ReviewCtx> = {
   provider: "claude", id: "postmerge.opus",
   toPrompt: (x) => [x], size: () => 1,
   lint: { fields: ["findings", "claims"], make: (_x, c) => async (text, stage) => {
     const own = lintReply(text);
     return own === null ? null : [...own, ...await referenceProblems(postmergeTexts(text), c.dir, c.semantic, { stage, otherProblems: own.length })];
   } },
-  parse: async (text, _x, ctx) => { const r = parseFindings(text, dropTexts(ctx.problems)); return r === null ? null : { value: r }; },
+  parse: async (text, _x, ctx, { checkout }) => {
+    const r = parseFindings(text, dropTexts(ctx.problems), checkout ? checkoutClaimLocation(checkout) : undefined);
+    return r === null ? null : { value: r };
+  },
 };
 
 /** Comment cards are public text: a reference mention or quote goes back to the model as one fix turn. A reply without text is not linted and keeps the whole-call retry. */

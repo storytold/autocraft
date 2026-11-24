@@ -407,6 +407,8 @@ export type PostmergeFiling =
   | { state: "stale" }
   /** The text names the product or the pipeline's account. */
   | { state: "refused" }
+  /** The cited line could not be found in the merge checkout. */
+  | { state: "unverified-citation" }
   /** Never filed automatically: `earlier` follow-ups of the PR exist, or `fix`: the PR itself fixes a follow-up issue. */
   | { state: "held"; reason: "earlier" | "fix" };
 

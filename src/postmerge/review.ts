@@ -143,7 +143,7 @@ export async function runPostmerge(db: Db, params: PostmergeParams, log: (line: 
     const dir = referenceDir(repo);
     const semantic = dir ? deps.semantic ?? defaultSemanticDeps(db, input.ref) : undefined;
     const r = await runModelStep(db, POSTMERGE_OPUS, input, {
-      model: deps.model, checkout, reference: checkout ? dir : undefined, ctx: { dir, semantic },
+      model: deps.model, checkout, reference: checkout ? dir : undefined, ctx: { dir, semantic, checkout },
       usage: { run: runId, agent: `postmerge-${refOf(c).replace("#", "-")}`, stage: "postmerge", items: (ok) => (ok ? 1 : 0) },
       onReply: (reply) => { if (reply.fixTurn) log(`  ${refOf(c)}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
     });

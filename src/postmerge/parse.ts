@@ -1,7 +1,7 @@
 // Post-merge review prompt input and reply validation. No I/O and no Node imports: the prompt
 // registry (also loaded by the web mockup) imports this file.
 import type { LintProblem } from "../replylint.ts";
-import { REFERENCE_LEAK } from "../review/opus-parse.ts";
+import { REFERENCE_LEAK, type ClaimLocationCheck } from "../review/opus-parse.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 
 export const SEVERITIES = ["defect", "minor"] as const;
@@ -10,6 +10,7 @@ export type Severity = (typeof SEVERITIES)[number];
 export const MAX_FINDINGS = 12;
 export const TITLE_CHARS = 120;
 export const BODY_CHARS = 2000;
+const FILE_CHARS = 300;
 /** The merged diff's size cap in characters, as for review.opus. */
 export const MAX_MERGED_DIFF_CHARS = 120_000;
 
@@ -20,6 +21,8 @@ export type Finding = {
   body: string;
   file: string | null;
   line: number | null;
+  /** Internal: the cited location could not be found in the merge checkout. */
+  citationUnverified?: true;
   /** The number of an open issue or PR that already covers the finding. */
   duplicate_of: number | null;
   /** Internal: the stage that should have caught it, and why it did not. */
@@ -72,7 +75,7 @@ function replyObject(text: string): Record<string, unknown> | null {
  * valid severity, title or body is dropped. `drop`: public texts the reply lint still flagged after the fix turn; a finding
  * with such a title or body is left out like one that mentions the reference documentation.
  */
-export function parseFindings(text: string, drop: ReadonlySet<string> = new Set()): Finding[] | null {
+export function parseFindings(text: string, drop: ReadonlySet<string> = new Set(), checkLocation?: ClaimLocationCheck): Finding[] | null {
   const o = replyObject(text);
   if (!o || !Array.isArray(o.findings)) return null;
   const out: Finding[] = [];
@@ -85,8 +88,13 @@ export function parseFindings(text: string, drop: ReadonlySet<string> = new Set(
     if (REFERENCE_LEAK.test(title) || REFERENCE_LEAK.test(body) || drop.has(f.title as string) || drop.has(f.body as string)) { console.log("post-merge finding dropped: its public text mentions the reference documentation"); continue; }
     const dup = typeof f.duplicate_of === "number" && Number.isInteger(f.duplicate_of) && f.duplicate_of > 0 ? f.duplicate_of : null;
     const line = typeof f.line === "number" && Number.isInteger(f.line) && f.line > 0 ? f.line : null;
+    const reportedFile = typeof f.file === "string" ? f.file.trim() : "";
+    const path = checkLocation ? reportedFile.replace(/^\/repo\//, "") : reportedFile;
+    const file = (checkLocation && path.length > FILE_CHARS ? null : path.slice(0, FILE_CHARS)) || null;
+    const unverified = checkLocation && f.line != null && (line === null || !file || !checkLocation({ path: file, line }));
     out.push({
-      severity, title, body, file: str(f.file, 300) || null, line, duplicate_of: dup,
+      severity, title, body, file, line, duplicate_of: dup,
+      ...(unverified ? { citationUnverified: true } : {}),
       missed_by: clean(str(f.missed_by, 80)), missed_why: clean(str(f.missed_why, 400)),
     });
   }

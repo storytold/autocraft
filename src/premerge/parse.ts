@@ -3,7 +3,7 @@
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { safePath } from "../fixup/patch.ts";
 import type { LintProblem } from "../replylint.ts";
-import { evidenceAt, OPUS_MAX_FIXES, REFERENCE_LEAK, parseClaims, type Claim, parseStatementConflicts, type StatementConflict, type OwnerStatement } from "../review/opus-parse.ts";
+import { OPUS_MAX_FIXES, REFERENCE_LEAK, parseClaims, type Claim, type ClaimLocationCheck, type ParsedClaims, parseStatementConflicts, type StatementConflict, type OwnerStatement } from "../review/opus-parse.ts";
 import type { PremergeFinding } from "./types.ts";
 
 export const PREMERGE_MAX_FINDINGS = 30;
@@ -49,14 +49,15 @@ function entries(text: string, ref: string): { entries: Entry[]; searched: strin
 }
 
 /** The defects that claims make: the ones whose code is wrong. */
-function claimFindings(claims: Claim[], files: readonly string[]): PremergeFinding[] {
-  return claims.filter((c) => c.impact === "code-wrong").map((c) => {
-    const at = evidenceAt(c.evidence, files), file = at && safePath(at.path) ? at.path : "(description)";
-    return {
-      severity: "defect" as const, file, line: at && file !== "(description)" ? at.line : 0,
+function claimFindings(parsed: ParsedClaims | null): PremergeFinding[] {
+  return (parsed?.claims ?? []).flatMap((c, i) => {
+    if (c.impact !== "code-wrong") return [];
+    const at = parsed?.findingLocations[i];
+    return [{
+      severity: "defect" as const, file: at?.path ?? "(description)", line: at?.line ?? 0,
       title: `Claim shows wrong code: ${c.claim}`.slice(0, PREMERGE_TITLE_CHARS),
       scenario: `The claim "${c.claim}" is ${c.status} and the code is wrong. ${c.evidence}`.slice(0, PREMERGE_SCENARIO_CHARS),
-    };
+    }];
   });
 }
 
@@ -70,7 +71,7 @@ const leaks = (...s: string[]) => s.some((x) => REFERENCE_LEAK.test(x));
  * Claims: a claim of the title or body with impact "code-wrong" is a defect finding of its own. An "unknown" impact, or a missing
  * `claims` list when `body` is not empty, is no finding: it sets `unsure`, which sends the PR to a person. "description-only" is shown only.
  */
-export function parsePremerge(text: string, ref: string, drop: ReadonlySet<string> = new Set(), known: readonly OwnerStatement[] = [], body = "", files: readonly string[] = []): PremergeReview | null {
+export function parsePremerge(text: string, ref: string, drop: ReadonlySet<string> = new Set(), known: readonly OwnerStatement[] = [], body = "", files: readonly string[] = [], checkLocation?: ClaimLocationCheck): PremergeReview | null {
   const r = entries(text, ref);
   if (!r) return null;
   const findings: PremergeFinding[] = [];
@@ -82,9 +83,9 @@ export function parsePremerge(text: string, ref: string, drop: ReadonlySet<strin
   }
   // A dropped fix does not free its place under the cap: the cap counts the fixes the model offered.
   // Every valid claim reaches the findings and `unsure`; only the stored and posted texts are cleaned. A list that was not fully read is unsure.
-  const parsed = parseClaims((replyObject(text) ?? {}).claims, drop, false, files), claims = parsed?.claims ?? [];
+  const parsed = parseClaims((replyObject(text) ?? {}).claims, drop, false, files, checkLocation), claims = parsed?.claims ?? [];
   const unsure = parsed === null ? !!body.trim() : parsed.rejected > 0 || claims.some((c) => c.impact === "unknown");
-  return { unsure, claims, findings: [...claimFindings(claims, files), ...findings].slice(0, PREMERGE_MAX_FINDINGS), searched: r.searched, conflicts: parseStatementConflicts(r.conflicts, known) };
+  return { unsure, claims, findings: [...claimFindings(parsed), ...findings].slice(0, PREMERGE_MAX_FINDINGS), searched: r.searched, conflicts: parseStatementConflicts(r.conflicts, known) };
 }
 
 /** The reference mentions in a valid reply that the model can fix itself; null when the reply is not valid. */

@@ -167,6 +167,7 @@ export async function fileFinding(db: Db, ref: string, index: number, log: (line
   const f = r.findings[index];
   if (!f) throw new Error(`${ref} has no finding ${index}; its review has ${r.findings.length} (counted from 0)`);
   if (f.severity !== "defect") throw new Error(`finding ${index} of ${ref} is minor; only defects are filed`);
+  if (f.citationUnverified) throw new Error(`finding ${index} of ${ref} cites a location that could not be verified at the merge commit`);
   if (!await commentApprovalOf(db, repo)) throw new Error(`commenting in ${repo} is not approved`);
   if (await isQuiet(db, repo, number)) throw new Error(`${ref} is a quiet pull request: its fix is not public yet, so no issue is filed about it`);
   if (!await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("one")).where((eb) => pilotExprFor(db, eb, eb.val(repo), eb.cast<number>(eb.val(number), "bigint"))))) throw new Error(`${ref} is outside the pipeline's scope (pipeline flag or pilot)`);

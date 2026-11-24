@@ -26,6 +26,7 @@ export async function postmergeOf(db: Db, repo: string, n: number, staff: boolea
     else if (row?.state === "skipped-stale") filing = { state: "stale" };
     else if (row?.state === "skipped-text") filing = { state: "refused" };
     else if (row?.state === "failed") filing = { state: "failed", attempts: row.attempts };
+    else if (f.citationUnverified) filing = { state: "unverified-citation" };
     else if (held) filing = { state: "held", reason: held };
     else filing = row?.state === "skipped-limit" ? { state: "limit" } : { state: "pending" };
     return {

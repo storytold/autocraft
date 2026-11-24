@@ -121,7 +121,7 @@ export async function pendingDefects(db: Db, repo?: string, now = Date.now()): P
     if (await heldBy(prFollowups, async () => fixes(r.repo, r.number), r.at)) continue;
     const have = prFollowups.filter((x) => x.review_at === r.at);
     parseStored(r.findings).forEach((f, i) => {
-      if (f.severity !== "defect" || f.duplicate_of !== null) return;
+      if (f.severity !== "defect" || f.duplicate_of !== null || f.citationUnverified) return;
       const row = have.find((x) => x.finding === i);
       if (row && row.state !== "skipped-limit" && !retryDue(row, now)) return;
       out.push({ repo: r.repo, number: r.number, review_at: r.at, finding: i, f, model: r.model, attempts: row?.attempts ?? 0 });

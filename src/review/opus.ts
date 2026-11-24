@@ -310,7 +310,7 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
     const dir = referenceDir(repo);
     const semantic = dir ? deps.semantic ?? defaultSemanticDeps(db, input.ref) : undefined;
     const r = await runModelStep(db, REVIEW_OPUS, input, {
-      model: deps.model, checkout, reference: checkout ? dir : undefined, ctx: { dir, semantic },
+      model: deps.model, checkout, reference: checkout ? dir : undefined, ctx: { dir, semantic, checkout },
       usage: { run: runId, agent: `opus-${refOf(c).replace("#", "-")}`, stage: "review", items: (ok) => (ok ? 1 : 0) },
       onReply: (reply) => {
         if (reply.fixTurn) log(`  ${refOf(c)}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`);
