@@ -115,6 +115,7 @@ Rules:
 - The AutoCraft side shows the open question with its answer form and any held or disputed answers, then the History (open by default) and the composer. Model-call and tool details load when opened.
 - The GitHub side sits beside the AutoCraft side from 1024 px and below it from 768 px. Phones show one side at a time with an AutoCraft/GitHub switch; viewers start on GitHub.
 - A link to `#decision-…`, `#hist-…` or `#gh-…` opens the side and the section that hold the target, then scrolls to it.
+- The back link returns to the Needs you queue the item was opened from (its filters and selection, carried in history state) and reads "Needs you"; any other arrival, including a shared link, reads "Items" and goes to `/items`.
 
 ## 5. Extensibility
 

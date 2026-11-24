@@ -1,7 +1,7 @@
 // The item page: a status line, then "In AutoCraft" beside "On GitHub" (stacked on narrow screens, a segmented control on phones).
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
-import { ArrowLeftIcon, ArrowSquareOutIcon, ChatsCircleIcon } from "@phosphor-icons/react";
+import { useLocation } from "react-router-dom";
+import { ArrowSquareOutIcon, ChatsCircleIcon } from "@phosphor-icons/react";
 import { useQuery } from "../../../api/client";
 import type { ItemPageData, Tier } from "../../../api/types";
 import type { ViewProps } from "../../../registry/types";
@@ -18,6 +18,7 @@ import { GithubSide } from "./GithubSide";
 import { revealWhenReady } from "../../../lib/revealElement";
 import { ItemMenu } from "./ItemMenu";
 import { StatusBar } from "./StatusBar";
+import { BackLink } from "../BackLink";
 import { safeHref } from "../../../ui/safeHref";
 
 type Side = "autocraft" | "github";
@@ -125,7 +126,7 @@ function Header({ d }: { d: ItemPageData }) {
   return (
     <header className="px-4 pb-5 pt-4 md:px-8 md:pb-6 md:pt-6">
       <div className="flex items-center gap-2 text-xs text-ink/60">
-        <Link to="/items" className="inline-flex h-7 items-center gap-1 hover:text-ink max-md:h-11"><ArrowLeftIcon /> Items</Link>
+        <BackLink className="inline-flex h-7 items-center gap-1 hover:text-ink max-md:h-11" />
       </div>
       <div className="mt-1 flex flex-wrap items-start gap-3">
         <div className="min-w-0 basis-full md:basis-0 md:flex-1">

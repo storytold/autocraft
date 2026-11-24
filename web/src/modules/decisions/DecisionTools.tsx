@@ -3,6 +3,8 @@
 // is the same component the row used to carry: the item links, the queue badge, opinions, the claim,
 // the dispute, the write's state, Undo, Preview and the explicit Review-and-answer CTA.
 import type { Decision, User } from "../../api/types";
+import { useLocation } from "react-router-dom";
+import { fromState } from "../../lib/links";
 import { ItemRef } from "../../ui/molecules/ItemRef";
 import { QueueBadge } from "../../ui/molecules/QueueBadge";
 import { Button } from "../../ui/atoms/Button";
@@ -33,11 +35,12 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
   const canReview = canActOn(user, [d]) && !d.answer && !d.preparing && !d.queued && !d.settling;
   const mine = d.opinions.find((o) => o.login === user.login)?.option;
   const checked = new Set(loc.checked);
+  const here = useLocation();
   return <div id={id} className="shrink-0 border-b border-line bg-sunken/60 px-3.5 py-3 text-xs">
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
       <span className="text-ink/80">
         {d.number !== null
-          ? <ItemRef repo={d.repo} number={d.number} kind={d.shown?.kind} state={d.shown?.state} title={null} />
+          ? <ItemRef repo={d.repo} number={d.number} kind={d.shown?.kind} state={d.shown?.state} title={null} linkState={fromState(here.pathname + here.search)} />
           : <span className="code">{d.repo} · {d.items.length} {d.items.length === 1 ? "item" : "items"}</span>}
       </span>
       <span className="text-ink/60">{KIND_TEXT[d.kind]}</span>

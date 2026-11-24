@@ -4,7 +4,8 @@
 import type { ReactNode } from "react";
 import { useQuery } from "../../api/client";
 import type { Decision } from "../../api/types";
-import { decisionPath } from "../../lib/links";
+import { decisionPath, fromState } from "../../lib/links";
+import { useLocation } from "react-router-dom";
 import { useItemPreview } from "../../lib/useItemPreview";
 import { useUser } from "../../shell/UserContext";
 import { ErrorLine } from "../../ui/atoms/ErrorLine";
@@ -135,12 +136,14 @@ export function DecisionPreview({ peek, query, onClose }: { peek: string; query:
   const loading = !d && !one.error && (query.loading || missing);
   const selection = d && d.number !== null ? { repo: d.repo, number: d.number } : null;
   const item = useItemPreview(selection);
+  const here = useLocation();
   return (
     <ItemPreview
       data={item.data}
       loading={item.loading}
       error={item.error}
       href={d ? decisionPath(d) : undefined}
+      linkState={fromState(here.pathname + here.search)}
       label={d ? (d.number === null ? `${d.repo} · ${d.items.length} items` : `${d.repo}#${d.number}`) : undefined}
       onClose={onClose}
     >
