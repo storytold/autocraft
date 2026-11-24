@@ -120,18 +120,38 @@ export function EditForm({ a, onDone }: { a: ClaudeAccount; onDone: () => void }
   const [label, setLabel] = useState(a.label);
   const [enabled, setEnabled] = useState(a.enabled);
   const [max, setMax] = useState(String(a.maxConcurrent));
+  const [five, setFive] = useState(String(a.pause.fiveHour));
+  const [week, setWeek] = useState(String(a.pause.weekly));
+  const [useGlobal, setUseGlobal] = useState(!a.pauseCustom);
   useEffect(() => {
     setLabel(a.label);
     setEnabled(a.enabled);
     setMax(String(a.maxConcurrent));
+    setFive(String(a.pause.fiveHour));
+    setWeek(String(a.pause.weekly));
+    setUseGlobal(!a.pauseCustom);
   }, [a]);
-  const valid = label.trim() !== "" && /^\d{1,3}$/.test(max) && Number(max) >= 1 && Number(max) <= 100;
+  const valid =
+    label.trim() !== "" &&
+    /^\d{1,3}$/.test(max) &&
+    Number(max) >= 1 &&
+    Number(max) <= 100 &&
+    (useGlobal || (validLevel(five) && validLevel(week)));
   return (
     <form
       className="mt-3 flex flex-wrap items-end gap-3 border-t border-line pt-3"
       onSubmit={(e) => {
         e.preventDefault();
-        void write.run("save", () => api.accounts.update(a.id, { label: label.trim(), enabled, maxConcurrent: Number(max) })).then((ok) => ok && onDone());
+        void write
+          .run("save", () =>
+            api.accounts.update(a.id, {
+              label: label.trim(),
+              enabled,
+              maxConcurrent: Number(max),
+              pause: useGlobal ? null : { fiveHour: Number(five), weekly: Number(week) },
+            }),
+          )
+          .then((ok) => ok && onDone());
       }}
     >
       <label className="flex flex-col gap-1 text-xs text-ink/60">
@@ -141,6 +161,18 @@ export function EditForm({ a, onDone }: { a: ClaudeAccount; onDone: () => void }
       <label className="flex flex-col gap-1 text-xs text-ink/60">
         Max concurrent (1 to 100)
         <TextInput inputMode="numeric" value={max} onChange={(e) => setMax(e.target.value)} className="w-24 text-ink" />
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-ink/60">
+        5-hour pause % (1 to 100)
+        <TextInput inputMode="numeric" value={five} disabled={useGlobal} onChange={(e) => setFive(e.target.value)} className="w-24 text-ink disabled:opacity-50" />
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-ink/60">
+        Weekly pause % (1 to 100)
+        <TextInput inputMode="numeric" value={week} disabled={useGlobal} onChange={(e) => setWeek(e.target.value)} className="w-24 text-ink disabled:opacity-50" />
+      </label>
+      <label className="flex h-8 items-center gap-2 text-xs text-ink/75 max-md:h-11">
+        <input type="checkbox" checked={useGlobal} onChange={(e) => setUseGlobal(e.target.checked)} className="size-4" />
+        Use global default
       </label>
       <label className="flex h-8 items-center gap-2 text-sm max-md:h-11">
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} className="size-4" />

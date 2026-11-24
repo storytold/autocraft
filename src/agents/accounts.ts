@@ -63,6 +63,23 @@ export async function usagePause(db: Db): Promise<UsagePause> {
   }
 }
 
+export async function usagePauseInfo(db: Db, accountId: string): Promise<{ limits: UsagePause; custom: boolean }> {
+  const value = await setting(db, `${USAGE_PAUSE_KEY}:${accountId}`);
+  if (value !== undefined) {
+    try {
+      const v = JSON.parse(value) as Partial<UsagePause> | null;
+      if (v && validPct(v.fiveHour) && validPct(v.weekly)) {
+        return { limits: { fiveHour: v.fiveHour, weekly: v.weekly }, custom: true };
+      }
+    } catch { /* fall back to global */ }
+  }
+  return { limits: await usagePause(db), custom: false };
+}
+
+export async function usagePauseFor(db: Db, accountId: string): Promise<UsagePause> {
+  return (await usagePauseInfo(db, accountId)).limits;
+}
+
 export async function setUsagePause(db: Db, input: unknown, by: string): Promise<UsagePause> {
   const v = input as Partial<UsagePause> | null;
   if (!v || typeof v !== "object" || !validPct(v.fiveHour) || !validPct(v.weekly)) throw new AccountError(400, "pause levels must be whole numbers from 1 to 100");
@@ -104,10 +121,13 @@ async function authOf(db: Db, id: string): Promise<AccountAuth> {
     : { loggedIn: null, method: null, plan: null, expiresAt: null, checkedAt: null };
 }
 
-function toAccount(r: Row, token: ClaudeAccount["token"], running: number, reading: Reading | null, nowMs: number, auth: AccountAuth, limits: UsagePause): ClaudeAccount {
+function toAccount(r: Row, token: ClaudeAccount["token"], running: number, reading: Reading | null, nowMs: number, auth: AccountAuth, pauseInfo: { limits: UsagePause; custom: boolean }): ClaudeAccount {
+  const limits = pauseInfo.limits;
   return {
     auth, login: loginInfo(r.id), token,
     id: r.id, label: r.label, enabled: r.enabled === 1, maxConcurrent: r.max_concurrent, running,
+    pause: limits,
+    pauseCustom: pauseInfo.custom,
     usage: {
       fiveHourPct: reading?.fiveHour?.pct ?? null,
       fiveHourResetsAt: reading?.fiveHour?.resetsAt != null ? iso(reading.fiveHour.resetsAt) : null,
@@ -123,8 +143,8 @@ function toAccount(r: Row, token: ClaudeAccount["token"], running: number, readi
 export async function listAccounts(db: Db, nowMs: number = Date.now(), sync = true): Promise<ClaudeAccount[]> {
   const box = await boxAccounts(db);
   if (sync) await syncAccounts(db, box);
-  const counts = await runningCounts(db, nowMs), limits = await usagePause(db);
-  return await mapSeq((await rows(db, box)), async (r) => toAccount(r, await tokenView(db, r.id, box.find((b) => b.id === r.id)!.configDir), counts.get(r.id) ?? 0, readUsage(r.id), nowMs, await authOf(db, r.id), limits));
+  const counts = await runningCounts(db, nowMs);
+  return await mapSeq((await rows(db, box)), async (r) => toAccount(r, await tokenView(db, r.id, box.find((b) => b.id === r.id)!.configDir), counts.get(r.id) ?? 0, readUsage(r.id), nowMs, await authOf(db, r.id), await usagePauseInfo(db, r.id)));
 }
 
 export async function updateAccount(db: Db, id: unknown, input: unknown, by: string): Promise<ClaudeAccount> {
@@ -132,7 +152,7 @@ export async function updateAccount(db: Db, id: unknown, input: unknown, by: str
   if (typeof id !== "string" || !box.some((b) => b.id === id)) throw new AccountError(404, "no such account");
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new AccountError(400, "the body must be a JSON object");
   const o = input as Record<string, unknown>;
-  const bad = Object.keys(o).find((k) => !["label", "enabled", "maxConcurrent"].includes(k));
+  const bad = Object.keys(o).find((k) => !["label", "enabled", "maxConcurrent", "pause"].includes(k));
   if (bad) throw new AccountError(400, `${bad} cannot be set`);
   if (o.label !== undefined) {
     o.label = validLabel(o.label);
@@ -141,8 +161,21 @@ export async function updateAccount(db: Db, id: unknown, input: unknown, by: str
   if (o.maxConcurrent !== undefined && (typeof o.maxConcurrent !== "number" || !Number.isInteger(o.maxConcurrent) || o.maxConcurrent < 1 || o.maxConcurrent > MAX_CONCURRENT_LIMIT)) {
     throw new AccountError(400, `maxConcurrent must be a whole number from 1 to ${MAX_CONCURRENT_LIMIT}`);
   }
+  let nextPause: UsagePause | null | undefined = undefined;
+  if (o.pause !== undefined) {
+    if (o.pause === null) {
+      nextPause = null;
+    } else {
+      const p = o.pause as Partial<UsagePause>;
+      if (typeof o.pause !== "object" || Array.isArray(o.pause) || !validPct(p.fiveHour) || !validPct(p.weekly)) {
+        throw new AccountError(400, "pause levels must be whole numbers from 1 to 100");
+      }
+      nextPause = { fiveHour: p.fiveHour, weekly: p.weekly };
+    }
+  }
   await syncAccounts(db, box);
   const before = (await rows(db, box)).find((r) => r.id === id)!;
+  const beforePause = await usagePauseInfo(db, id);
   const next = {
     label: (o.label as string | undefined) ?? before.label,
     enabled: (o.enabled as boolean | undefined) ?? before.enabled === 1,
@@ -151,10 +184,19 @@ export async function updateAccount(db: Db, id: unknown, input: unknown, by: str
   await db.run(db.k.updateTable("claude_accounts")
     .set({ label: next.label, enabled: next.enabled ? 1 : 0, max_concurrent: next.maxConcurrent, updated_by: by, updated_at: new Date().toISOString() })
     .where("id", "=", id));
+  const pauseKey = `${USAGE_PAUSE_KEY}:${id}`;
+  if (nextPause === null) {
+    await db.run(db.k.deleteFrom("settings").where("key", "=", pauseKey));
+  } else if (nextPause !== undefined) {
+    await db.run(db.k.insertInto("settings").values({ key: pauseKey, value: JSON.stringify(nextPause) }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+  }
+  const afterPause = await usagePauseInfo(db, id);
+  const pauseChanged = beforePause.custom !== afterPause.custom || beforePause.limits.fiveHour !== afterPause.limits.fiveHour || beforePause.limits.weekly !== afterPause.limits.weekly;
   await audit(db, by, "account-change", `account:${id}`, {
     ...(next.label !== before.label && { label: next.label, was: before.label }),
     ...(next.enabled !== (before.enabled === 1) && { enabled: next.enabled }),
     ...(next.maxConcurrent !== before.max_concurrent && { maxConcurrent: next.maxConcurrent }),
+    ...(pauseChanged && { pause: afterPause.custom ? afterPause.limits : null, wasPause: beforePause.custom ? beforePause.limits : null }),
   });
   return (await listAccounts(db)).find((a) => a.id === id)!;
 }
@@ -175,12 +217,12 @@ export async function chooseAccount(db: Db, nowMs: number = Date.now(), minToken
   await syncAccounts(db, box);
   const enabled = (await rows(db, box)).filter((r) => r.enabled === 1);
   if (!enabled.length) return { none: true };
-  const counts = await runningCounts(db, nowMs), limits = await usagePause(db);
+  const counts = await runningCounts(db, nowMs);
   const reasons: string[] = [];
   const ok: { r: Row; weekly: number; running: number }[] = [];
   for (const r of enabled) {
     const reading = readUsage(r.id), running = counts.get(r.id) ?? 0;
-    const why = headroomReason(reading, limits, nowMs);
+    const why = headroomReason(reading, await usagePauseFor(db, r.id), nowMs);
     if (why) reasons.push(`${r.label}: ${why}`);
     else if (!ignoreSlots && running >= r.max_concurrent) reasons.push(`${r.label}: ${running} of ${r.max_concurrent} slots in use`);
     else if (minTokenMs !== undefined && await credentialsNearExpiry(db, r.id, box.find((b) => b.id === r.id)!.configDir, nowMs, minTokenMs)) reasons.push(`${r.label}: login token expires within ${Math.ceil(minTokenMs / 60_000)} min; waiting for its refresh`);
@@ -197,7 +239,7 @@ export async function accountHasRoom(db: Db, accountId: string, nowMs: number = 
   const box = await boxAccounts(db);
   await syncAccounts(db, box);
   const r = (await rows(db, box)).find((x) => x.id === accountId);
-  if (!r || r.enabled !== 1 || headroomReason(readUsage(r.id), await usagePause(db), nowMs)) return false;
+  if (!r || r.enabled !== 1 || headroomReason(readUsage(r.id), await usagePauseFor(db, r.id), nowMs)) return false;
   return ((await runningCounts(db, nowMs)).get(r.id) ?? 0) < r.max_concurrent;
 }
 
@@ -205,10 +247,10 @@ export async function accountHasRoom(db: Db, accountId: string, nowMs: number = 
 export async function freeSlots(db: Db, nowMs: number = Date.now()): Promise<number> {
   const box = await boxAccounts(db);
   await syncAccounts(db, box);
-  const counts = await runningCounts(db, nowMs), limits = await usagePause(db);
+  const counts = await runningCounts(db, nowMs);
   let free = 0;
   for (const r of await rows(db, box)) {
-    if (r.enabled !== 1 || headroomReason(readUsage(r.id), limits, nowMs)) continue;
+    if (r.enabled !== 1 || headroomReason(readUsage(r.id), await usagePauseFor(db, r.id), nowMs)) continue;
     free += Math.max(0, r.max_concurrent - (counts.get(r.id) ?? 0));
   }
   return free;
@@ -241,9 +283,9 @@ export async function claudePauseReason(db: Db, nowMs: number = Date.now()): Pro
   await syncAccounts(db, box);
   const enabled = (await rows(db, box)).filter((r) => r.enabled === 1);
   if (!enabled.length) return "paused: no Claude account is enabled";
-  const reasons: string[] = [], limits = await usagePause(db);
+  const reasons: string[] = [];
   for (const r of enabled) {
-    const why = headroomReason(readUsage(r.id), limits, nowMs);
+    const why = headroomReason(readUsage(r.id), await usagePauseFor(db, r.id), nowMs);
     if (!why) return null;
     reasons.push(`${r.label}: ${why}`);
   }

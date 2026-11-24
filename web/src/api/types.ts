@@ -1728,6 +1728,8 @@ export type ClaudeAccount = {
   maxConcurrent: number; // agent runs at once on this account
   running: number;       // agent runs active now
   usage: AccountUsage;
+  pause: UsagePause;
+  pauseCustom: boolean;
   pausedReason: string | null; // e.g. "5-hour use 92 % (pauses at 90 %)"
   auth: AccountAuth;
   login: AccountLogin | null;  // operators only: the sign-in or token request in progress, or the last one's outcome
@@ -1743,7 +1745,7 @@ export type AccountLogin = { state: AccountLoginState; url: string | null; messa
 export type UsagePause = { fiveHour: number; weekly: number };
 /** Whether Jev is in use; `unavailable` says why not (Haiku then does its work) and since when. */
 export type JevStatus = { enabled: boolean; unavailable: { reason: string; since: string } | null };
-export type AccountInput = { label?: string; enabled?: boolean; maxConcurrent?: number };
+export type AccountInput = { label?: string; enabled?: boolean; maxConcurrent?: number; pause?: UsagePause | null };
 
 export type AgentRunState = "running" | "done" | "failed";
 export type AgentRun = {

@@ -26,16 +26,19 @@ const accounts: ClaudeAccount[] = [
   {
     id: "b", label: "Team account B", enabled: true, maxConcurrent: 4, running: 0,
     usage: { fiveHourPct: 62, fiveHourResetsAt: iso(-(2 * HOUR + 40 * MIN)), weeklyPct: 41, weeklyResetsAt: iso(-(3 * 24 * HOUR + 5 * HOUR)), readAt: iso(2 * MIN) },
+    pause: { fiveHour: 80, weekly: 80 }, pauseCustom: false,
     pausedReason: null, auth: AUTH, login: null, token: { state: "set", setAt: iso(3 * 24 * HOUR + 4 * HOUR), expiresAt: iso(-(362 * 24 * HOUR)), rejectedAt: null },
   },
   {
     id: "c", label: "Team account C", enabled: true, maxConcurrent: 3, running: 0,
     usage: { fiveHourPct: 93, fiveHourResetsAt: iso(-(55 * MIN)), weeklyPct: 78, weeklyResetsAt: iso(-(1 * 24 * HOUR + 2 * HOUR)), readAt: iso(1 * MIN) },
+    pause: { fiveHour: 80, weekly: 80 }, pauseCustom: false,
     pausedReason: "5-hour use 93 % (pauses at 80 %)", auth: { ...AUTH, expiresAt: new Date(NOW + 6 * 24 * HOUR).toISOString() }, login: null, token: { state: "rejected", setAt: iso(40 * 24 * HOUR), expiresAt: iso(-(325 * 24 * HOUR)), rejectedAt: iso(50 * MIN) },
   },
   {
     id: "d", label: "Spare account D", enabled: false, maxConcurrent: 2, running: 0,
     usage: { fiveHourPct: 8, fiveHourResetsAt: iso(-(4 * HOUR)), weeklyPct: 12, weeklyResetsAt: iso(-(5 * 24 * HOUR)), readAt: iso(95 * MIN) },
+    pause: { fiveHour: 80, weekly: 80 }, pauseCustom: false,
     pausedReason: "disabled by an operator", auth: { loggedIn: false, method: null, plan: null, expiresAt: null, checkedAt: iso(3 * MIN) }, login: null, token: NO_TOKEN,
   },
 ];
@@ -163,6 +166,7 @@ export function createAgentsMock(me: User, changed: () => void): Pick<Api, "acco
         const a: ClaudeAccount = {
           id: `a${accounts.length + 1}`, label: label.trim(), enabled: false, maxConcurrent: 2, running: 0,
           usage: { fiveHourPct: null, fiveHourResetsAt: null, weeklyPct: null, weeklyResetsAt: null, readAt: null },
+          pause: { fiveHour: 80, weekly: 80 }, pauseCustom: false,
           pausedReason: "disabled by an operator", auth: { loggedIn: null, method: null, plan: null, expiresAt: null, checkedAt: null }, login: null, token: NO_TOKEN,
         };
         accounts.push(a);

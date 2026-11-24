@@ -110,6 +110,7 @@ export function createPipelineMock(me: User, changed: () => void): Pick<Api, "pi
     ["verify", "Plan verification of taken pull requests", 40, 12], ["fixup", "Fix up take-fix pull requests", 10, 3], ["act", "Comment and close", 20, 20],
   ].map(([step, title, perDay, usedToday]) => ({
     step: step as string, title: title as string, perDay: perDay as number | null, usedToday: usedToday as number,
+    pause: { fiveHour: 80, weekly: 80 }, pauseCustom: false,
     pausedReason: perDay !== null && (usedToday as number) >= (perDay as number) ? `daily limit of ${perDay} items reached` : null,
   }));
   const wide = "3 of the last 10 fixup pushes broke a required check, in 2 repos (designcraft, photocraft)";

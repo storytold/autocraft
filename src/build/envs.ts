@@ -102,6 +102,7 @@ function toEnv(r: Row, tasks: EnvTask[], nowMs: number): BuildEnv {
   return {
     id: r.id, label: r.label, kind: r.kind, enabled: r.enabled === 1, online, lastSeenAt: r.last_seen_at,
     slots: slotsOf(r), running: tasks.length, tasks, capabilities: parseCaps(r.capabilities), version: r.version,
+    pause: { fiveHour: 80, weekly: 80 }, pauseCustom: false,
     pausedReason: r.enabled === 1 && online ? r.paused_reason : null, confidential: r.confidential === 1,
     settings: r.kind === "kubernetes" ? settingsOf(r.settings) : null,
   };

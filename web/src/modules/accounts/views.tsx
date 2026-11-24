@@ -111,6 +111,11 @@ function Row({ a, operator, onChanged }: { a: ClaudeAccount; operator: boolean; 
         <dd>
           {a.running} of {a.maxConcurrent} at once
         </dd>
+        <dt className="text-ink/55">Pause at</dt>
+        <dd>
+          {a.pause.fiveHour} % (5h) · {a.pause.weekly} % (weekly){" "}
+          <span className="text-ink/45">({a.pauseCustom ? "custom" : "global default"})</span>
+        </dd>
         {a.pausedReason && (
           <>
             <dt className="text-ink/55">Paused</dt>
