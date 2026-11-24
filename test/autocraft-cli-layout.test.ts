@@ -84,7 +84,7 @@ test("help prints the grouped overview; --all adds the task commands", async () 
   const r = await cli(null, ["help"]);
   assert.equal(r.code, 0);
   const headings = r.out.split("\n").filter((l) => /^[A-Z][a-z]+( [a-z]+)*$/.test(l));
-  assert.deepEqual(headings, ["Setup", "Runner", "Inbox", "Merge queue", "Model calls", "Settings", "Other"]);
+  assert.deepEqual(headings, ["Setup", "Runner", "Inbox", "Merge queue", "Model calls", "Settings", "Builds", "Workspaces", "Other"]);
   assert.match(r.out, /^ {2}autocraft inbox show <id> /m);
   assert.doesNotMatch(r.out, /autocraft work/);
   assert.match((await cli(null, ["help", "--all"])).out, /^Task commands[^\n]*\n {2}autocraft work /m);

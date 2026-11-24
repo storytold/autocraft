@@ -55,7 +55,7 @@ class Waker {
 }
 
 /** The model-facing part of a settled row's result (the session's bookkeeping stays in the row). */
-function parseResult(text: string): WorkspaceToolResult {
+export function parseResult(text: string): WorkspaceToolResult {
   try {
     const o = JSON.parse(text) as WorkspaceToolResult;
     if (typeof o?.text === "string") {
@@ -114,7 +114,7 @@ export async function relayWorkspaceCall(db: Db, lease: { id: number; runId: num
 }
 
 /** Once the session has a result's images, the row keeps only their type, size and hash; the rest of the result stays as the record. */
-async function stubImages(db: Db, id: number, stored: string): Promise<void> {
+export async function stubImages(db: Db, id: number, stored: string): Promise<void> {
   let o: { images?: { data?: unknown; mimeType?: unknown }[] };
   try { o = JSON.parse(stored) as typeof o; } catch { return; }
   if (!Array.isArray(o.images)) return;

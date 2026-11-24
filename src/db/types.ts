@@ -274,6 +274,7 @@ export interface BuildTasks {
   sandbox_env: string | null;
   warm_image: string | null;
   warm_version: string | null;
+  started_by: string | null;
 }
 
 export interface ChangeSeq {
@@ -2251,6 +2252,7 @@ export interface WorkspaceCalls {
   deadline_at: string | null;
   finished_at: string | null;
   run_id: number | null;
+  agent_login: string | null;
 }
 
 export interface WorkspaceSessions {
@@ -2713,7 +2715,7 @@ export const COLUMNS = {
   build_pod_runs: ["task_id", "env_id", "key_hash", "pvc", "stage", "pod", "pod_created_at", "prepared", "results", "failed", "ran", "logged", "create_tries", "failing_since", "retry_at", "started_at", "node", "reserved_cpu_m", "reserved_mem_bytes", "disruptions", "replaces", "log_positions"],
   build_sizes: ["repo", "memory_request_bytes", "memory_limit_bytes", "updated_at", "reason", "warm_target", "memory_source"],
   build_task_logs: ["task_id", "seq", "step", "chunk"],
-  build_tasks: ["id", "job_id", "step", "repo", "number", "head_sha", "base_sha", "requires", "priority", "plan", "state", "env_id", "attempts", "queued_at", "claimed_at", "started_at", "ended_at", "heartbeat_at", "cancel_requested_at", "results", "summary", "log_bytes", "artifact_bytes", "patch", "warm_key", "warm_role", "sandbox_env", "warm_image", "warm_version"],
+  build_tasks: ["id", "job_id", "step", "repo", "number", "head_sha", "base_sha", "requires", "priority", "plan", "state", "env_id", "attempts", "queued_at", "claimed_at", "started_at", "ended_at", "heartbeat_at", "cancel_requested_at", "results", "summary", "log_bytes", "artifact_bytes", "patch", "warm_key", "warm_role", "sandbox_env", "warm_image", "warm_version", "started_by"],
   change_seq: ["topic", "seq", "at"],
   ci_fixes: ["repo", "number", "head", "to_head", "kind", "state", "reason", "files", "attempt", "task_id", "runs", "created_at", "session", "patch", "lint_task", "lint_round", "lint_state"],
   ci_run_approvals: ["repo", "number", "head_oid", "cross_repo", "runs", "approved", "reread", "failed", "checked_at", "approved_at"],
@@ -2877,7 +2879,7 @@ export const COLUMNS = {
   verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"],
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],
-  workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "deadline_at", "finished_at", "run_id"],
+  workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "deadline_at", "finished_at", "run_id", "agent_login"],
   workspace_sessions: ["id", "kind", "repo", "base_sha", "item", "prompt", "env_id", "keep", "deadline_sec", "state", "outcome", "workspace_id", "remote_call_id", "job_id", "requested_by", "for_login", "created_at", "updated_at", "ended_at"],
   workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id", "volume_fresh", "resume_tries", "checkpoint_error", "restored", "restored_at", "layout", "prepared", "warm", "warm_commit"],
 } as const;

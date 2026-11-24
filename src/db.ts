@@ -325,6 +325,10 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["build_sizes", "warm_target", "TEXT NOT NULL DEFAULT 'auto'"],
   // Whether a repository's memory row is an operator's size, an OOM floor, or unused (src/build/sizing.ts).
   ["build_sizes", "memory_source", "TEXT NOT NULL DEFAULT 'operator'"],
+  // Who started a build through the MCP build tools (src/build/mcp-builds.ts); null for the pipeline's own tasks.
+  ["build_tasks", "started_by", "TEXT"],
+  // Who queued a workspace call through the MCP Connector's workspace tools (src/build/agent-workspaces.ts); the runner's agent server runs only these.
+  ["workspace_calls", "agent_login", "TEXT"],
   // The login whose own Task Runners run a try session's model call (src/build/workspace-session.ts).
   ["workspace_sessions", "for_login", "TEXT COLLATE NOCASE"],
 ];

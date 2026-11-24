@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.4.2";
+export const HELPER_VERSION = "1.5.0";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
@@ -4878,6 +4878,7 @@ const answerWhy = (has) => (has.has("set_weight")
   : "only operators, and maintainers who answer decisions (an answering Task Runner while maintainer writes are on), approve merges");
 /** Withdrawing an approved merge stays with operators, also where a maintainer may approve one. @param {Set<string>} has */
 const cancelWhy = (has) => (has.has("set_weight") ? answerWhy(has) : "only operators withdraw an approved merge");
+const WS_WHY = "only operators, and maintainers with write access to the repo, open workspaces, and only where a kubernetes environment takes them";
 const LOCAL_WHY = "model calls run on the server's accounts here: the server is not in the user-local inference mode";
 /** @param {Set<string>} has */
 const pickWhy = (has) => (has.has("list_model_calls") ? "only maintainers and operators pick model calls" : LOCAL_WHY);
@@ -4902,15 +4903,27 @@ export const CLI_COMMANDS = [
   { path: ["calls", "mine"], tool: "my_work", usage: "", summary: "today's calls on your machine, and your Task Runners", why: () => "needs one of your Task Runners reporting in, while the server is in the user-local inference mode" },
   { path: ["settings"], tool: "my_settings", usage: "", summary: "your reserve, repos, calls at once and interactive slots", why: () => "only maintainers and operators have settings" },
   { path: ["settings", "set"], tool: "set_my_settings", usage: "[--reserve <5h> <weekly>] [--max-calls N | --no-max-calls] [--repos <a,b>|all] [--interactive-slots N]", summary: "change them, as the Connect page does", why: () => "only maintainers and operators have settings" },
+  { path: ["build"], tool: "list_builds", usage: "[--repo R] [--all] [--mine] [--limit N]", summary: "queued and running builds (--all adds ended ones)", why: () => "only operators, and maintainers with write access to the repo, start builds" },
+  { path: ["build", "base"], tool: "build_base", args: ["repo"], usage: "<repo>", summary: "the default-branch commit a build starts from", why: () => "only operators, and maintainers with write access to the repo, start builds" },
+  { path: ["build", "status"], tool: "build_status", args: ["id"], usage: "<id> [--log-lines N]", summary: "a build's phase, each line's state and exit code, and the end of its log", why: () => "only operators, and maintainers with write access to the repo, start builds" },
+  { path: ["build", "cancel"], tool: "cancel_build", args: ["id"], usage: "<id>", summary: "stop a queued or running build", why: () => "only operators, and maintainers with write access to the repo, start builds" },
+  { path: ["workspace"], tool: "list_workspaces", usage: "[--repo R] [--all] [--mine] [--limit N]", summary: "live workspaces opened through the agent tools (--all adds ended ones)", why: () => WS_WHY },
+  { path: ["workspace", "open"], tool: "workspace_open", args: ["repo"], usage: "<repo> [--base SHA] [--hours N] [--env ID]", summary: "open a workspace on a default-branch commit (an agent sends a patch with it)", why: () => WS_WHY },
+  { path: ["workspace", "status"], tool: "workspace_status", args: ["workspace"], usage: "<id>", summary: "a workspace's state, patch and last calls", why: () => WS_WHY },
+  { path: ["workspace", "diff"], tool: "workspace_diff", args: ["workspace"], usage: "<id> [--format json]", summary: "its changes against the base, as a patch", why: () => WS_WHY },
+  { path: ["workspace", "close"], tool: "workspace_close", args: ["workspace"], usage: "<id>", summary: "end it; what workspace diff did not save is lost", why: () => WS_WHY },
   { path: ["repos"], tool: "list_repos", usage: "", summary: "tracked repositories with their open decisions and fix-ups" },
   { path: ["fixups"], tool: "list_fixups", usage: "[--repo R] [--limit N]", summary: "PRs whose review fixes the pipeline could not apply" },
 ];
 
 /**
  * Server tools without a command: the task tools tell an MCP agent to run this runner's own commands, and answering is
- * the operator's call on the dashboard until it opens to agents. `autocraft call <tool>` still reaches each one.
+ * the operator's call on the dashboard until it opens to agents, start_build takes a patch and command lines, which an
+ * agent or a script sends better than a command line, build_artifact returns images, which a terminal does not show, and the
+ * workspace tools are an agent's working tools, whose results (images among them) an agent reads. `autocraft call <tool>` still reaches each one.
  */
-export const MCP_ONLY = ["next_task", "task_status", "answer_decision", "undo_answer"];
+export const MCP_ONLY = ["next_task", "task_status", "answer_decision", "undo_answer", "start_build", "build_artifact", "workspace_result",
+  ...["shell", "shell_status", "shell_kill", "read", "write", "edit", "glob", "grep", "app_start", "app_stop", "screenshot", "fetch_dependencies"].map((t) => `workspace_${t}`)];
 
 const SERVER_GROUPS = new Set(CLI_COMMANDS.map((c) => c.path[0]));
 
@@ -4953,7 +4966,8 @@ export function mcpClient(server, credential) {
         ...(session && { "Mcp-Session-Id": session, "MCP-Protocol-Version": MCP_PROTOCOL }),
       },
       body: JSON.stringify({ jsonrpc: "2.0", ...(id !== undefined && { id }), method, ...(params !== undefined && { params }) }),
-      signal: AbortSignal.timeout(10 * 60_000),
+      // A workspace tool call may wait up to 15 minutes on the server (wait_sec) while it keeps the reply open.
+      signal: AbortSignal.timeout(16 * 60_000),
     });
     session = res.headers.get("mcp-session-id") ?? session;
     const text = await res.text();
@@ -5162,6 +5176,7 @@ async function cmdServer(group, argv) {
   if (!sub && argv[0] !== undefined && !argv[0].startsWith("-") && CLI_COMMANDS.some((c) => c.path[0] === group && c.path.length > 1)) {
     throw new UsageError(`no command ${group} ${argv[0]}: \`autocraft ${group} --help\` lists them`);
   }
+  if (!cmd) throw new UsageError(`autocraft ${group} needs a command: \`autocraft ${group} --help\` lists them`);
   const { client } = await agentSession();
   const tools = await client.tools();
   const tool = tools.find((t) => t.name === cmd.tool);
@@ -5271,7 +5286,7 @@ const TASK_HELP = [
   ["autocraft config reserve <5h> <weekly> | off", "runner reserve"],
 ];
 
-const GROUP_TITLES = /** @type {const} */ ({ inbox: "Inbox", queue: "Merge queue", calls: "Model calls", settings: "Settings" });
+const GROUP_TITLES = /** @type {const} */ ({ inbox: "Inbox", queue: "Merge queue", calls: "Model calls", settings: "Settings", build: "Builds", workspace: "Workspaces" });
 
 /** @param {string} group @returns {HelpLine[]} */
 const serverHelp = (group) => CLI_COMMANDS.filter((c) => c.path[0] === group).map((c) => [`autocraft ${[...c.path, c.usage].filter(Boolean).join(" ")}`, c.summary]);

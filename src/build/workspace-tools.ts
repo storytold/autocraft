@@ -40,8 +40,11 @@ const READ_BYTES = 128 * 1024;
 /** A `--since` past any log's end: a status call that returns only the header. */
 const NO_OUTPUT = "999999999999";
 
-/** The launcher's, the operator's and a job's own calls (execWs); every other row is a session tool call that counts. */
-export const OWN_CALLS = ["seed", "checkpoint", "cli", "report"];
+/**
+ * The launcher's, the operator's and a job's own calls (execWs), and an agent workspace's patch setup and diff
+ * (src/build/agent-workspaces.ts); every other row is a session tool call that counts.
+ */
+export const OWN_CALLS = ["seed", "checkpoint", "cli", "report", "agent-setup", "agent-diff"];
 /** A killed command's process group gets this long after SIGTERM. */
 const KILL_GRACE_MS = 5_000;
 /** app_start's exec: the helper waits 30 s for the window, after up to 15 s for a display that had to start again. */

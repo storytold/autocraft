@@ -4,6 +4,7 @@ import { writeSetting } from "../settings-read.ts";
 import { resumeStage, TripError } from "../push-outcomes.ts";
 import { DEFAULT_WORKER_LISTEN, startWorkerServer } from "../build/worker-api.ts";
 import { startPodLauncher } from "../build/launcher.ts";
+import { startAgentWorkspaces } from "../build/agent-workspaces.ts";
 import { acquireLock } from "../mirror.ts";
 import { audit } from "../dash/audit.ts";
 import { scopeToTracked } from "../repos.ts";
@@ -140,6 +141,8 @@ async function serve(): Promise<void> {
   }
   // Starts and follows the build pods of kubernetes environments; outside a cluster they report that they cannot.
   startPodLauncher(db, ac.signal, (l) => console.log(l), fenceGuard);
+  // Runs the tool calls of workspaces agents opened through the MCP Connector (src/build/agent-workspaces.ts).
+  startAgentWorkspaces(db, ac.signal, (l) => console.log(l), fenceGuard);
   // Optional: counts Discord mentions of tracked items when a bot token file is configured. A failure is logged and never stops the runner.
   try {
     await startDiscord(db, ac.signal, (l) => console.log(l));

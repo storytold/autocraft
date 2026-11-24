@@ -180,7 +180,7 @@ export const deleteScreenshots = async (db: Db, req: Req): Promise<ScreenshotSet
 };
 
 /** An artifact's bytes: from the artifact directory when it is on this disk, otherwise from the runner, which stored them. */
-async function artifactBytes(db: Db, taskId: number, name: string, login: string): Promise<Buffer> {
+export async function artifactBytes(db: Db, taskId: number, name: string, login: string): Promise<Buffer> {
   const c = runnerClient();
   if (c) {
     try {
