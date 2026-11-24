@@ -11,7 +11,7 @@ import { ItemIcon } from "../atoms/ItemIcon";
  * link covers the nearest positioned ancestor, so the whole row or card is the click target: that container must be
  * `relative`, and other controls in it need `relative z-10` (the GitHub button sets it itself).
  */
-export function ItemRef({ repo, number, kind, state, draft, title, href, stretch, github = true, size = "md", className }: {
+export function ItemRef({ repo, number, kind, state, draft, title, href, linkState, stretch, github = true, size = "md", className }: {
   repo: string;
   number: number;
   kind?: ItemKind | null;
@@ -20,6 +20,8 @@ export function ItemRef({ repo, number, kind, state, draft, title, href, stretch
   /** null while the data lacks it: only `repo#num` shows */
   title: string | null | undefined;
   href?: string;
+  /** History state for the item link (where its back link returns). */
+  linkState?: unknown;
   stretch?: boolean;
   github?: boolean;
   size?: "sm" | "md";
@@ -27,7 +29,7 @@ export function ItemRef({ repo, number, kind, state, draft, title, href, stretch
 }) {
   return (
     <span className={cn("flex min-w-0 items-start gap-2", size === "sm" ? "text-xs" : "text-sm", className)}>
-      <Link to={href ?? itemPath(repo, number)} className={cn("flex min-w-0 flex-1 items-start gap-2 hover:underline", stretch && "after:absolute after:inset-0")}>
+      <Link to={href ?? itemPath(repo, number)} state={linkState} className={cn("flex min-w-0 flex-1 items-start gap-2 hover:underline", stretch && "after:absolute after:inset-0")}>
         <ItemIcon kind={kind} state={state} draft={draft} />
         <span className="min-w-0 break-words [overflow-wrap:anywhere]">
           <span className="code text-ink/60">

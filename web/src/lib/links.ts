@@ -21,6 +21,15 @@ const KIND_ORDER = ["scope", "duplicate", "close", "merge", "hold", "split", "ot
 /** `/items/<repo>/<n>`; the repo is the short name the dashboard shows. */
 export const itemPath = (repo: string, number: number): string => `/items/${encodeURIComponent(shortRepo(repo))}/${number}`;
 
+/** Where an item page's back link returns: the Needs you queue the item was opened from, carried in history state. */
+export type From = { url: string };
+export const fromState = (url: string): { from: From } => ({ from: { url } });
+/** The `from` of history state, or null. State is untrusted (any script can push it), so only a Needs you URL is taken. */
+export function readFrom(state: unknown): From | null {
+  const url = (state as { from?: { url?: unknown } } | null | undefined)?.from?.url;
+  return typeof url === "string" && /^\/needs(?:[?#]|$)/.test(url) ? { url } : null;
+}
+
 /** `/batches/<id>`: the detail page of an integration batch. */
 export const batchPath = (id: number): string => `/batches/${id}`;
 

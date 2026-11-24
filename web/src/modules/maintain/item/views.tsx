@@ -4,7 +4,7 @@
 // pipeline get the classic page: commands are refused there and their questions are answered through its forms.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { ArrowLeftIcon, ArrowSquareOutIcon, CheckCircleIcon, CircleNotchIcon, ClockIcon, XCircleIcon } from "@phosphor-icons/react";
+import { ArrowSquareOutIcon, CheckCircleIcon, CircleNotchIcon, ClockIcon, XCircleIcon } from "@phosphor-icons/react";
 import { t, tk } from "../../../../../src/i18n/index.ts";
 import { useApi, useQuery } from "../../../api/client";
 import type { ItemPageData, MaintainItem, MaintainItemStatus, MaintainReply, MaintainStep } from "../../../api/types";
@@ -25,6 +25,7 @@ import { Markdown } from "../../../ui/molecules/Markdown";
 import { Segmented } from "../../../ui/molecules/Segmented";
 import { safeHref } from "../../../ui/safeHref";
 import { Composer } from "../../item/Composer";
+import { BackLink } from "../../item/BackLink";
 import { GithubSide } from "../../item/page/GithubSide";
 import { ImplementationPanel } from "../../item/page/ImplementationPanel";
 import { ItemPageView } from "../../item/page/ItemPage";
@@ -99,9 +100,7 @@ function Header({ m, d }: { m: MaintainItem; d: ItemPageData }) {
   const weight = m.status?.live ? m.status.weight : null;
   return (
     <header className="px-4 pb-5 pt-4 md:px-8 md:pb-6 md:pt-6">
-      <Link to="/items" className="inline-flex h-7 items-center gap-1 rounded text-xs text-ink/70 hover:text-ink max-md:h-11">
-        <ArrowLeftIcon aria-hidden /> {t("Items")}
-      </Link>
+      <BackLink className="inline-flex h-7 items-center gap-1 rounded text-xs text-ink/70 hover:text-ink max-md:h-11" />
       <div className="mt-1 flex flex-wrap items-start gap-3">
         <div className="min-w-0 basis-full md:basis-0 md:flex-1">
           <h1 className="break-words text-xl font-semibold leading-7 md:text-2xl md:leading-8">

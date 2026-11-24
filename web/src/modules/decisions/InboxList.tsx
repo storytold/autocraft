@@ -15,7 +15,7 @@ import { KIND_LABEL, KINDS, useDecisionFilter, useLocal, type DecisionListQuery 
 import { ageTitle, compactAge, metaFacts, refText, selectedFor, stepIndex } from "./rows";
 import { clamp, resolveRestore, type QueueHandle, type Snapshot } from "./selection";
 import { useNow } from "../../lib/useNow";
-import { decisionPath } from "../../lib/links";
+import { decisionPath, fromState } from "../../lib/links";
 import { canComment } from "../../registry/permissions";
 
 export function summaryLine(data: DecisionList | undefined) {
@@ -55,6 +55,8 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
   const failed = error !== undefined && error !== null;
   const data = failed ? undefined : rawData;
   const navigate = useNavigate();
+  const route = useLocation();
+  const from = fromState(route.pathname + route.search);
   const api = useApi();
   const { peek, setPeek, filter, search } = useDecisionFilter();
   const loc = useLocal();
@@ -182,7 +184,7 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
   const open = (d: Decision) => {
     if (controlled) { controlled.onOpenItem(d.id); return; }
     if (!d.answer && canComment(user)) void api.decisions.claim(d.id).catch(() => undefined);
-    navigate(decisionPath(d));
+    navigate(decisionPath(d), { state: from });
   };
 
 
@@ -237,7 +239,6 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
   };
   // On a phone the list can stay mounted under the item page; when it becomes visible again at the
   // Needs route, put the bookmark back (the reader is returning, not navigating).
-  const route = useLocation();
   useEffect(() => {
     if (controlled || !phone || !data || !scroller.current) return;
     if (route.pathname === "/needs" && phoneListScroll > 0 && scroller.current.scrollTop === 0) scroller.current.scrollTop = phoneListScroll;
@@ -326,7 +327,7 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
             return <li key={d.id} className={cn("grid gap-1 rounded p-2.5", isSelected && "bg-raised shadow-[inset_2px_0_0_rgb(var(--st-accent-rgb))] ring-1 ring-line", peek === d.id && !showPrevious && "outline outline-1 -outline-offset-1 outline-accent/30")}>
               <div className="relative min-h-8 max-md:min-h-11">
                 {d.number !== null
-                  ? <ItemRef repo={d.repo} number={d.number} kind={d.shown?.kind} state={d.shown?.state} title={d.shown?.title ?? d.title} stretch className="font-medium" />
+                  ? <ItemRef repo={d.repo} number={d.number} kind={d.shown?.kind} state={d.shown?.state} title={d.shown?.title ?? d.title} linkState={from} stretch className="font-medium" />
                   : <Link to={decisionPath(d)} className="break-words text-sm font-medium text-ink hover:underline">{d.title}</Link>}
               </div>
               <Button type="button" variant="ghost" size="sm" aria-current={isSelected ? "true" : undefined}

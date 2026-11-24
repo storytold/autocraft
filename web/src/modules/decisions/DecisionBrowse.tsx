@@ -126,8 +126,9 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
     if (!live.coherent || live.loading || live.error || live.row?.id !== d.id) return;
     if (live.scopeKey !== scopeKey || live.requestedIdentity !== JSON.stringify(requested)) return;
     if (live.user.login !== user.login || live.user.role !== user.role) return;
-    reviewDecision(live.row, live.user, (id) => api.decisions.claim(id), navigate);
-  }, [api, navigate, user, scopeKey, requested, readCurrentFacts]);
+    const here = readLocation();
+    reviewDecision(live.row, live.user, (id) => api.decisions.claim(id), navigate, here.pathname + here.search);
+  }, [api, navigate, user, scopeKey, requested, readCurrentFacts, readLocation]);
 
   const cancelIntent = useCallback(() => {
     focusVersion.current += 1;
