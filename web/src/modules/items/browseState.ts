@@ -2,6 +2,7 @@
     from one endpoint is ever sent to the other. Every label, chip, badge, summary and bar in the
     UI is derived from `constraints()` — what the chosen endpoint actually receives — so an applied
     filter is never invisible and a value that is not sent is never shown as applied. */
+import type { UrlPatch } from "../../lib/urlState.ts";
 import type { ItemFilter, ItemKind, ItemPhase, ItemSort, ItemStatusFilter, SettledStatus, StatusFilter, TypeLabel } from "../../api/types.ts";
 
 export const PHASES: ItemPhase[] = ["Triage", "Waiting for a person", "Review", "Fixing", "Verifying", "In queue", "Merged", "Closed", "Held", "Out of scope", "Pipeline off"];
@@ -392,11 +393,11 @@ export function aliasHref(search: string): string {
   return `/items${query ? `?${query}` : ""}`;
 }
 
-/** Removing one chip: a comma list loses only that value; a scalar key is deleted. */
-export function removeValuePatch(browse: BrowseState, key: string, value: string): Record<string, string | null> {
+/** Removing one chip: CSV values and unknown URL entries are removed individually; known scalars clear. */
+export function removeValuePatch(browse: BrowseState, key: string, value: string): UrlPatch {
   const listKeys: Record<string, string[]> = { repo: browse.repos, area: browse.areas, label: browse.labelsRaw, status: browse.statusRaw, flag: browse.flagsRaw };
   const list = Object.hasOwn(listKeys, key) ? listKeys[key] : undefined;
-  if (!list) return { [key]: null };
+  if (!list) return { [key]: (KNOWN_KEYS as readonly string[]).includes(key) ? null : { removeValue: value } };
   const next = list.filter((entry) => entry !== value);
   return { [key]: next.length ? next.join(",") : null };
 }

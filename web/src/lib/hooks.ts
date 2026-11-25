@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useHref, useSearchParams } from "react-router-dom";
+import { patchSearch, type UrlPatch } from "./urlState";
 
 /**
  * Runs a write and keeps its error message for display. `latestOnly`: when writes overlap, only the latest one started sets or
@@ -66,9 +67,8 @@ export function useUrlState() {
   const readLocation = useLiveLocation();
   const search = useSyncExternalStore(subscribeUrl, () => readLocation().search, () => sp.toString());
   const state = useMemo(() => Object.fromEntries(new URLSearchParams(search)), [search]);
-  const update = useCallback((patch: Record<string, string | null | undefined>, options?: { replace?: boolean }) => {
-    const next = new URLSearchParams(readLocation().search);
-    for (const [key, value] of Object.entries(patch)) value ? next.set(key, value) : next.delete(key);
+  const update = useCallback((patch: UrlPatch, options?: { replace?: boolean }) => {
+    const next = patchSearch(readLocation().search, patch);
     setSp(next, { replace: options?.replace ?? true });
     // History changes synchronously; React Router may publish its context in a transition.
     // All view owners see the same snapshot immediately, without a module-global history or timer.

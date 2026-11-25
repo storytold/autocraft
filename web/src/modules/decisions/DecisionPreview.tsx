@@ -150,10 +150,10 @@ export function DecisionPreview({ peek, query, onClose }: { peek: string; query:
         <p role="status" className="text-sm text-ink/60">
           Loading decision…
         </p>
-      ) : one.error ? (
-        <ErrorLine error={`Could not load this decision: ${one.error.message}`} />
       ) : query.error ? (
         <ErrorLine error={`Could not load the decision list: ${query.error.message}`} />
+      ) : one.error ? (
+        <ErrorLine error={`Could not load this decision: ${one.error.message}`} />
       ) : (
         // No link exists to a decision that could not be read, so this says only what is true.
         <p className="text-sm text-ink/60">This decision is not available here.</p>
