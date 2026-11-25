@@ -21,13 +21,51 @@ const KIND_ORDER = ["scope", "duplicate", "close", "merge", "hold", "split", "ot
 /** `/items/<repo>/<n>`; the repo is the short name the dashboard shows. */
 export const itemPath = (repo: string, number: number): string => `/items/${encodeURIComponent(shortRepo(repo))}/${number}`;
 
-/** Where an item page's back link returns: the Needs you queue the item was opened from, carried in history state. */
-export type From = { url: string };
-export const fromState = (url: string): { from: From } => ({ from: { url } });
-/** The `from` of history state, or null. State is untrusted (any script can push it), so only a Needs you URL is taken. */
+/** One decision of the queue an item page steps through, and the page that answers it. */
+export type QueueEntry = { id: string; path: string };
+/**
+ * Where an item page came from, carried in history state: the Needs you queue URL its back link returns to, with
+ * `decision=` naming the open decision, and the loaded queue it steps through.
+ */
+export type From = { url: string; queue?: QueueEntry[] };
+
+/** `url` with `decision=id` and no preview, so going back selects that decision. */
+function withDecision(url: string, id: string): string {
+  const at = url.indexOf("?");
+  const params = new URLSearchParams(at < 0 ? "" : url.slice(at));
+  params.set("decision", id);
+  params.delete("peek");
+  return `${at < 0 ? url : url.slice(0, at)}?${params}`;
+}
+
+/** History state for an item opened from the queue at `url`: decision `d`, stepping through the loaded `rows`. */
+export function fromState(url: string, d?: DecisionRef, rows?: DecisionRef[]): { from: From } {
+  const queue = rows?.filter((r) => r.number != null).map((r) => ({ id: r.id, path: decisionPath(r) }));
+  return { from: { url: d ? withDecision(url, d.id) : url, ...(queue && { queue }) } };
+}
+
+/** The `from` of history state, or null. State is untrusted (any script can push it): only a Needs you URL and item paths are taken. */
 export function readFrom(state: unknown): From | null {
-  const url = (state as { from?: { url?: unknown } } | null | undefined)?.from?.url;
-  return typeof url === "string" && /^\/needs(?:[?#]|$)/.test(url) ? { url } : null;
+  const from = (state as { from?: { url?: unknown; queue?: unknown } } | null | undefined)?.from;
+  const url = from?.url;
+  if (typeof url !== "string" || !/^\/needs(?:[?#]|$)/.test(url)) return null;
+  const queue = from?.queue;
+  const valid = Array.isArray(queue) && queue.every((e) => typeof e?.id === "string" && typeof e?.path === "string" && e.path.startsWith("/items/"));
+  return valid ? { url, queue: queue as QueueEntry[] } : { url };
+}
+
+/** Where the open decision sits in the queue (1-based), or null when the queue does not hold it. */
+export function queuePosition(from: From): { at: number; of: number } | null {
+  const id = new URLSearchParams(from.url.slice(from.url.indexOf("?") + 1 || from.url.length)).get("decision");
+  const index = from.queue?.findIndex((e) => e.id === id) ?? -1;
+  return index < 0 ? null : { at: index + 1, of: from.queue!.length };
+}
+
+/** The neighbour's page and the state to open it with, or null at either end. */
+export function stepFrom(from: From, dir: 1 | -1): { path: string; state: { from: From } } | null {
+  const pos = queuePosition(from);
+  const target = pos && from.queue![pos.at - 1 + dir];
+  return target ? { path: target.path, state: { from: { ...from, url: withDecision(from.url, target.id) } } } : null;
 }
 
 /** `/batches/<id>`: the detail page of an integration batch. */

@@ -56,11 +56,11 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
   const data = failed ? undefined : rawData;
   const navigate = useNavigate();
   const route = useLocation();
-  const from = fromState(route.pathname + route.search);
   const api = useApi();
   const { peek, setPeek, filter, search } = useDecisionFilter();
   const loc = useLocal();
   const list = data?.decisions ?? [];
+  const fromFor = (d: Decision) => fromState(route.pathname + route.search, d, list);
   const project = usePageProject();
   // One committed display snapshot, never query receipts, cursors or selection authority.
   // Changing reader capabilities or repository context clears it before it can render.
@@ -184,7 +184,7 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
   const open = (d: Decision) => {
     if (controlled) { controlled.onOpenItem(d.id); return; }
     if (!d.answer && canComment(user)) void api.decisions.claim(d.id).catch(() => undefined);
-    navigate(decisionPath(d), { state: from });
+    navigate(decisionPath(d), { state: fromFor(d) });
   };
 
 
@@ -291,9 +291,9 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-line bg-panel">
       <div className="flex shrink-0 flex-col gap-2.5 border-b border-line px-3.5 py-3.5">
         {header}
-        <div className="flex min-h-6 items-center gap-2 text-xs">
+        <div className="flex min-h-6 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
           {(data || showPrevious) && <span className="num shrink-0 whitespace-nowrap font-semibold text-ink">{data ? data.total : previousRows.current!.total} matches</span>}
-          <span className="truncate text-ink/60">{summaryText}</span>
+          <span className="min-w-0 break-words text-ink/60">{summaryText}</span>
 
           {oldest && <span className="ml-auto shrink-0 text-ink/60">oldest {ago(oldest)}</span>}
         </div>
@@ -327,7 +327,7 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
             return <li key={d.id} className={cn("grid gap-1 rounded p-2.5", isSelected && "bg-raised shadow-[inset_2px_0_0_rgb(var(--st-accent-rgb))] ring-1 ring-line", peek === d.id && !showPrevious && "outline outline-1 -outline-offset-1 outline-accent/30")}>
               <div className="relative min-h-8 max-md:min-h-11">
                 {d.number !== null
-                  ? <ItemRef repo={d.repo} number={d.number} kind={d.shown?.kind} state={d.shown?.state} title={d.shown?.title ?? d.title} linkState={from} stretch className="font-medium" />
+                  ? <ItemRef repo={d.repo} number={d.number} kind={d.shown?.kind} state={d.shown?.state} title={d.shown?.title ?? d.title} linkState={fromFor(d)} stretch className="font-medium" />
                   : <Link to={decisionPath(d)} className="break-words text-sm font-medium text-ink hover:underline">{d.title}</Link>}
               </div>
               <Button type="button" variant="ghost" size="sm" aria-current={isSelected ? "true" : undefined}

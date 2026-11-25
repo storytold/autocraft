@@ -143,7 +143,7 @@ export function DecisionPreview({ peek, query, onClose }: { peek: string; query:
       loading={item.loading}
       error={item.error}
       href={d ? decisionPath(d) : undefined}
-      linkState={fromState(here.pathname + here.search)}
+      linkState={d ? fromState(here.pathname + here.search, d, query.data?.decisions) : undefined}
       label={d ? (d.number === null ? `${d.repo} · ${d.items.length} items` : `${d.repo}#${d.number}`) : undefined}
       onClose={onClose}
     >

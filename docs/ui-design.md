@@ -104,7 +104,8 @@ Rules:
 ### Needs you
 
 - Three tabs: Decisions, Feedback and Stopped, each with its count.
-- The Decisions queue card has a View select (Waiting, Answered, Backlog, Snoozed, With opinions) and a Filters button. Filters opens an inline scope panel: Repo, Kind, Waiting at least, All questions and Clear scope. A scope value that a select cannot show is a removable chip. View and scope changes add a history entry. Decisions have no text search.
+- The Decisions queue card has a View select (Waiting, Answered, Backlog, Snoozed, With opinions) and a Filters button. Filters opens an inline scope panel, each control under its label at full width: Repositories (a checklist with Find; several make `repo=a,b`; hidden while a project is picked), Kind, Waiting at least, an Include all questions switch (Waiting and With opinions only), then Clear scope below a divider. A scope value that a select cannot show is a removable chip. View and scope changes add a history entry. Decisions have no text search.
+- The View and scope are saved per person in the browser on each change. Opening `/needs` with neither in its URL brings them back (replacing the entry); a link that names any of them wins and is not saved until it is changed. With a project picked, saved repositories are left out. Clear scope keeps the View.
 - Each row has its item link and GitHub button (or the batch link for a batch decision), then a Details button with kind, claim, answer and age. Details selects the row. Arrow keys, Home/End and `j`/`k` move between rows, `p` opens the preview and `o` the item page.
 - The selected decision (`decision=<id>`) opens beside the queue on wide screens, and below it on narrow ones with an "All decisions" button. The panel is read-only: Review and answer opens the item page, which claims the decision and holds the answer form. Evidence, Discussion and Item timeline (the item's latest four events) load when opened. Escape or All decisions closes the panel, and Back reopens it.
 - The Decision tools band above the list holds Preview, Review and answer, queue facts and Undo, and on desktop the batch answer.
@@ -116,6 +117,7 @@ Rules:
 - The GitHub side sits beside the AutoCraft side from 1024 px and below it from 768 px. Phones show one side at a time with an AutoCraft/GitHub switch; viewers start on GitHub.
 - A link to `#decision-…`, `#hist-…` or `#gh-…` opens the side and the section that hold the target, then scrolls to it.
 - The back link returns to the Needs you queue the item was opened from (its filters and selection, carried in history state) and reads "Needs you"; any other arrival, including a shared link, reads "Items" and goes to `/items`.
+- Opened from the queue, the header also shows `‹ 3 of 20 ›` (and `[` / `]`): previous and next step through the queue's loaded item decisions as they were when the item was opened, disabled at the ends; there is no move after answering. Each step updates the back link's selection, so going back selects the last decision viewed.
 
 ## 5. Extensibility
 
