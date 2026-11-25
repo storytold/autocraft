@@ -56,8 +56,15 @@ export function statusFor<S extends Pick<ItemStatus, "waiting" | "next">>(r: Rea
 
 /** The text fields of a queue row as the reader may see them; the item API gives viewers the same (no review reason, verification text or notes). */
 export function queueTextFor(r: Reader, row: QueueRow): QueueRow {
-  const verify = row.verify && { ...row.verify, summary: null, note: null };
-  if (veiledFor(r, row.repo, row.number)) return { ...row, reason: "", refusedReason: null, note: null, outsideRule: [], verify };
+  const veiled = veiledFor(r, row.repo, row.number);
+  const result = row.verify;
+  // A passing regression carries a note only when the base result was inconclusive.
+  const verify = result && {
+    ...result,
+    regressionInconclusive: !veiled && result.kind === "regression" && result.state === "passed" && !!result.note,
+    ...(!r.staff || veiled ? { summary: null, note: null } : {}),
+  };
+  if (veiled) return { ...row, reason: "", refusedReason: null, note: null, outsideRule: [], verify };
   if (!r.staff) return { ...row, reason: "", refusedReason: null, note: null, outsideRule: row.outsideRule.map(plainReason), verify };
-  return { ...row, outsideRule: reasonsFor(r, row.outsideRule), note: blankIfHidden(row.note, r.hidden) || null, refusedReason: blankIfHidden(row.refusedReason, r.hidden) || null };
+  return { ...row, outsideRule: reasonsFor(r, row.outsideRule), note: blankIfHidden(row.note, r.hidden) || null, refusedReason: blankIfHidden(row.refusedReason, r.hidden) || null, verify };
 }

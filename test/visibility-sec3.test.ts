@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import type { ItemStatusList, QueueList } from "../web/src/api/types.ts";
 import { addLogin } from "../src/access.ts";
 import { finishRun, insertRun } from "../src/agents/runs.ts";
 import { ask } from "../src/decisions.ts";
@@ -47,7 +48,7 @@ before(async () => {
       gh: "OPEN", scope: true, next: n === 2 ? "Fix-up MARK-NEXT" : "Merge", status: { phase: "Merge", waiting: wait, next: "Merge", since: now },
       queue: { author: "alice", tier: "not", head: `h${n}`, size: "S", label: "bug", verdict: "take", reason: "MARK-REVIEW-REASON", fixes: 0, ci: "success", mergeable: "MERGEABLE",
         path: null, eligible: false, decisionId: null, answer: null, refusedReason: "MARK-REFUSED", reviewedAt: now, held: false, blockedLive: false, noCi: false, runsWaiting: 0, runsBlocked: null,
-        verify: { state: "failed", kind: "build", summary: "MARK-VERIFY-SUMMARY", note: "MARK-VERIFY-NOTE" } },
+        verify: { state: "passed", kind: "regression", summary: null, note: "MARK-VERIFY-NOTE" } },
     };
     await plan.run(repo, n, `h${n}`, wait, JSON.stringify(['conflicts with vault#9: "MARK-OWNER-NOTE" (MARK-MODEL-REASON)', "verification failed: MARK-VERIFY-SUMMARY"]), JSON.stringify(view), now);
   }
@@ -121,6 +122,23 @@ test("viewers read no staff text of queue rows or of a quiet pull request's feed
   assert.deepEqual(fix.rows.map((r) => [r.number, r.next]), [[2, ""]]);
   const needs = JSON.parse(await reader("/api/needs?feedback=1")) as { feedback: { rows: { item: { number: number } | null; text: string }[] } };
   assert.equal(needs.feedback.rows.find((r) => r.item?.number === 2)?.text, "");
+});
+
+test("queue and item checks expose an inconclusive regression without exposing the note to viewers", async () => {
+  const boss = await signIn("boss"), reader = await signIn("reader");
+  for (const [get, staff] of [[reader, false], [boss, true]] as const) {
+    const queue = JSON.parse(await get("/api/queue")) as QueueList;
+    const items = JSON.parse(await get("/api/items/status")) as ItemStatusList;
+    for (const n of [1, 2]) {
+      const queueVerify = queue.rows.find((row) => row.repo === "open-app" && row.number === n)?.verify;
+      const itemVerify = items.rows.find((row) => row.repo === "open-app" && row.number === n)?.checks?.verify;
+      for (const verify of [queueVerify, itemVerify]) {
+        assert.equal(verify?.state, "passed");
+        assert.equal(verify?.regressionInconclusive, staff || n === 1);
+        assert.equal(verify?.note, staff ? "MARK-VERIFY-NOTE" : null);
+      }
+    }
+  }
 });
 
 test("a maintainer who cannot see a repo finds its name in no fact, wait, statement conflict or model call", async () => {

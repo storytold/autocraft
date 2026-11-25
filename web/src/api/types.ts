@@ -1549,7 +1549,7 @@ export interface QueueRow {
   note: string | null;
   reviewedAt: string;
   /** The Verify stage's result at the reviewed head; null when none. `summary` is the failure or error text, or the plan's reason. */
-  verify: { state: string; kind: string | null; summary: string | null; note: string | null } | null;
+  verify: { state: string; kind: string | null; summary: string | null; note: string | null; regressionInconclusive?: boolean } | null;
   /** For a conflicting PR: what Fix-up does about it, e.g. "conflict: merging main". */
   conflictNote?: string | null;
   /** Issues in the same repo the PR closes when it merges (GitHub's closing references); empty or absent when none are known. */

@@ -152,8 +152,9 @@ export function verdictOf(head: Outcome, base: Outcome | null): Verdict {
   if (!base) return { state: "passed" };
   if (base.kind === "error") return { state: "error", reason: `base commit: ${base.reason}` };
   if (base.kind === "pass") return { state: "failed", reason: NOT_FAILING_REASON };
-  if (base.step === "test") return base.timedOut ? { state: "passed", note: "regression test timed out on the base commit" } : { state: "passed" };
-  return { state: "passed", note: "base commit did not build with the regression test, so the test was not shown to fail there" };
+  if (base.step === "test" && !base.timedOut) return { state: "passed" };
+  const limitation = base.step === "test" ? "the base test timed out" : "the base did not build with the test";
+  return { state: "passed", note: `Head passed; regression comparison inconclusive: ${limitation}.` };
 }
 
 // ---- the run -----------------------------------------------------------------
