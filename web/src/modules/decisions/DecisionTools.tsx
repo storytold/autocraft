@@ -40,7 +40,7 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
       <span className="text-ink/80">
         {d.number !== null
-          ? <ItemRef repo={d.repo} number={d.number} kind={d.shown?.kind} state={d.shown?.state} title={null} linkState={fromState(here.pathname + here.search)} />
+          ? <ItemRef repo={d.repo} number={d.number} kind={d.shown?.kind} state={d.shown?.state} title={null} linkState={fromState(here.pathname + here.search, d, loaded)} />
           : <span className="code">{d.repo} · {d.items.length} {d.items.length === 1 ? "item" : "items"}</span>}
       </span>
       <span className="text-ink/60">{KIND_TEXT[d.kind]}</span>

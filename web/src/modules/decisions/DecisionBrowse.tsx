@@ -127,8 +127,8 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
     if (live.scopeKey !== scopeKey || live.requestedIdentity !== JSON.stringify(requested)) return;
     if (live.user.login !== user.login || live.user.role !== user.role) return;
     const here = readLocation();
-    reviewDecision(live.row, live.user, (id) => api.decisions.claim(id), navigate, here.pathname + here.search);
-  }, [api, navigate, user, scopeKey, requested, readCurrentFacts, readLocation]);
+    reviewDecision(live.row, live.user, (id) => api.decisions.claim(id), navigate, here.pathname + here.search, rows);
+  }, [api, navigate, user, scopeKey, requested, readCurrentFacts, readLocation, rows]);
 
   const cancelIntent = useCallback(() => {
     focusVersion.current += 1;
@@ -392,7 +392,7 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
       <div ref={page} className="min-h-0 flex-1 overflow-y-auto [container-type:size]">
         <div className="grid min-h-full items-start gap-x-5 min-[861px]:grid-cols-[auto_minmax(0,1fr)]">
           {!queueHidden && (
-            <div className="min-w-0 w-full [height:100cqh] min-[861px]:w-[300px] min-[1101px]:w-[340px] min-[861px]:sticky min-[861px]:top-0"
+            <div className="min-w-0 w-full [height:100cqh] min-[861px]:w-[340px] min-[1101px]:w-[400px] min-[1440px]:w-[460px] min-[861px]:sticky min-[861px]:top-0"
               style={fallbackHeight !== null ? ({ height: fallbackHeight } as CSSProperties) : undefined}>
               <InboxList {...props} phone={phone} query={query} header={<NeedsControls />} controlled={controlled} />
             </div>

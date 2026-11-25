@@ -95,13 +95,12 @@ export function ageOptions(minAge: number | undefined): { value: string; label: 
 export interface CompatValue { key: "repo" | "kind" | "age"; value: string; label: string }
 
 /**
- * Values that a single native select cannot show: multiple repositories or kinds, an age outside the
- * preset options, and values the API will not use. The panel lists them with a remove action so
+ * Values that a single native select cannot show: multiple kinds, an age outside the preset options,
+ * and values the API will not use (the repo checklist shows several repos itself). The panel lists them with a remove action so
  * no applied constraint is invisible and nothing unused is presented as applied.
  */
 export function compatValues(scope: Scope): CompatValue[] {
   const out: CompatValue[] = [];
-  if (scope.repo.length > 1) for (const repo of scope.repo) out.push({ key: "repo", value: repo, label: repo });
   if (scope.kind.length > 1) for (const kind of scope.kind) out.push({ key: "kind", value: kind, label: kind });
   if (scope.minAge && !(AGE_VALUES as readonly number[]).includes(scope.minAge)) out.push({ key: "age", value: String(scope.minAge), label: `${scope.minAge} days${scope.cappedAge ? ` (${scope.cappedAge} in the link, capped)` : ""}` });
   for (const kind of scope.unusedKinds) out.push({ key: "kind", value: kind, label: `${kind} (not applied)` });
