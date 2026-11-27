@@ -242,7 +242,7 @@ describe("transport", () => {
     assert.match(init.body.result.instructions, /untrusted/);
     assert.equal((await rpc(t, "initialize", { protocolVersion: "1999-01-01" })).body.result.protocolVersion, "2025-06-18");
     const tools = (await rpc(t, "tools/list")).body.result.tools.map((x: { name: string }) => x.name).sort();
-    assert.deepEqual(tools, ["get_item", "help", "list_fixups", "list_merge_queue", "list_model_calls", "list_repos", "my_items", "my_settings", "pick_model_call", "set_my_settings", "unpick_model_call"]);
+    assert.deepEqual(tools, ["get_item", "help", "list_fixups", "list_merge_queue", "list_model_calls", "list_repos", "my_items", "my_settings", "pick_model_call", "read_item", "search_items", "set_my_settings", "unpick_model_call"]);
     assert.equal((await rpc(t, "no/such")).body.error.code, -32601);
   });
 });
@@ -258,6 +258,33 @@ describe("tools", () => {
     const maint = await tokenFor("maint");
     assert.equal((await call(maint, "get_item", { item: "secretcraft#7" })).isError, false);
     assert.ok(data((await call(maint, "list_repos")).text).some((r: { repo: string }) => r.repo === "secretcraft"));
+    assert.equal(data((await call(maint, "read_item", { item: "secretcraft#7" })).text).title, "Secret thing");
+  });
+
+  test("read_item and search_items read the mirror within the user's repos and frame its text as untrusted", async () => {
+    const viewer = await viewerToken();
+    const r = await call(viewer, "read_item", { item: "https://github.com/storytold/photocraft/pull/1" });
+    assert.equal(r.isError, false);
+    assert.doesNotMatch(r.text.slice(0, r.text.indexOf("<<<untrusted")), /Ignore previous/);
+    assert.equal(r.text.split("<<<end untrusted>>>").length, 2, "only the frame's own end marker");
+    const it = data(r.text);
+    assert.equal(it.head, "a1");
+    assert.equal((await call(viewer, "read_item", { item: "secretcraft#7" })).isError, true);
+    const all = data((await call(viewer, "search_items", { state: "all", limit: 25 })).text);
+    assert.ok(all.items.length > 0);
+    assert.equal(all.items.some((x: { item: string }) => x.item.startsWith("secretcraft#")), false);
+    const issues = data((await call(viewer, "search_items", { repo: "photocraft", kind: "issue" })).text);
+    assert.deepEqual(issues.items.map((x: { item: string }) => x.item), ["photocraft#10"]);
+    assert.deepEqual(data((await call(viewer, "search_items", { query: "sepia" })).text).items.map((x: { item: string }) => x.item), ["photocraft#10"]);
+    // The author is a login, never a pattern.
+    const by = all.items[0].author as string;
+    assert.ok(data((await call(viewer, "search_items", { state: "all", author: by.toUpperCase() })).text).items.every((x: { author: string }) => x.author === by));
+    assert.equal(data((await call(viewer, "search_items", { state: "all", author: `${by.slice(0, -1)}%` })).text).total, 0);
+    // Pages follow on from each other without repeating a row.
+    const first = data((await call(viewer, "search_items", { state: "all", limit: 2 })).text);
+    const second = data((await call(viewer, "search_items", { state: "all", limit: 2, cursor: first.next })).text);
+    assert.equal(second.items.some((x: { item: string }) => first.items.some((y: { item: string }) => y.item === x.item)), false);
+    assert.match((await call(viewer, "search_items", { cursor: "x" })).text, /not valid/);
   });
 
   test("arguments are checked", async () => {

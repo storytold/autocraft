@@ -5025,6 +5025,8 @@ export const CLI_COMMANDS = [
   { path: ["commands"], tool: "help", usage: "", summary: "the commands AutoCraft takes, what each does and when it comes back to you" },
   { path: ["repos"], tool: "list_repos", usage: "", summary: "tracked repositories with their fix-ups waiting" },
   { path: ["fixups"], tool: "list_fixups", usage: "[--repo R] [--limit N]", summary: "PRs whose review fixes the pipeline could not apply" },
+  { path: ["items", "search"], tool: "search_items", usage: "[--query Q] [--repo R] [--kind K] [--state S] [--author A] [--since D] [--limit N] [--cursor C]", summary: "issues and PRs from AutoCraft's copy of GitHub" },
+  { path: ["items", "show"], tool: "read_item", args: ["item"], usage: "<item>", summary: "one issue or PR from AutoCraft's copy of GitHub" },
 ];
 
 /**

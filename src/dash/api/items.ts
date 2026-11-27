@@ -17,7 +17,7 @@ export async function quickSearch(db: Db, req: Req): Promise<SearchHit[]> {
 }
 
 /** The issue numbers in an item's stored closing list; a malformed list counts as none. */
-function closesOf(json: string | null): number[] {
+export function closesOf(json: string | null): number[] {
   if (!json) return [];
   try { return (JSON.parse(json) as unknown[]).filter((x): x is number => typeof x === "number"); } catch { return []; }
 }

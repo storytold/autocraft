@@ -6,11 +6,14 @@
 // send commands, which the act rule (write access on the repo) checks as on GitHub.
 import { githubItemUrl, itemPath } from "../../../web/src/lib/links.ts";
 import { frame } from "../../itemtools/server/tools.ts";
+import { itemCore } from "../api/index.ts";
+import { closesOf } from "../api/items.ts";
+import { loadItemSearch } from "../../data/views/items.ts";
 import * as modelQueue from "../api/model-queue.ts";
 import * as userSettings from "../api/user-settings.ts";
 import { MAX_RESERVE, userReserve } from "../../remote/reserve.ts";
 import { parseItemRef, queuePage } from "../api/queue-page.ts";
-import { allVisibleRepos, needVisible, visibleTo } from "../api/visible.ts";
+import { allVisibleRepos, hiddenRepos, needVisible, visibleTo } from "../api/visible.ts";
 import { loadMergeQueue } from "../../data/views/merge-queue.ts";
 import { callStatus, claimableCalls } from "../../remote/calls.ts";
 import { listHelpers } from "../../remote/helpers.ts";
@@ -31,7 +34,7 @@ import { eventsOf } from "../../workflow/store.ts";
 import { legWait, notPostedLine } from "../../workflow/waits.ts";
 import { askedRows, home } from "../api/maintain.ts";
 import type { MaintainRow } from "../../../web/src/api/types.ts";
-import { loadItems } from "../../data/mirror/index.ts";
+import { loadItems, loadRepos } from "../../data/mirror/index.ts";
 import { loadLegPass, loadPrWorkflows } from "../../data/workflow/index.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { loadUserRuns } from "../../data/inference/index.ts";
@@ -49,7 +52,7 @@ export type McpEnv = {
   baseUrl: string | null;
   /** The credential was made to send commands and its login is an operator or maintainer: the command tool is offered and allowed. */
   canAnswer: boolean;
-  /** Spends one of the token's expensive calls (list_repos, list_fixups, list_merge_queue); the number of seconds to wait when it has none left, else 0. */
+  /** Spends one of the token's expensive calls (list_repos, list_fixups, list_merge_queue, read_item, search_items); the number of seconds to wait when it has none left, else 0. */
   expensive: () => number;
   /** One of the login's Task Runners reports in: the task tools are offered. `canWrite` reads the user's live write permission on a repo. */
   run?: { canWrite: (repo: string) => Promise<boolean> };
@@ -136,6 +139,8 @@ const reqOf = (user: User, o: { method?: Req["method"]; params?: Record<string, 
 
 // ---- tools ------------------------------------------------------------------
 
+const ITEM_HELP = "The item: a GitHub URL, repo#number or owner/repo#number.";
+
 export const TOOLS = [
   {
     name: "list_repos",
@@ -168,9 +173,31 @@ export const TOOLS = [
     },
     annotations: { readOnlyHint: true },
   },
+  {
+    name: "read_item",
+    description: "One issue or pull request as AutoCraft's copy of GitHub holds it, without a call to GitHub: title, body, state, author, labels, dates, comments and reviews, linked and related items, and for a PR its head commit, branches, draft state, CI checks, mergeability and changed files; with the pipeline's view of it (latest stages, the review's verdict, its place in line; get_item gives its workflow). `mirroredAt` is when the copy of its repo last finished a sync; anything newer on GitHub is not in it yet.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["item"], properties: { item: { type: "string", description: ITEM_HELP } } },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "search_items",
+    description: "Issues and pull requests in AutoCraft's copy of GitHub, without a call to GitHub, newest update first, optionally matching a text query: each row with its state, title, author, dates and comment count. Use read_item for one in full.",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        query: { type: "string", maxLength: 200, description: "Words to find in the title, body and comments." },
+        repo: { type: "string", description: "Only this repository, e.g. photocraft." },
+        kind: { type: "string", enum: ["issue", "pr"] },
+        state: { type: "string", enum: ["open", "closed", "merged", "all"], description: "Default: open." },
+        author: { type: "string", description: "Only items opened by this GitHub login." },
+        since: { type: "string", description: "Only items updated on or after this day, YYYY-MM-DD." },
+        limit: { type: "integer", minimum: 1, maximum: LIST_MAX, description: "At most this many (default 10)." },
+        cursor: { type: "string", description: "The next value of the previous page." },
+      },
+    },
+    annotations: { readOnlyHint: true },
+  },
 ] as const;
-
-const ITEM_HELP = "The item: a GitHub URL, repo#number or owner/repo#number.";
 
 /** The read tools of the workflow model, offered to every token. */
 export const WORKFLOW_READ_TOOLS = [
@@ -266,6 +293,9 @@ export const SETTINGS_TOOLS = [
 ] as const;
 
 const link =(env: McpEnv, path: string): string => `${env.baseUrl ?? ""}${path}`;
+const BODY_MAX = 20_000;
+const cut = (s: string | null | undefined, n: number): string | null => (s == null ? null : s.length > n ? `${s.slice(0, n)}
+[cut: ${s.length - n} more characters]` : s);
 const show = (header: string, label: string, data: unknown): ToolResult => ({ text: `${header}\n\n${frame(label, JSON.stringify(data, null, 1))}` });
 
 async function listRepos(env: McpEnv): Promise<ToolResult> {
@@ -291,6 +321,74 @@ const spend = (env: McpEnv): void => {
   const wait = env.expensive();
   if (wait) throw new HttpError(429, `too many list calls; wait ${wait} seconds`);
 };
+
+// ---- the mirror ------------------------------------------------------------------
+
+/** When the mirror last finished a sync of each repo: the copy holds nothing newer. */
+async function mirroredAt(env: McpEnv, repos: string[]): Promise<Map<string, string | null>> {
+  const rows = await loadRepos(env.db, { names: repos });
+  return new Map([...rows].map(([name, r]) => [name, r.synced_at]));
+}
+
+/** An item as the dashboard's item page reads it from the mirror (itemCore: same visibility and veiling), cut to what an agent reads. */
+async function getMirrored(env: McpEnv, raw: unknown): Promise<ToolResult> {
+  spend(env);
+  const a = args(raw, { item: "item" }, ["item"]);
+  const r = itemArg(a.item);
+  const user = await env.user(false);
+  const it = await itemCore(env.db, reqOf(user, { params: { repo: r.repo, n: String(r.number) } }));
+  const pr = it.kind === "pr";
+  const row = pr ? (await loadItems(env.db, [r], "pr")).get(refText(r)) : undefined;
+  const synced = (await mirroredAt(env, [r.repo])).get(r.repo) ?? null;
+  const data = {
+    item: refText(r), kind: it.kind, state: it.state, title: it.title, author: it.author,
+    github: githubItemUrl(r.repo, r.number, it.kind), link: link(env, itemPath(r.repo, r.number)),
+    labels: it.labels, createdAt: it.createdAt, updatedAt: it.updatedAt, closedAt: it.closedAt,
+    body: cut(it.body, BODY_MAX),
+    ...(pr ? {
+      mergedAt: it.mergedAt, mergedBy: it.mergedBy, head: row?.head_oid ?? null, headRef: row?.head_ref ?? null, baseRef: row?.base_ref ?? null, draft: row?.is_draft === 1,
+      closes: closesOf(row?.closing_issues ?? null).map((n) => `${r.repo}#${n}`),
+      ci: it.ci, ciChecks: it.ciChecks.map((c) => ({ name: c.name, state: c.state })), mergeable: it.mergeable,
+      additions: it.additions, deletions: it.deletions, changedFiles: it.changedFiles, files: it.files,
+      review: it.reviews ? { head: it.reviews.head, current: it.reviews.current, verdict: it.reviews.final.verdict, reason: it.reviews.final.reason || null } : null,
+    } : {}),
+    related: it.related.map((x) => ({ item: `${x.repo}#${x.number}`, relation: x.relation, kind: x.kind, state: x.state, title: x.title })),
+    pipelineOn: it.pipelineOn ?? false,
+    stages: it.stages.slice(-10).map((x) => ({ stage: x.stage, at: x.at, by: x.by })),
+    queue: it.queue ?? null,
+    comments: it.comments.length, latestComments: it.comments.slice(-30).map((c) => ({ author: c.author, at: c.at, kind: c.kind, reviewState: c.reviewState, text: cut(c.body, 2000) })),
+    mirroredAt: synced,
+  };
+  return show(`${refText(r)} from AutoCraft's copy of GitHub, last synced ${synced ?? "never"}; nothing newer on GitHub is in it.`, `item ${refText(r)}`, data);
+}
+
+/** Tracked items in the mirror the user may see (the top-bar search's visibility), newest update first, as a page of rows. */
+async function searchItems(env: McpEnv, raw: unknown): Promise<ToolResult> {
+  spend(env);
+  const a = args(raw, { query: "id", repo: "repo", kind: "id", state: "id", author: "id", since: "id", limit: "limit", cursor: "cursor" });
+  if (a.cursor !== undefined && !/^\d{1,9}$/.test(a.cursor as string)) throw new BadArgs(`"cursor" is not valid`);
+  if (a.query !== undefined && (a.query as string).length > 200) throw new BadArgs(`"query" is longer than 200 characters`);
+  const kind = a.kind as string | undefined, state = (a.state as string | undefined) ?? "open", since = a.since as string | undefined;
+  if (kind !== undefined && kind !== "issue" && kind !== "pr") throw new BadArgs(`"kind" must be issue or pr`);
+  if (state !== "open" && state !== "closed" && state !== "merged" && state !== "all") throw new BadArgs(`"state" must be open, closed, merged or all`);
+  if (since !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(since)) throw new BadArgs(`"since" must be a day, YYYY-MM-DD`);
+  const user = await env.user(false);
+  const req = reqOf(user, {});
+  if (a.repo !== undefined) await needVisible(env.db, req, a.repo as string);
+  const limit = (a.limit as number | undefined) ?? 10;
+  const offset = Number(a.cursor ?? 0);
+  const l = await loadItemSearch(env.db, { hidden: await hiddenRepos(env.db, req) }, {
+    text: a.query as string | undefined, repo: a.repo as string | undefined, kind, state, author: a.author as string | undefined, since, limit, offset,
+  });
+  const synced = await mirroredAt(env, [...new Set(l.rows.map((x) => x.repo))]);
+  const rows = l.rows.map((x) => ({
+    item: `${x.repo}#${x.number}`, kind: x.kind === "pr" ? "pr" : "issue", state: x.state.toLowerCase(), title: x.title ?? "", author: x.author ?? "",
+    createdAt: x.created_at, updatedAt: x.updated_at, comments: x.comments_count ?? 0, mirroredAt: synced.get(x.repo) ?? null,
+  }));
+  const next = offset + rows.length < l.total && rows.length === limit ? String(offset + rows.length) : null;
+  const header = `${l.total} item${l.total === 1 ? "" : "s"} match in AutoCraft's copy of GitHub; showing ${rows.length}.${next ? ` More: call search_items again with cursor "${next}".` : ""} Each row's mirroredAt is when its repo was last synced.`;
+  return show(header, "items", { total: l.total, items: rows, next });
+}
 
 // ---- the merge queue ------------------------------------------------------------
 
@@ -570,6 +668,8 @@ async function callTool(env: McpEnv, name: unknown, raw: unknown): Promise<ToolR
     switch (name) {
       case "list_repos": args(raw, {}); return await listRepos(env);
       case "list_fixups": return await listFixups(env, raw);
+      case "read_item": return await getMirrored(env, raw);
+      case "search_items": return await searchItems(env, raw);
       case "get_item": return await getWorkflowItem(env, raw);
       case "my_items": return await myItems(env, raw);
       case "help": args(raw, {}); return helpText();

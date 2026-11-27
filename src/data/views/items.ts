@@ -71,3 +71,38 @@ export async function loadItemPeek(db: Db, ref: { repo: string; number: number }
     .select(["i.repo", "i.number", "i.kind", "i.state", "i.title", "i.author", "i.labels", "i.created_at", "i.updated_at", "i.merged_at", "i.closed_at", "i.closing_issues", "p.view"])
     .where("i.repo", "=", ref.repo).where("i.number", "=", ref.number))) ?? null;
 }
+
+export type ItemSearch = {
+  text?: string; repo?: string; kind?: "issue" | "pr"; state: "open" | "closed" | "merged" | "all"; author?: string; since?: string; limit: number; offset: number;
+};
+export type ItemSearchRow = {
+  repo: string; number: number; kind: string; state: string; title: string | null; author: string | null; created_at: string | null; updated_at: string | null; comments_count: number | null;
+};
+
+const STATES = { open: ["OPEN"], closed: ["CLOSED"], merged: ["MERGED"], all: null } as const;
+
+/**
+ * One page of the tracked items the scope may see, newest update first: `text` through the full-text index, `author` as the exact login
+ * (case aside, never a pattern), `since` an update on or after that time. `total` counts every match. One wave.
+ */
+export async function loadItemSearch(db: Db, scope: Pick<Scope, "hidden">, f: ItemSearch): Promise<{ rows: ItemSearchRow[]; total: number }> {
+  const fts = f.text?.trim() ? parseSearch(f.text.trim().slice(0, 200)) : null;
+  if (f.text?.trim() && !fts) return { rows: [], total: 0 };
+  const q = queryDb(db);
+  const states = STATES[f.state];
+  const where = (eb: kx.AnyEb): Expression<SqlBool> => eb.and([
+    trackedRepo(eb, "i.repo"), hiddenRepos(db, "i.repo", scope.hidden),
+    ...(f.repo ? [eb("i.repo", "=", f.repo)] : []),
+    ...(f.kind ? [eb("i.kind", "=", f.kind)] : []),
+    ...(states ? [kx.inList(db, "i.state", [...states])] : []),
+    ...(f.author ? [kx.nocaseEq(db, "i.author", eb.val(f.author))] : []),
+    ...(f.since ? [eb("i.updated_at", ">=", f.since)] : []),
+    ...(fts ? [textHit(eb, db, fts)] : []),
+  ]);
+  const [rows, count] = await db.together(() => Promise.all([
+      q.all(q.k.selectFrom("main.items as i").select(["i.repo", "i.number", "i.kind", "i.state", "i.title", "i.author", "i.created_at", "i.updated_at", "i.comments_count"])
+        .where(where).orderBy("i.updated_at", (ob) => ob.desc().nullsLast()).orderBy("i.repo").orderBy("i.number", "desc").limit(f.limit).offset(f.offset)),
+      q.get(q.k.selectFrom("main.items as i").select((eb) => eb.fn.countAll<number>().as("n")).where(where)),
+  ]));
+  return { rows: (rows as ItemSearchRow[]).map((r) => ({ ...r, number: Number(r.number) })), total: Number(count?.n ?? 0) };
+}
