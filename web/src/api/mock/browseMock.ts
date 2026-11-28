@@ -140,7 +140,13 @@ export function browseFor(me: User, query: BrowseQuery): BrowseResult {
   const hit = (r: Row) => !query.refs || query.refs.includes(`${r.repo}#${r.number}`);
   const found = ROWS.filter((r) => hit(r) && matches(r, q, repo));
   const livenessShown = staff && q.terms.some((t) => t.key === "flag" && !t.not && t.values.some((v) => v === "stuck" || v === "stale"));
-  const all = query.refs ? found.sort((a, b) => query.refs!.indexOf(`${a.repo}#${a.number}`) - query.refs!.indexOf(`${b.repo}#${b.number}`)) : sorted(found, q);
+  // Hits by meaning keep their order, and so does a list of named items unless the query sorts.
+  const listed = q.sort.given ? undefined : q.terms.find((t) => t.key === "items" && !t.not)?.values.flatMap((v) => {
+    const i = itemOfValue(v);
+    return i ? [`${i.repo}#${i.number}`] : [];
+  });
+  const order = query.refs ?? listed;
+  const all = order ? found.sort((a, b) => order.indexOf(`${a.repo}#${a.number}`) - order.indexOf(`${b.repo}#${b.number}`)) : sorted(found, q);
   const offset = query.offset ?? 0, limit = query.limit ?? 50;
   const open = ROWS.filter((r) => r.state === "open" && (!repo || r.repo === repo));
   const top = (vs: string[]) => [...vs.reduce((m, v) => m.set(v, (m.get(v) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([v]) => v);

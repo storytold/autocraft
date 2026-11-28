@@ -12,7 +12,7 @@ export type QueryKey =
 /** One qualifier: all its values are alternatives; `not` negates the whole term. Values are normalised (see VALUES). */
 export type QueryTerm = { key: QueryKey; values: string[]; not: boolean };
 export type SortKey = "updated" | "created" | "comments" | "priority" | "discord";
-export type ItemQuery = { terms: QueryTerm[]; text: string; numbers: number[]; sort: { by: SortKey; asc: boolean }; unknown: string[] };
+export type ItemQuery = { terms: QueryTerm[]; text: string; numbers: number[]; sort: { by: SortKey; asc: boolean; given?: boolean }; unknown: string[] };
 
 export const SORTS: readonly SortKey[] = ["updated", "created", "comments", "priority", "discord"];
 export const DEFAULT_SORT: SortKey = "updated";
@@ -173,7 +173,7 @@ export function parseItemQuery(q: string): ItemQuery {
     const parts = raw.split(",").map((s) => s.trim()).filter(Boolean).slice(0, name === "items" ? MAX_ITEMS : MAX_VALUES);
     if (name === "sort" && !not) {
       const m = /^([a-z]+)(-asc|-desc)?$/.exec(raw.toLowerCase());
-      if (m && (SORTS as readonly string[]).includes(m[1]!)) sort = { by: m[1] as SortKey, asc: m[2] === "-asc" };
+      if (m && (SORTS as readonly string[]).includes(m[1]!)) sort = { by: m[1] as SortKey, asc: m[2] === "-asc", given: true };
       else unknown.push(tok);
       continue;
     }

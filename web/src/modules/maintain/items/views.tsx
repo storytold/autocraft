@@ -7,7 +7,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type Ref, type RefObject } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
-  CaretDownIcon, ChatCircleIcon, CheckCircleIcon, CircleDashedIcon, DiscordLogoIcon, FunnelIcon, GitPullRequestIcon, HourglassMediumIcon, PlayIcon, QuestionIcon, RadioButtonIcon,
+  CaretDownIcon, ChatCircleIcon, CheckCircleIcon, CircleDashedIcon, DiscordLogoIcon, FunnelIcon, GitPullRequestIcon, HourglassMediumIcon, PaperPlaneRightIcon, PlayIcon, QuestionIcon, RadioButtonIcon,
   StopCircleIcon, UsersThreeIcon, XCircleIcon, XIcon, type Icon,
 } from "@phosphor-icons/react";
 import { t } from "../../../../../src/i18n/index.ts";
@@ -15,7 +15,7 @@ import {
   AUTOCRAFT_STATES, DEFAULT_QUERY, itemOfValue, itemsTerm, KINDS, MAX_ITEMS, PRESETS, PRIORITIES, parseItemQuery, presetOf, splitWords, STEPS, termValues, tokens, withTerm,
   type QueryKey, type QueryTerm, type StepValue,
 } from "../../../../../src/core/item-query.ts";
-import { itemsIn, listForm, parse } from "../../../../../src/workflow/parse.ts";
+import { itemsIn, listForm, parse, wordsBesideItems } from "../../../../../src/workflow/parse.ts";
 import { useApi, useQuery } from "../../../api/client";
 import { usePageProject } from "../../../api/scope";
 import type { BrowseAutocraft, BrowseRow, BrowseStepState, MaintainCommandResult } from "../../../api/types";
@@ -27,6 +27,7 @@ import { Badge, type Tone } from "../../../ui/atoms/Badge";
 import { Button } from "../../../ui/atoms/Button";
 import { Chip } from "../../../ui/atoms/Chip";
 import { GithubButton } from "../../../ui/atoms/GithubButton";
+import { ErrorLine } from "../../../ui/atoms/ErrorLine";
 import { Input } from "../../../ui/atoms/Input";
 import { LabelPill } from "../../../ui/atoms/LabelPill";
 import { causeText } from "../../../lib/stuck";
@@ -345,8 +346,10 @@ function Who({ r, byCreated, className }: { r: BrowseRow; byCreated: boolean; cl
   );
 }
 
-function Row({ r, opened, byCreated, picking, picked, may, onPick, onOpen, phone }: {
+function Row({ r, opened, byCreated, picking, picked, may, onPick, onOpen, phone, reply }: {
   phone: boolean; r: BrowseRow; opened: boolean; byCreated: boolean; picking: boolean; picked: boolean; may: boolean; onPick: (on: boolean) => void; onOpen: ((keyboard: boolean) => void) | null;
+  /** The reply to the command sent to the pasted list, for this item. */
+  reply?: ItemReply;
 }) {
   // On desktop the row itself takes the focus: a click on it, away from its links and tick box, or Enter on it opens the item
   // beside the list. On phones the item link covers the row.
@@ -380,12 +383,29 @@ function Row({ r, opened, byCreated, picking, picked, may, onPick, onOpen, phone
             {t(causeText(r.liveness.cause))}{r.liveness.wait ? `: ${r.liveness.wait}` : ""} · {t("since")} <TimeAgo iso={r.liveness.since} className="relative z-10" />
           </p>
         )}
+        {reply && <ReplyLine reply={reply} />}
       </div>
       <div className="flex shrink-0 flex-col items-end gap-1.5 pt-0.5 text-xs text-ink/70 max-md:hidden">
         <GithubButton href={githubItemUrl(r.repo, r.number, r.kind)} label={t("Open {ref} on GitHub", { ref: refOf(r) })} />
         <Who r={r} byCreated={byCreated} />
       </div>
     </li>
+  );
+}
+
+/** What the command sent to a pasted list answered for one item: the confirmation line, or why it did not run. */
+type ItemReply = { ran: boolean; line: string };
+
+function ReplyLine({ reply }: { reply: ItemReply }) {
+  const Mark = reply.ran ? CheckCircleIcon : XCircleIcon;
+  return (
+    <p className={cn("mt-1 flex items-start gap-1.5 text-sm [overflow-wrap:anywhere]", reply.ran ? "text-ink" : "text-bad", UNDER_TITLE)}>
+      <Mark aria-hidden weight="fill" className={cn("mt-0.5 shrink-0", reply.ran ? "text-ok" : "text-bad")} />
+      <span>
+        <span className="sr-only">{reply.ran ? t("Sent:") : t("Not run:")} </span>
+        {reply.line}
+      </span>
+    </p>
   );
 }
 
@@ -713,6 +733,77 @@ function ViewChips({ picked, counts, onPick }: { picked: string | null; counts: 
   );
 }
 
+/**
+ * The one action of a pasted list that starts with a command: the command goes to each listed item on its own, through the same
+ * command core and permission checks as a command written on the item, and each item's reply shows beside its row.
+ */
+function SendToList({ words, refs, onSent }: { words: string; refs: string[]; onSent: (r: MaintainCommandResult) => void }) {
+  const api = useApi();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const send = async () => {
+    if (busy || !refs.length) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.maintain.command(words, { items: refs });
+      if (r.items.length) onSent(r);
+      else setError(r.lines.join(" ") || t("The command did not run."));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const n = refs.length;
+  return (
+    <div className="flex flex-col gap-2">
+      <Button variant="primary" icon={PaperPlaneRightIcon} loading={busy} onClick={() => void send()} className="self-start max-md:h-11 max-md:w-full">
+        {n === 1 ? t("Send “{command}” to 1 item", { command: words }) : t("Send “{command}” to {n} items", { command: words, n: num(n) })}
+      </Button>
+      <ErrorLine error={error} />
+    </div>
+  );
+}
+
+/** What the sent command did, over the whole list. */
+function sentText(command: string, r: MaintainCommandResult): string {
+  const ran = r.items.filter((x) => x.outcome === "run").length;
+  const total = r.items.length;
+  if (ran === total) return total === 1 ? t("Sent “{command}” to 1 item.", { command }) : t("Sent “{command}” to all {n} items.", { command, n: num(total) });
+  if (!ran) return t("“{command}” did not run on any of the {n} items.", { command, n: num(total) });
+  return t("Sent “{command}” to {ran} of {n} items. Not run on {left}.", { command, ran: num(ran), n: num(total), left: num(total - ran) });
+}
+
+/** Named items the list does not hold: not tracked, or in a repo the reader may not see. */
+function NotFound({ refs }: { refs: string[] }) {
+  return (
+    <section aria-labelledby="items-not-found" className="rounded-lg border border-line px-3 py-2.5">
+      <h2 id="items-not-found" className="text-sm font-medium">
+        {refs.length === 1 ? t("1 not found") : t("{n} not found", { n: num(refs.length) })}
+      </h2>
+      <ul className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
+        {refs.map((r) => (
+          <li key={r} className="code text-sm text-ink/70">
+            {r}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** The items of a query that is only an `items:` term: each as written (`owner/repo#n` or `repo#n`) and as a row's ref; null for any other query. */
+function namedOnly(q: string): { shown: string; ref: string }[] | null {
+  const parsed = parseItemQuery(q);
+  const term = parsed.terms[0];
+  if (parsed.terms.length !== 1 || term!.key !== "items" || term!.not || parsed.text || parsed.numbers.length) return null;
+  return term!.values.flatMap((v) => {
+    const i = itemOfValue(v);
+    return i ? [{ shown: `${i.owner ? `${i.owner}/` : ""}${i.repo}#${i.number}`, ref: `${i.repo}#${i.number}` }] : [];
+  });
+}
+
 /** Keys of a focused row on desktop, for the shortcut sheet. */
 const ROW_KEYS: Command[] = [
   { id: "items-row-open", keys: "enter", label: t("Open the focused item beside the list"), group: t("Items") },
@@ -732,6 +823,11 @@ export function ItemsView(props: ViewProps) {
   const [reply, setReply] = useState<{ lines: string[]; ok: boolean } | null>(null);
   const [announced, setAnnounced] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
+  // A pasted list: the query it became, the command's words when it starts with a command, and how many items it named past the
+  // most a list holds; then each item's reply once the command was sent.
+  const [pasted, setPasted] = useState<{ q: string; words: string | null; over: number } | null>(null);
+  const [sent, setSent] = useState<{ q: string; replies: Map<string, ItemReply>; text: string } | null>(null);
+  const sentLine = useRef<HTMLParagraphElement>(null);
   const selectAllBox = useRef<HTMLInputElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const writes = user.role !== "viewer" && user.runRepos.length > 0;
@@ -764,14 +860,37 @@ export function ItemsView(props: ViewProps) {
   const openItem = useOpenItem();
   const openRow = phone ? null : (ref: string, keyboard = true) => openItem(ref.slice(0, ref.lastIndexOf("#")), Number(ref.slice(ref.lastIndexOf("#") + 1)), { keyboard });
 
-  // Text that names items becomes the list of exactly those items; a bare #n names an item only on a page scoped to one repo.
-  const paste = (e: ClipboardEvent<HTMLInputElement>) => {
-    const items = itemsIn(e.clipboardData.getData("text"), project ?? undefined);
-    if (!items.length) return;
-    e.preventDefault();
+  // Text that names items becomes the list of exactly those items, in the order written; a bare #n names an item only on a page
+  // scoped to one repo. Words the command parser reads, beside the items, become the list's command.
+  const toList = (text: string): boolean => {
+    const items = itemsIn(text, project ?? undefined);
+    if (!items.length) return false;
     const q = itemsTerm(items, ownerOfRepo);
+    const words = wordsBesideItems(text, project ?? undefined);
+    const over = Math.max(0, items.length - termValues(q, "items").length);
+    setPasted({ q, words: words && parse(words, project ? { repo: project } : {}).kind !== "ambiguous" ? words : null, over });
+    setSent(null);
     setTyped(q);
     set(q);
+    return true;
+  };
+  const paste = (e: ClipboardEvent<HTMLInputElement>) => {
+    if (toList(e.clipboardData.getData("text"))) e.preventDefault();
+  };
+  // Typed refs and links make the list too; a ref inside a qualifier (`items:a#1`) stays the qualifier's.
+  const submit = (v: string) => {
+    if (!toList(v.split(/\s+/).filter((tok) => !/^-?[\w-]+:(?!\/\/)/.test(tok)).join(" "))) set(v);
+  };
+  const named = namedOnly(url.q);
+  const missing = data && named ? named.filter((x) => !data.rows.some((r) => refOf(r) === x.ref)).map((x) => x.shown) : [];
+  const shownPaste = pasted && pasted.q === url.q ? pasted : null;
+  const command = writes && shownPaste?.words && data && data.rows.length > 0 ? shownPaste.words : null;
+  const replies = sent && sent.q === url.q ? sent.replies : null;
+  const onSent = (r: MaintainCommandResult) => {
+    const text = sentText(pasted?.words ?? "", r);
+    setSent({ q: url.q, replies: new Map(r.items.map((x) => [refOf(x), { ran: x.outcome === "run", line: x.line }])), text });
+    setAnnounced(text);
+    requestAnimationFrame(() => sentLine.current?.focus());
   };
 
   const select = (next: Set<string>) => {
@@ -820,7 +939,7 @@ export function ItemsView(props: ViewProps) {
 
           <div className="flex flex-wrap gap-2">
             <div className="min-w-0 flex-1 basis-48">
-              <SearchField value={typed} onChange={setTyped} onSubmit={(v) => set(v)} onPaste={paste} label={t("Search items")} placeholder={t("Words, refs or links, or is:open label:bug")} />
+              <SearchField value={typed} onChange={setTyped} onSubmit={submit} onPaste={paste} label={t("Search items")} placeholder={t("Words, refs or links, or is:open label:bug")} />
             </div>
             <span className="flex shrink-0 items-center gap-2">
               <MatchToggle meaning={url.meaning} onChange={(m) => url.go({ meaning: m })} className="max-md:hidden" />
@@ -867,10 +986,21 @@ export function ItemsView(props: ViewProps) {
             )}
           </div>
 
+          {shownPaste && shownPaste.over > 0 && (
+            <p className="text-sm text-warn">{t("A list holds at most {max} items: the last {n} pasted are left out.", { max: num(MAX_ITEMS), n: num(shownPaste.over) })}</p>
+          )}
+          {command !== null && (replies ? (
+            <p ref={sentLine} tabIndex={-1} className="text-sm font-medium outline-none">
+              {sent!.text}
+            </p>
+          ) : (
+            <SendToList words={command} refs={data!.rows.map(refOf)} onSent={onSent} />
+          ))}
+
           {!data ? (
             <Pending error={error} />
           ) : data.rows.length === 0 ? (
-            <div className="rounded-lg border border-line px-4 py-6 text-md">{t("No items match.")}</div>
+            missing.length ? null : <div className="rounded-lg border border-line px-4 py-6 text-md">{t("No items match.")}</div>
           ) : (
             <div className="rounded-lg border border-line bg-panel">
               {writes && <SelectAll refs={data.rows.filter((r) => user.runRepos.includes(r.repo)).map(refOf)} picked={picked} onPick={pick} boxRef={selectAllBox} />}
@@ -892,12 +1022,14 @@ export function ItemsView(props: ViewProps) {
                     onPick={(on) => pick([refOf(r)], on)}
                     onOpen={openRow && ((keyboard) => openRow(refOf(r), keyboard))}
                     phone={phone}
+                    reply={replies?.get(refOf(r))}
                   />
                 ))}
               </ul>
               <Pager offset={data.offset} limit={data.limit} total={data.total} onOffset={(o) => url.go({ offset: o })} />
             </div>
           )}
+          {missing.length > 0 && <NotFound refs={missing} />}
         </div>
       </div>
       {barShown && <CommandBar text={cmd} setText={setCmd} items={[...picked]} onClear={clear} onDone={done} reply={reply} onCloseReply={() => { setReply(null); refocus(); }} />}

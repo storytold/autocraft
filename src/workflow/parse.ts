@@ -726,6 +726,11 @@ export function itemsIn(text: string, repo?: string): ItemRef[] {
   return pullItems(text.replace(/[<>`]/g, " "), repo).items;
 }
 
+/** The words of a pasted text once the items `itemsIn` reads are taken out, with the list form's colon and the separators between items. */
+export function wordsBesideItems(text: string, repo?: string): string {
+  return pullItems(text.replace(/[<>`]/g, " "), repo).text.replace(/(?:[\s,;:&]|\band\b)+$/i, "").replace(/\s+/g, " ").trim();
+}
+
 /** Items in a list: `owner/name#12`, `name#12`, a GitHub URL, or a bare `#12`/`12` taking the repo before it. */
 function readItems(text: string, repo: string | undefined): { items: ItemRef[]; bad: string[] } {
   const items: ItemRef[] = [];

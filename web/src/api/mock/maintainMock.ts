@@ -119,9 +119,10 @@ function commandFor(me: User, text: string, ticked: string[] = []): MaintainComm
   const items = refs.map((ref) => {
     const [repo, n] = ref.split("#");
     const ok = me.runRepos.includes(repo ?? "");
-    return { repo: repo ?? "", number: Number(n), outcome: ok ? ("run" as const) : ("refused" as const), line: ok ? `${ref}: ${words} (by ${me.login})` : `${me.login} has no write access to ${repo}.`, workflowId: ok ? 1 : null };
+    const line = ok ? (/^review and merge\b/i.test(words) ? `Reviewing, then merging when CI is green, by ${me.login} at 14:05. Reply hold to halt.` : `${words} by ${me.login} at 14:05.`) : `${me.login} has no write access to ${repo}.`;
+    return { repo: repo ?? "", number: Number(n), outcome: ok ? ("run" as const) : ("refused" as const), line, workflowId: ok ? 1 : null };
   });
-  return { items, lines: items.map((i) => i.line) };
+  return { items, lines: items.map((i) => `${i.repo}#${i.number}: ${i.line}`) };
 }
 
 const REPOS: MaintainRepo[] = [
