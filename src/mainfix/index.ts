@@ -8,14 +8,17 @@
 //          lost is looked up in the audit and on GitHub before another one is made.
 //   code   a compile, test, lint or format failure: recorded as needs-fix for the fix PR step (`onCodeVerdict`).
 // A failure log GitHub does not serve yet is recorded as an `unread` row at the head and read again once per main CI poll interval,
-// for at most an hour. A model reply that sorts none of the checks is tried again after the failure backoff, at most 3 times. Only a
-// usable classification counts toward the step's daily limit.
+// for at most an hour (a fix PR's re-read of the log keeps reading it hourly after that). A classification call that ended without a
+// reply (lost, given back, ended with its job) and a model reply that sorts none of the checks leave the head `unclassified` and are
+// asked again after CLASSIFY_RETRY_MS; only the replies count, and the third unusable one gives the head up. A rerun GitHub refused
+// stays `rerun-requested` with the reason and is asked again on RERUN_RETRY_MS. Only a usable classification counts toward the
+// step's daily limit.
 // The log is untrusted text: it only reaches a model that has no tools, and what is stored or posted is scrubbed.
 //
 //   autocraft-server main-fix --repo R [--apply]
 //   autocraft-server main-fix-approval [--repo R]
 import { leaseItem } from "../runner/leases.ts";
-import { countMainFixes, dropMainFix, loadMainFixHeads, loadMainFixes, loadMainFixDue, saveMainFixes, type MainFixRow } from "../data/changes/index.ts";
+import { dropMainFix, loadMainFixHeads, loadMainFixes, loadMainFixDue, saveMainFixes, type MainFixRow } from "../data/changes/index.ts";
 import { listAudit, loadTrackedRepos, loadStepApprovals } from "../data/control/index.ts";
 import { loadMainCiAt } from "../data/mirror/index.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
@@ -34,6 +37,8 @@ import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { cleanLine } from "../review/post-template.ts";
 import { scrub } from "../runner/scrub.ts";
 import { approvedRepos, repoApproved } from "../core/repo-approvals.ts";
+import { repeatAfter } from "../core/rules.ts";
+import type { MainFixTry } from "../data/changes/main-fixes.ts";
 import { lintReadyIn, openFixPrs, type FixPrDeps } from "./pr.ts";
 import { REASON_WORDS, VERDICTS, type MainFixInput, type MainFixVerdict } from "./types.ts";
 import { slugOf } from "../owners.ts";
@@ -60,13 +65,22 @@ const HEAD_ROW = "(none)";
 const UNREAD_GIVE_UP_MS = 60 * 60_000;
 /** Model replies at a head that sort none of its failed checks before the head is given up. */
 const UNUSABLE_GIVE_UP = 3;
+/** An unclassified head (a call that ended without a reply, or a reply that sorted nothing) is asked again this long after. */
+const CLASSIFY_RETRY_MS = 5 * 60_000;
+/** A rerun GitHub refused is asked again after these delays, then hourly while the head stays red. */
+const RERUN_RETRY_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000];
+const HOUR_MS = 60 * 60_000;
+/** Every 5 minutes while a rerun waits for its result. */
+const RERUN_SLOT_MS = 5 * 60_000;
 
 export type Verdict = { check: string; verdict: MainFixVerdict; reason: string };
+/** A classification call that ended without a reply: lost, given back, ended with its job, or a reply refused before it was read. */
+export type CallLost = { lost: string };
 export type MainFixDeps = {
   gh: Gh;
   exec: Exec;
-  /** Sorts the failed checks of one head; null when the model gave no usable answer. */
-  classify: (db: Db, input: MainFixInput) => Promise<Verdict[] | null>;
+  /** Sorts the failed checks of one head; null when the model's reply sorted none of them. */
+  classify: (db: Db, input: MainFixInput) => Promise<Verdict[] | null | CallLost>;
   now: () => Date;
   /** What the fix PR step needs; without it no fix PR is made. */
   fix?: FixPrDeps;
@@ -96,7 +110,7 @@ export function defaultDeps(): MainFixDeps {
       const reply = await askClaude("mainfix.classify", model, [input], db);
       const usage = reply?.usage ?? ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null } as Usage);
       await saveUsage(db, `main-fix-${start.replace(/[-:]/g, "").slice(0, 15)}`, "main-fix", "main-fix", model, reply ? 1 : 0, usage, start, new Date().toISOString());
-      return reply ? parseVerdicts(reply.text, input.checks.map((c) => c.check)) : null;
+      return reply ? parseVerdicts(reply.text, input.checks.map((c) => c.check)) : { lost: "the classification call ended without a reply" };
     },
   };
 }
@@ -174,14 +188,21 @@ export async function mainFixDueRepos(db: Db, repos: readonly string[], o: { now
     // An issue whose create was interrupted or held back is settled once the head's result is known.
     if (due.opening && known(cur)) return true;
     if (cur.state === "red") {
-      if (classified(due.rows)) return due.rows.some((r) => r.state === "rerun-requested" || r.state === "needs-fix");
-      const unread = due.rows.find((r) => r.state === "unread");
-      if (!unread) return true;
-      // A failure log GitHub did not serve yet is read again after the next main CI poll, then once in each poll interval
-      // (mainFixClock moves the lane's fingerprint; a retry that reads nothing writes nothing).
-      const next = Date.parse(unread.updatedAt) + POLL_EVERY_MS;
-      o.wake?.push(next > now ? next : (Math.floor(now / POLL_EVERY_MS) + 1) * POLL_EVERY_MS);
-      return next <= now;
+      // A timed row is due once its next try is (nextTry); the planner wakes when its slot moves on.
+      const timed = (r: MainFixTry): boolean => {
+        const t = nextTry(r, now);
+        if (!t) return true;
+        if (Number.isFinite(t.next)) o.wake?.push(t.next);
+        return t.due;
+      };
+      const headRow = due.rows.find((r) => r.check === HEAD_ROW && (r.state === "unread" || r.state === "unclassified"));
+      if (classified(due.rows)) {
+        // A fix PR whose re-read of the log found none waits on the head's unread row.
+        const needs = due.rows.some((r) => r.state === "needs-fix") && (headRow?.state !== "unread" || timed(headRow));
+        const reruns = due.rows.filter((r) => r.state === "rerun-requested").map(timed);
+        return needs || reruns.some(Boolean);
+      }
+      return !headRow || timed(headRow);
     }
     // A row left at needs-fix by an older head is closed by the next run.
     return due.rows.some((r) => r.state === "rerun-requested") || due.staleNeedsFix;
@@ -189,16 +210,44 @@ export async function mainFixDueRepos(db: Db, repos: readonly string[], o: { now
 }
 
 /**
- * The part of the main-fix lane's fingerprint that moves with the clock: every 5 minutes while a rerun waits for its result, every
- * main CI poll interval while the current red head of a repo has a failure log not readable yet (a row left at an older head moves
- * nothing).
+ * When a timed row's next try is due: `due` now, the `slot` that try belongs to and when the slot moves on (`next`, ms). Null for a row
+ * that waits on nothing timed.
+ *   unread         read again after the next main CI poll, then once per poll interval for an hour, then hourly (a retry that reads
+ *                  nothing writes nothing, so the slot moves the lane's clock)
+ *   unclassified   asked again CLASSIFY_RETRY_MS after the last try
+ *   rerun-requested  a refused one (tries > 0) asked again on RERUN_RETRY_MS; a sent one is looked at every 5 minutes for its result
+ */
+function nextTry(r: MainFixTry, now: number): { due: boolean; slot: string; next: number } | null {
+  if (r.state === "unread") {
+    const from = Date.parse(r.createdAt), age = now - from;
+    const every = age < UNREAD_GIVE_UP_MS ? POLL_EVERY_MS : HOUR_MS;
+    const k = Math.floor(age / every);
+    return { due: k >= 1, slot: `${every}:${k}`, next: from + Math.max(k + 1, 1) * every };
+  }
+  const once = (at: number) => ({ due: at <= now, slot: `${r.updatedAt}:${at <= now ? 1 : 0}`, next: at <= now ? Infinity : at });
+  if (r.state === "unclassified") return once(Date.parse(r.updatedAt) + CLASSIFY_RETRY_MS);
+  if (r.state === "rerun-requested") {
+    if (r.tries > 0) return once(repeatAfter(Date.parse(r.updatedAt), r.tries, RERUN_RETRY_MS));
+    const k = Math.floor(now / RERUN_SLOT_MS);
+    return { due: true, slot: String(k), next: (k + 1) * RERUN_SLOT_MS };
+  }
+  return null;
+}
+
+/**
+ * The part of the main-fix lane's fingerprint that moves with the clock: the slot of every timed row at the current head of its repo
+ * (nextTry; an unread or unclassified head only while it is red). A row left at an older head moves nothing.
  */
 export async function mainFixClock(db: Db, now: number): Promise<string> {
-  const rerun = await countMainFixes(db, { state: "rerun-requested" });
-  const rows = await loadMainFixHeads(db, "unread");
-  const heads = rows.length ? await currentHeads(db, [...new Set(rows.map((r) => r.repo))]) : new Map<string, Current>();
-  const unread = rows.filter((r) => { const c = heads.get(r.repo); return c?.state === "red" && c.headSha === r.headSha; }).length;
-  return [rerun ? `${rerun}:${Math.floor(now / 300_000)}` : "", unread ? `unread ${unread}:${Math.floor(now / POLL_EVERY_MS)}` : ""].filter(Boolean).join(";");
+  const rows = await loadMainFixHeads(db, ["rerun-requested", "unread", "unclassified"]);
+  if (!rows.length) return "";
+  const heads = await currentHeads(db, [...new Set(rows.map((r) => r.repo))]);
+  return rows.flatMap((r) => {
+    const c = heads.get(r.repo);
+    if (c?.headSha !== r.headSha || (r.state !== "rerun-requested" && c.state !== "red")) return [];
+    const t = nextTry(r, now);
+    return t ? [`${r.repo}@${r.headSha.slice(0, 8)}:${r.check}:${t.slot}`] : [];
+  }).join(";");
 }
 
 /** Whether a run of the step has something to do for the repo. */
@@ -224,15 +273,21 @@ const inputOf = (repo: string, f: CiFailure): MainFixInput => ({
   checks: f.checks.map((c) => ({ check: c.name, conclusion: c.conclusion, steps: c.steps.map((s) => ({ job: s.job, step: s.step, log: scrub(s.tail) })) })),
 });
 
+/** The fields of a row of the head as a whole (check HEAD_ROW) that hold nothing for it. */
+const headBase = (repo: string, headSha: string, at: string) => ({ repo, headSha, check: HEAD_ROW, verdict: "code", runId: null, runUrl: null, excerpt: null, issueNumber: null, prNumber: null, prUrl: null, patch: null, files: null, lintTask: null, lintRound: null, lintState: null, session: null, createdAt: at } as const);
+
+const hhmm = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
+
 /**
  * Reads and sorts the failed checks of the red head. `count` is called once the model sorted them: a reading that finds nothing to
- * do, a log not readable yet or a model reply that sorts nothing uses none of the step's daily limit. Returns why a model reply was
- * unusable, for the failure backoff; the third such reply at the head gives it up.
+ * do, a log not readable yet, a call without a reply or a model reply that sorts nothing uses none of the step's daily limit. Returns
+ * what left the head unclassified, for the job's summary; the third unusable reply at the head gives it up.
  */
 async function classifyHead(db: Db, repo: string, cur: Current, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, count: () => void, by: By = CLI_BY): Promise<string | null> {
   const at = deps.now().toISOString();
   const reading = await readFailure(deps.gh, repo, cur.headSha, await optionalChecks(db, repo));
-  const base = { repo, headSha: cur.headSha, runId: null, runUrl: null, excerpt: null, issueNumber: null, prNumber: null, prUrl: null, patch: null, files: null, lintTask: null, lintRound: null, lintState: null, session: null, createdAt: at } as const;
+  const { check: _check, ...base } = headBase(repo, cur.headSha, at);
+  const short = cur.headSha.slice(0, 8);
   if (reading.kind === "skip") {
     await save(db, { ...base, check: HEAD_ROW, verdict: "code", state: "nothing-to-do", reason: oneLine(reading.why), updatedAt: at }, at);
     log(`  ${repo}: nothing to do: ${reading.why}`);
@@ -250,22 +305,26 @@ async function classifyHead(db: Db, repo: string, cur: Current, deps: MainFixDep
       // Only the first unread reading is written: a retry that reads nothing moves no planner input.
       if (!unread) await save(db, { ...base, check: HEAD_ROW, verdict: "code", state: "unread", reason: why, updatedAt: at }, at);
       log(`  ${repo}: ${why}; read again after the next main CI poll`);
+      return `${short} not classified: its failure log could not be read yet`;
     }
     return null;
   }
   const failure = reading.failure;
   const verdicts = await deps.classify(db, inputOf(repo, failure));
-  if (!verdicts) {
-    const tries = (headRow?.state === "unclassified" ? headRow.tries ?? 0 : 0) + 1;
-    const why = `no usable classification of the failed checks at ${cur.headSha.slice(0, 8)}`;
+  if (!verdicts || "lost" in verdicts) {
+    // A call without a reply is no model reply: it keeps the head's count, and the head is asked again however often that happens.
+    const before = headRow?.state === "unclassified" ? headRow.tries ?? 0 : 0;
+    const tries = verdicts ? before : before + 1;
+    const why = verdicts ? `${verdicts.lost} at ${short}` : `no usable classification of the failed checks at ${short}`;
     if (tries >= UNUSABLE_GIVE_UP) {
       await save(db, { ...base, check: HEAD_ROW, verdict: "code", state: "nothing-to-do", reason: `${why} after ${tries} model replies`, tries, updatedAt: at }, at);
       log(`  ${repo}: given up: ${why} after ${tries} model replies`);
       return null;
     }
     await save(db, { ...base, check: HEAD_ROW, verdict: "code", state: "unclassified", reason: why, tries, updatedAt: at }, at);
-    log(`  ${repo}: ${why}`);
-    return `${repo}: ${why}`;
+    const again = hhmm(Date.parse(at) + CLASSIFY_RETRY_MS);
+    log(`  ${repo}: ${why}; asked again at ${again}`);
+    return `${short} not classified: ${verdicts ? verdicts.lost : "the model's reply sorted none of the failed checks"}; asked again at ${again}`;
   }
   count();
   s.classified++;
@@ -287,14 +346,38 @@ async function classifyHead(db: Db, repo: string, cur: Current, deps: MainFixDep
   if (headRow) await dropMainFix(db, { repo, headSha: cur.headSha, check: HEAD_ROW });
   s.needsFix += rows.filter((r) => r.state === "needs-fix").length;
   for (const r of rows) if (r.state === "rerun-requested" && r.runId !== null) (rerunRuns.get(r.runId) ?? rerunRuns.set(r.runId, []).get(r.runId)!).push(r);
-  const w: Writer = { db, login: ACTOR };
-  for (const [runId, rows] of rerunRuns) {
-    const g = await guardRepo(db, repo, "main-fix", by);
-    const res = "refused" in g ? { code: 1, stdout: "", stderr: g.refused } : await ghRerunMainFailed(w, g, deps.exec, { repo, head: cur.headSha, runId }, { checks: rows.map((r) => r.check) });
-    if (res.code !== 0) for (const r of rows) await setState(db, r, "nothing-to-do", `GitHub refused the rerun: ${oneLine(res.stderr || res.stdout, 120)}`, deps.now().toISOString());
-    else { s.reran++; log(`  ${repo}: reran the failed jobs of run ${runId}`); }
-  }
+  for (const [runId, rows] of rerunRuns) await requestRerun(db, repo, cur, runId, rows, deps, log, s, by);
   return null;
+}
+
+/**
+ * Asks GitHub to rerun the failed jobs of one run for its rows. A refusal (or a write the guard holds back) keeps the rows
+ * `rerun-requested` with the reason and one more refused try (`tries`); they are asked again on RERUN_RETRY_MS while the head is red.
+ */
+async function requestRerun(db: Db, repo: string, cur: Current, runId: number, rows: FixRow[], deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By): Promise<void> {
+  const g = await guardRepo(db, repo, "main-fix", by);
+  const res = "refused" in g ? { code: 1, stdout: "", stderr: g.refused } : await ghRerunMainFailed({ db, login: ACTOR }, g, deps.exec, { repo, head: cur.headSha, runId }, { checks: rows.map((r) => r.check) });
+  const at = deps.now().toISOString();
+  if (res.code === 0) {
+    s.reran++;
+    log(`  ${repo}: reran the failed jobs of run ${runId}`);
+    // The wait for the rerun's result counts from the request GitHub took.
+    for (const r of rows.filter((x) => (x.tries ?? 0) > 0)) await setState(db, r, "rerun-requested", `the failed jobs were rerun after ${r.tries} refused request${r.tries === 1 ? "" : "s"}`, at, { tries: 0 });
+    return;
+  }
+  const why = `GitHub refused the rerun: ${oneLine(res.stderr || res.stdout, 120)}`;
+  for (const r of rows) await setState(db, r, "rerun-requested", why, at, { tries: (r.tries ?? 0) + 1 });
+  log(`  ${repo}: ${why}; asked again later`);
+}
+
+/** The refused reruns of the head whose next try is due, by run. */
+function dueReruns(rows: readonly FixRow[], now: number): Map<number, FixRow[]> {
+  const out = new Map<number, FixRow[]>();
+  for (const r of rows) {
+    if (r.state !== "rerun-requested" || !(r.tries ?? 0) || r.runId === null || !nextTry({ ...r, tries: r.tries ?? 0 }, now)?.due) continue;
+    (out.get(r.runId) ?? out.set(r.runId, []).get(r.runId)!).push(r);
+  }
+  return out;
 }
 
 /**
@@ -360,12 +443,12 @@ async function openInfraIssue(db: Db, repo: string, check: string, cur: Current,
   }
 }
 
-/** Rows waiting on a rerun: green is a pass; red again after a new reading, or after the wait, is a code failure. */
+/** Rows waiting on a rerun: green is a pass; red again after a new reading, or after the wait, is a code failure. A refused rerun was never run: it waits for its next request. */
 async function settleReruns(db: Db, repo: string, cur: Current, deps: MainFixDeps, s: MainFixSummary): Promise<void> {
   const at = deps.now().toISOString();
   for (const r of (await rowsAt(db, repo, cur.headSha)).filter((x) => x.state === "rerun-requested")) {
     if (cur.state === "green" || cur.state === "optional") { await setState(db, r, "rerun-passed", r.reason, at); continue; }
-    if (cur.state !== "red") continue;
+    if (cur.state !== "red" || (r.tries ?? 0) > 0) continue;
     const changedSince = cur.stateChangedAt > r.updatedAt;
     if (changedSince || deps.now().getTime() - Date.parse(r.updatedAt) > RERUN_WAIT_MS) { await onCodeVerdict(db, r, "red again after a rerun", at); s.needsFix++; }
   }
@@ -385,27 +468,46 @@ export async function runMainFix(db: Db, params: { repo: string; onHandled?: (n:
   const cur = await currentOf(db, repo);
   if (!cur) return s;
   await settleReruns(db, repo, cur, deps, s);
-  let unusable: string | null = null;
-  if (cur.state === "red" && !classified(await rowsAt(db, repo, cur.headSha)) && !await params.stopping?.()) {
-    const release = await leaseItem(db, `head:${repo}@${cur.headSha}`, log);
-    // Another job may have classified the head before the lease was taken.
-    if (release) {
-      try {
-        if (!classified(await rowsAt(db, repo, cur.headSha))) unusable = await classifyHead(db, repo, cur, deps, log, s, bump, params.by ?? CLI_BY);
-      } finally { await release(); }
+  const by = params.by ?? CLI_BY;
+  const work = (rows: readonly FixRow[]): boolean => !classified(rows) || dueReruns(rows, deps.now().getTime()).size > 0;
+  if (cur.state === "red" && work(await rowsAt(db, repo, cur.headSha))) {
+    if (await params.stopping?.()) s.note = `stopping: ${cur.headSha.slice(0, 8)} was not classified or its rerun not asked again`;
+    else {
+      const release = await leaseItem(db, `head:${repo}@${cur.headSha}`, log);
+      // Another job may have classified the head before the lease was taken.
+      if (release) {
+        try {
+          const rows = await rowsAt(db, repo, cur.headSha);
+          if (!classified(rows)) s.note = await classifyHead(db, repo, cur, deps, log, s, bump, by);
+          else for (const [runId, list] of dueReruns(rows, deps.now().getTime())) await requestRerun(db, repo, cur, runId, list, deps, log, s, by);
+        } finally { await release(); }
+      }
     }
   }
-  const unsettled = await openInfraIssues(db, repo, cur, deps, log, s, params.by ?? CLI_BY);
+  const unsettled = await openInfraIssues(db, repo, cur, deps, log, s, by);
   if (deps.fix) {
     const asHead = (c: Current | null) => (c ? { headSha: c.headSha, branch: c.branch, state: c.state, redSince: c.redSince, culprit: c.culprit, culpritPr: c.culpritPr } : null);
-    const r = await openFixPrs({ db, repo, gh: deps.gh, exec: deps.exec, fix: deps.fix, now: deps.now, log, by: params.by, ...(params.stopping && { stopping: params.stopping }), setState: async (r, state, reason, at, extra) => await setState(db, r, state, reason, at, extra), current: async () => asHead(await currentOf(db, repo)) }, bump);
+    const r = await openFixPrs({
+      db, repo, gh: deps.gh, exec: deps.exec, fix: deps.fix, now: deps.now, log, by: params.by, ...(params.stopping && { stopping: params.stopping }),
+      setState: async (r, state, reason, at, extra) => await setState(db, r, state, reason, at, extra), current: async () => asHead(await currentOf(db, repo)),
+      unread: async (head, why) => await markUnread(db, repo, head, why, deps.now().toISOString()),
+    }, bump);
     s.prs = r.opened;
   }
-  log(`main-fix ${repo}: classified ${s.classified}, reran ${s.reran}, needs fix ${s.needsFix}, issues ${s.issues}, fix PRs ${s.prs}`);
+  log(`main-fix ${repo}: classified ${s.classified}, reran ${s.reran}, needs fix ${s.needsFix}, issues ${s.issues}, fix PRs ${s.prs}${s.note ? `; ${s.note}` : ""}`);
   // The job fails: the failure backoff spaces the next look (a paced write's message is skipped by it, so the next pass runs it again).
-  if (unusable) unsettled.push(unusable);
   if (unsettled.length) throw new Error(unsettled.join("; "));
   return s;
+}
+
+/**
+ * The head row that says a fix PR's re-read of the failure log found none (`why`), or, with null, that it read one. Only the first
+ * unread reading is written: a retry that reads nothing moves no planner input, the lane's clock does (nextTry).
+ */
+async function markUnread(db: Db, repo: string, head: string, why: string | null, at: string): Promise<void> {
+  const row = (await rowsAt(db, repo, head)).find((r) => r.check === HEAD_ROW);
+  if (why === null) { if (row?.state === "unread") await dropMainFix(db, { repo, headSha: head, check: HEAD_ROW }); return; }
+  if (!row) await save(db, { ...headBase(repo, head, at), state: "unread", reason: oneLine(scrub(why)), updatedAt: at }, at);
 }
 
 export const commands = {

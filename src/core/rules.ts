@@ -109,10 +109,14 @@ export const CIFIX_ASK_REASON = "the CI fix is left to the contributor";
 /** The reason of a `failed` row older code wrote when the failure log could not be read; such a row is no try (it is `unread` now). */
 export const CIFIX_NO_LOG_REASON = "no failure log";
 /**
- * A failure log that cannot be read yet (the run still goes on, GitHub has no log to download yet) is recorded as `unread`, which is
- * no try, and read again after these delays; an unreadable log past them is a failed try.
+ * A failure log that cannot be read yet (the run still goes on, GitHub has no log to download yet), or a rerun that left no check
+ * result newer than itself, is recorded as `unread`, which is no try, and read again after these delays, then once per the last
+ * delay for as long as the head stays the same.
  */
 export const CIFIX_UNREAD_DELAYS_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000];
+
+/** When the next try after the `n`th (1-based) of a series is due: `delays` in turn, then the last one again for every further try. */
+export const repeatAfter = (lastMs: number, n: number, delays: readonly number[]): number => lastMs + delays[Math.min(Math.max(n, 1), delays.length) - 1]!;
 
 /**
  * An ask comment that never reached GitHub (the app lane got no token, so no request went out) is recorded as

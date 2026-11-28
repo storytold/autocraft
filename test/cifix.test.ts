@@ -454,3 +454,27 @@ test("nothing is posted on a quiet pull request: no ask, and no patch as a comme
     assert.ok(w.log.some((l) => l.startsWith("comment:") || l === "model"), `${tries} tries, no longer quiet`);
   }
 });
+
+test("a failure log that stays unreadable is read again hourly after the backoffs and is never a counted try", async () => {
+  const at = Date.parse(T2);
+  mock.timers.enable({ apis: ["Date"], now: at });
+  try {
+    const w = world();
+    const gh = w.deps.gh;
+    w.deps.gh = async (args) => { if (args[0] === "run") throw new Error("HTTP 404: Not Found"); return await gh(args); };
+    w.deps.now = () => new Date();
+    const db = await fresh(w.head);
+    const states = async () => (await db.all(db.k.selectFrom("ci_fixes").select("state").orderBy(rowid("ci_fixes")))).map((r) => r.state);
+    const run = async (min: number) => { mock.timers.setTime(at + min * 60_000); await reportingTaskRunner(db, `runner-${min}`); await acting(db, ["op"]); await runCifix(db, { repo: "app", dryRun: false }, () => {}, w.deps); };
+    // 5, 15 and 60 minutes after the first three reads, then every hour.
+    for (const min of [0, 6, 22, 83, 144]) await run(min);
+    assert.deepEqual(await states(), ["unread", "unread", "unread", "unread", "unread"]);
+    await run(190);
+    assert.equal((await states()).length, 5, "not read again within the hour");
+    await run(205);
+    assert.deepEqual(await states(), Array(6).fill("unread"), "no failed try, however long the log stays unreadable");
+    assert.equal(w.log.filter((l) => l === "model").length, 0);
+  } finally {
+    mock.timers.reset();
+  }
+});

@@ -70,6 +70,8 @@ type Ctx = {
   setState: (r: FixRow, state: string, reason: string | null, at: string, extra?: Partial<FixRow>) => Promise<FixRow>;
   /** The head as the polls show it now. */
   current: () => Promise<Head | null>;
+  /** Records that the head's failure log could not be read (`why`), which times the next attempt, or with null that it was read. */
+  unread?: (head: string, why: string | null) => Promise<void>;
 };
 
 /** The commit message: a subject and one line per changed file. */
@@ -142,9 +144,10 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
     if (!now || now.state !== "red") return await done("nothing-to-do", "main is green again");
     if (now.headSha !== head) return await done("nothing-to-do", "main moved to a newer head");
     const reading = await readFailure(c.gh, c.repo, head, await optionalChecks(c.db, c.repo));
+    // A log GitHub does not serve yet: the rows wait, and the head's unread row says when they are tried again.
+    if (reading.kind === "unread") { await c.unread?.(head, reading.why); return "waiting"; }
+    await c.unread?.(head, null);
     if (reading.kind === "skip") return await done("nothing-to-do", reading.why);
-    // A log GitHub does not serve yet (the run goes on): the row waits, as for a running check.
-    if (reading.kind === "unread") return "waiting";
     const failing = new Map(reading.failure.checks.map((x) => [x.name, x]));
     for (const r of rows.filter((x) => !failing.has(x.check))) await set([r], "nothing-to-do", "the check no longer fails at this head");
     const live = rows.filter((r) => failing.has(r.check));

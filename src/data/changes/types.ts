@@ -47,7 +47,7 @@ export type MainFixRow = {
   repo: string; headSha: string; check: string; verdict: MainFixVerdict; state: string; reason: string | null; runId: number | null;
   runUrl: string | null; excerpt: string | null; issueNumber: number | null; prNumber: number | null; prUrl: string | null; patch: string | null;
   files: string | null; lintTask: number | null; lintRound: number | null; lintState: string | null; session: string | null;
-  /** State unclassified: the model replies that sorted none of the head's failed checks. */
+  /** State unclassified: the model replies that sorted none of the head's failed checks. State rerun-requested: the requests GitHub refused since the last one it took. */
   tries?: number; createdAt: string; updatedAt: string;
 };
 

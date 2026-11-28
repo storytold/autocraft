@@ -22,8 +22,6 @@ export type CifixCandidate = {
   rerun: boolean;
   /** When the rerun was requested (ISO), else null. */
   rerunAt: string | null;
-  /** Reads of the head's failure log that found none yet; at CIFIX_UNREAD_DELAYS_MS.length the next such read is a failed try. */
-  unreads?: number;
   /** The one rerun of the failed jobs may be asked for: the repo approves CI reruns and a review read the head. */
   mayRerun?: boolean;
   /** The PR author's login, whom an ask about red CI addresses. */

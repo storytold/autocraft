@@ -53,7 +53,7 @@ import { formattingOnly, guardPatch, TEST_PATH } from "./guard.ts";
 import { readFailure } from "./logs.ts";
 import { askCiText, askText, commentText, commitMessage } from "./template.ts";
 import { formatDiffPaths, matchPrFiles, triage, unrelatedTests } from "./triage.ts";
-import { CIFIX_ASK_REASON, CIFIX_UNREAD_DELAYS_MS } from "../core/rules.ts";
+import { CIFIX_ASK_REASON } from "../core/rules.ts";
 import { CheckTool, applyCheck, refusal } from "../checktool/index.ts";
 import { foldFormat, queueLintFor, readLint } from "../prepush/index.ts";
 import { findingsWord, lintVerdict, testsNoteOf } from "../prepush/tests.ts";
@@ -77,8 +77,6 @@ const CHECK = CLAUDE_PROMPTS["fixup.check"];
 const MAX_FILES = 8;
 /** Characters of the failure log the Opus check sees. */
 const CHECK_LOG_CAP = 8000;
-/** How long a rerun gets to produce new check results before the PR is given up on. */
-const RERUN_WAIT_MS = 2 * 3600_000;
 
 /**
  * The formatter step. /src is a writable overlay inside the step, so the formatted copy is made beside an untouched
@@ -659,25 +657,21 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       const skip = async (why: string) => { await rec.set(c, "code", "skipped", why); summary.skipped.push(ref); log(`  ${ref}: skipped: ${why}`); };
       if (reading.kind === "skip") { handle(); await skip(reading.why); return; }
       if (reading.kind === "unread") {
-        // A log GitHub does not serve yet is no try: it is read again after a backoff, and counts as a failed try once that is used up.
+        // A log GitHub does not serve yet is no try: it is read again after a backoff (CIFIX_UNREAD_DELAYS_MS), then hourly while the head stays.
         handle();
         const why = scrubReason(oneLine(reading.why), d.root);
-        if ((c.unreads ?? 0) < CIFIX_UNREAD_DELAYS_MS.length) { await rec.set(c, "code", "unread", why); log(`  ${ref}: unread: ${why}`); return; }
-        const reason = `the failure log could not be read: ${why}`;
-        await rec.set(c, "code", "failed", reason);
-        summary.failed.push({ ref, reason });
+        await rec.set(c, "code", "unread", why);
+        log(`  ${ref}: unread: ${why}`);
         return;
       }
       const failure = reading.failure;
       const runsOf = (): number[] => [...new Set(failure.checks.flatMap((x) => (x.runId === null ? [] : [x.runId])))];
       // After the one rerun, only results from after it say how the code fares; older ones are what the rerun was meant to replace.
+      // Until such results exist the head is unread, read again on the same backoff: no try.
       if (c.rerun && !failure.checks.every((x) => !!x.completedAt && !!c.rerunAt && Date.parse(x.completedAt) > Date.parse(c.rerunAt))) {
-        const waited = !c.rerunAt || Date.parse(at()) > Date.parse(c.rerunAt) + RERUN_WAIT_MS;
-        if (!waited) { log(`  ${ref}: waiting: the checks were not rerun yet`); return; }
-        handle();
-        const reason = "the rerun produced no new check results";
-        await rec.set(c, "infra", "failed", reason);
-        summary.failed.push({ ref, reason });
+        const why = "the rerun produced no new check results yet";
+        await rec.set(c, "infra", "unread", why);
+        log(`  ${ref}: unread: ${why}`);
         return;
       }
       const t = triage(failure);

@@ -1042,7 +1042,7 @@ export const STEPS: StepDef[] = [
       if (refused) throw new Error(refused);
       const r = await runMainFix(ctx.db, { repo: String(ctx.params.repo), onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.acted(r.reran + r.needsFix + r.issues + r.prs);
-      return `${r.repo}: classified ${r.classified} heads, reran ${r.reran}, ${r.needsFix} need a fix, ${r.issues} issues opened, ${r.prs} fix PRs opened`;
+      return `${r.repo}: classified ${r.classified} heads, reran ${r.reran}, ${r.needsFix} need a fix, ${r.issues} issues opened, ${r.prs} fix PRs opened${r.note ? `; ${r.note}` : ""}`;
     },
   },
   {

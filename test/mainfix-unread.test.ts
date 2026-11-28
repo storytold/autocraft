@@ -71,3 +71,38 @@ test("an unread failure log is read again after the main CI poll, classified onc
   }
   assert.deepEqual([await rows("a3"), w.classified, handled, (await due(120)).due], [["nothing-to-do"], 4, 0, false]);
 });
+
+test("a classification call that ended without a reply is no try: the head stays unclassified and the lane's clock moves when it is asked again", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "mainfix-lost-")), "t.db"));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: at(0), pipeline: 1 }));
+  await setMainFixApproval(db, "op", "app", true);
+  const w = { now: at(1), lost: true };
+  const deps: MainFixDeps = {
+    now: () => new Date(w.now),
+    classify: async (_db, input) => (w.lost ? { lost: "the classification call ended without a reply" } : input.checks.map((c) => ({ check: c.check, verdict: "code" as const, reason: "a test fails" }))),
+    gh: async (args) => {
+      if (args[1]?.includes("check-runs")) return JSON.stringify({ check_runs: [{ name: "gate / test", status: "completed", conclusion: "failure", details_url: "https://github.com/storytold/app/actions/runs/11/job/1" }] });
+      if (args[0] === "run") return "test\tcargo test\tassertion failed\n";
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    },
+    exec: async () => ({ code: 1, stdout: "", stderr: "unexpected" }),
+  };
+  await db.run(db.k.insertInto("main_ci").values({ repo: "app", head_sha: "b1", branch: "main", state: "red", failing: "[]", checks: "[]", committed_at: at(0), first_seen_at: at(0), state_changed_at: at(0), updated_at: at(0) }));
+  const run = async (min: number) => { w.now = at(min); return await runMainFix(db, { repo: "app" }, () => {}, deps); };
+  const due = async (min: number) => (await mainFixDueRepos(db, ["app"], { now: ms(min) })).length > 0;
+  const rows = async () => await db.all(db.k.selectFrom("main_fixes").select(["state", "tries"]).where("head_sha", "=", "b1"));
+
+  // More lost calls than the unusable replies that give a head up.
+  for (const min of [1, 7, 13, 19]) {
+    assert.equal(await due(min), true);
+    const s = await run(min);
+    assert.match(s.note ?? "", /not classified/, "the job says it did not finish its work");
+    assert.deepEqual(await rows(), [{ state: "unclassified", tries: 0 }]);
+    assert.equal(await due(min + 1), false, "not asked again before its retry time");
+    assert.equal(await mainFixClock(db, ms(min + 1)), await mainFixClock(db, ms(min + 4)), "the clock holds still while it waits");
+    assert.notEqual(await mainFixClock(db, ms(min + 1)), await mainFixClock(db, ms(min + 6)), "and moves once the retry is due");
+  }
+  w.lost = false;
+  await run(25);
+  assert.deepEqual(await rows(), [{ state: "needs-fix", tries: 0 }]);
+});

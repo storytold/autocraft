@@ -591,7 +591,7 @@ const stuckWait = (f: PrFacts): Wait | null => {
   if (cf === "formatting" || (cf === "linting" && !linted)) return system("ci-running", "the formatter or lint run of the CI fix");
   if (cf === "rerun-wait") return system("ci-running", "the rerun of the failed CI jobs");
   if (cf === "ci-running") return system("ci-running", "the CI run to finish before the CI fix reads its log");
-  if (cf === "read-wait") return system("ci-running", `the CI failure log, read again${f.cifix?.readAgainAt === undefined ? "" : ` after ${new Date(f.cifix.readAgainAt).toISOString().slice(11, 16)}`}: GitHub had no log to download yet`);
+  if (cf === "read-wait") return system("ci-running", `the CI failure log, read again${f.cifix?.readAgainAt === undefined ? "" : ` after ${new Date(f.cifix.readAgainAt).toISOString().slice(11, 16)}`}: GitHub had no new log to download yet`);
   if (cf === "rerun" && !f.repoFacts.ciApproved) return person("repo-approval", "CI approval for the repo");
   if (cf === "comment-wait") return unsentWait("the CI fix comment", unsentUntil(f.cifix?.unsent));
   if (cf === "done" && (f.cifix?.askedPatch || (f.cifix?.states.includes("asked") && !mergeOwned(f)))) return CI_AUTHOR;
