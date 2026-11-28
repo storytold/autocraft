@@ -4,7 +4,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Db } from "../db/index.ts";
 import { assertFence } from "../db/fence.ts";
-import { guardedApi, inClusterApi } from "../build/kube-api.ts";
+import { guardedApi, inClusterApi, type KubeApi } from "../build/kube-api.ts";
 import { describeHeader, execHelper, execWs } from "../build/workspaces.ts";
 import { SRC_ROOT, WORK_ROOT } from "../build/workspace-tool-specs.ts";
 import { DIFF_FLAGS } from "./diff.ts";
@@ -28,11 +28,11 @@ const STATUS_WAIT_SEC = 60;
 /** A `--since` past any log's end: a status call that returns only the header. */
 const NO_OUTPUT = "999999999999";
 
-/** The pod of workspace `wsId` through the in-cluster API; throws when this process is not in the cluster. */
-export function workspacePod(db: Db, wsId: number, cancelled: () => Promise<boolean> = async () => false): Pod {
-  const cluster = inClusterApi();
+/** The pod of workspace `wsId` through `through`, by default the in-cluster API; throws when this process is not in the cluster. */
+export function workspacePod(db: Db, wsId: number, cancelled: () => Promise<boolean> = async () => false, through?: KubeApi): Pod {
+  const cluster = through ?? inClusterApi();
   if (!cluster) throw new Error("this runner is not in the cluster, so it cannot reach the workspace");
-  const api = guardedApi(cluster, () => assertFence(db));
+  const api = through ?? guardedApi(cluster, () => assertFence(db));
   return {
     async run(what, script, args, limitSec) {
       const start = await execWs(db, api, wsId, ["run", String(limitSec), "--background", "--", "bash", "-c", script, what, ...args], { tool: "report", args: { report: what }, timeoutMs: 30_000 });

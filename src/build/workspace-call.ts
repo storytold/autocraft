@@ -100,6 +100,8 @@ export async function resumePrompt(db: Db, callId: number, base: string): Promis
   const r = w.restored_at !== null && w.restored_at > worked.created_at ? w.restored : null;
   const kept = r === null ? "The workspace kept its tree: /work/src holds the earlier session's changes, and commands it started may still run or have ended."
     : r === "kept" ? "The workspace was started again on its volume: /work/src holds the earlier session's changes, and the commands it started were stopped."
+    : r === "reseed" ? "The workspace was set to a new commit: the earlier session's changes were dropped, and the commands it started were stopped."
+    : r === "patch" ? "The workspace was put back to its base commit plus AutoCraft's stored patch: changes the earlier session made after that patch were lost, and the commands it started were stopped."
     : r.startsWith("checkpoint ") ? `The workspace was rebuilt from the base commit and a checkpoint of its changes taken at ${hhmm(r.slice(11))}: changes made after that were lost, and the commands it started were stopped.`
     : "The workspace was rebuilt from the base commit with no checkpoint: the earlier session's changes were lost.";
   const stat = w.checkpoint?.length && w.checkpoint_at ? `Its changes against the base commit as of ${hhmm(w.checkpoint_at)} (the last checkpoint):\n${diffStat(w.checkpoint)}\n` : "";

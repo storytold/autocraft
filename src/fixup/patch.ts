@@ -10,6 +10,8 @@ import { wholeReplyJson } from "../core/reply-json.ts";
 import { rustTokens, rustTokenSpans } from "../cifix/guard.ts";
 
 export const MAX_CHANGED_LINES = 300;
+/** Characters of a PR's diff a fix-up shows the model (src/fixup/index.ts holds a PR over it without a checkout, and trims it with one); a fix session's task message is held to it too. */
+export const DIFF_CAP = 60_000;
 
 export type PatchCheck = { ok: true; patch: string; files: string[]; changed: number } | { ok: false; reason: string };
 
@@ -172,20 +174,39 @@ const REJECT_HEADER = /^(old mode|new mode|new file mode|deleted file mode|renam
 const HUNK = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/;
 
 /**
- * Accepts only content edits to existing regular files named in `allowed` (any file `canEdit` accepts when null):
- * no new, deleted, renamed, mode-changed, symlink or binary files, at most
- * MAX_CHANGED_LINES added plus removed lines.
+ * What a patch may do beyond content edits of existing files. `lineCap`: the most added plus removed lines, null for none
+ * (default MAX_CHANGED_LINES). `newFile`: whether a new regular text file may be added at a path (it then needs no place in
+ * `allowed`). `deletes`: whether a regular file `canEdit` accepts, and `allowed` names when given, may be deleted; a rename
+ * is a deletion and a new file (the diff is read with --no-renames).
  */
-export function validatePatch(text: string, allowed: string[] | null, canEdit: (path: string) => boolean = editable): PatchCheck {
-  const patch = recountHunks(extractDiff(text));
-  if (!patch.startsWith("diff --git ")) return { ok: false, reason: "the reply is not a unified diff" };
+export type PatchRules = {
+  lineCap?: number | null; newFile?: (path: string) => boolean; deletes?: boolean;
+  /** `text` is git's own diff (a workspace's), read as it is: no fence or prose taken off, no CRLF made LF, no hunk recount. */
+  exact?: boolean;
+};
+
+/**
+ * Accepts only content edits to existing regular files named in `allowed` (any file `canEdit` accepts when null), and the
+ * new and deleted files `rules` allow: no renamed, mode-changed, symlink or binary files, at most `rules.lineCap`
+ * (default MAX_CHANGED_LINES) added plus removed lines.
+ */
+export function validatePatch(text: string, allowed: string[] | null, canEdit: (path: string) => boolean = editable, rules: PatchRules = {}): PatchCheck {
+  const lineCap = rules.lineCap === undefined ? MAX_CHANGED_LINES : rules.lineCap;
+  const patch = rules.exact ? text.replace(/\n$/, "") : recountHunks(extractDiff(text));
+  if (!patch.startsWith("diff --git ")) return { ok: false, reason: rules.exact ? "the change is not a git diff" : "the reply is not a unified diff" };
   const lines = patch.split("\n");
   if (lines[lines.length - 1] === "") lines.pop();
   const files: string[] = [];
   let changed = 0;
   let cur: string | null = null;
   let sawOld = false, sawNew = false, hunks = 0;
-  const closeFile = (): string | null => (cur !== null && (!sawOld || !sawNew || hunks === 0) ? `incomplete diff for ${cur}` : null);
+  /** The current file is one `rules` allow to be added or deleted; an empty one has no file lines and no hunk. */
+  let added = false, deleted = false;
+  const closeFile = (): string | null => {
+    if (cur === null) return null;
+    if ((added || deleted) && !sawOld && !sawNew && hunks === 0) return null;
+    return !sawOld || !sawNew || hunks === 0 ? `incomplete diff for ${cur}` : null;
+  };
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]!;
     if (l.startsWith("diff --git ")) {
@@ -195,12 +216,24 @@ export function validatePatch(text: string, allowed: string[] | null, canEdit: (
       if (!m || m[1] !== m[2]) return { ok: false, reason: `unsupported file header: ${l.slice(0, 100)}` };
       cur = m[1]!;
       if (!safePath(cur)) return { ok: false, reason: `unsafe path ${cur}` };
-      if (!canEdit(cur)) return { ok: false, reason: `${cur} is not a file a fix-up may edit` };
-      if (allowed && !allowed.includes(cur)) return { ok: false, reason: `${cur} is not a file named in the review's fixes` };
+      // Git writes a new or deleted file's mode line right after the file header.
+      const next = lines[i + 1] ?? "";
+      added = !!rules.newFile && next.startsWith("new file mode ");
+      deleted = !!rules.deletes && next.startsWith("deleted file mode ");
+      if (added) {
+        if (!rules.newFile!(cur)) return { ok: false, reason: `${cur} is not a file this change may add` };
+      } else {
+        if (!canEdit(cur)) return { ok: false, reason: `${cur} is not a file a fix-up may edit` };
+        if (allowed && !allowed.includes(cur)) return { ok: false, reason: `${cur} is not a file named in the review's fixes` };
+      }
       if (files.includes(cur)) return { ok: false, reason: `${cur} appears twice` };
       files.push(cur);
       sawOld = sawNew = false;
       hunks = 0;
+      if (added || deleted) {
+        if (next !== `${added ? "new" : "deleted"} file mode 100644`) return { ok: false, reason: `${cur} is not a plain file (${next.slice(0, 40)})` };
+        i++;
+      }
       continue;
     }
     if (cur === null) return { ok: false, reason: "text before the first file header" };
@@ -210,12 +243,12 @@ export function validatePatch(text: string, allowed: string[] | null, canEdit: (
       if (!idx) return { ok: false, reason: `${cur} has an index line that is not a plain file mode` };
     }
     if (l.startsWith("--- ")) {
-      if (l !== `--- a/${cur}`) return { ok: false, reason: `unexpected old file line for ${cur}` };
+      if (l !== (added ? "--- /dev/null" : `--- a/${cur}`)) return { ok: false, reason: `unexpected old file line for ${cur}` };
       sawOld = true;
       continue;
     }
     if (l.startsWith("+++ ")) {
-      if (l !== `+++ b/${cur}`) return { ok: false, reason: `unexpected new file line for ${cur}` };
+      if (l !== (deleted ? "+++ /dev/null" : `+++ b/${cur}`)) return { ok: false, reason: `unexpected new file line for ${cur}` };
       sawNew = true;
       continue;
     }
@@ -244,7 +277,7 @@ export function validatePatch(text: string, allowed: string[] | null, canEdit: (
   const bad = closeFile();
   if (bad) return { ok: false, reason: bad };
   if (!files.length) return { ok: false, reason: "the diff changes no file" };
-  if (changed > MAX_CHANGED_LINES) return { ok: false, reason: `${changed} changed lines, over the limit of ${MAX_CHANGED_LINES}` };
+  if (lineCap !== null && changed > lineCap) return { ok: false, reason: `${changed} changed lines, over the limit of ${lineCap}` };
   return { ok: true, patch: patch + "\n", files, changed };
 }
 

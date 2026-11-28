@@ -33,12 +33,12 @@ export async function loadRoundLog(db: Db, keys: FindingKey[]): Promise<Map<Find
   return out;
 }
 
-const ROUND_COLS = ["patch", "test_patch", "title", "summary", "head_task", "base_task", "retried", "session", "state", "failure", "created_at"] as const;
+const ROUND_COLS = ["patch", "test_patch", "title", "summary", "head_task", "base_task", "retried", "session", "session_turn", "state", "failure", "created_at"] as const;
 
-/** Inserts a round or replaces every column of the round with the same number. */
-export async function saveRound(db: Db, r: RoundRow): Promise<void> {
+/** Inserts a round or replaces every column of the round with the same number (a `session_turn` left out is null). */
+export async function saveRound(db: Db, r: Omit<RoundRow, "session_turn"> & { session_turn?: number | null }): Promise<void> {
   const q = queryDb(db);
-  await q.run(q.k.insertInto("security_fix_rounds").values(r).onConflict((oc) => oc.columns(["repo", "number", "round"]).doUpdateSet(kx.excluded(ROUND_COLS))));
+  await q.run(q.k.insertInto("security_fix_rounds").values({ ...r, session_turn: r.session_turn ?? null }).onConflict((oc) => oc.columns(["repo", "number", "round"]).doUpdateSet(kx.excluded(ROUND_COLS))));
 }
 
 /** Patches rounds, one statement per distinct set of patched columns. Returns the rows changed. */
