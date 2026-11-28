@@ -19,7 +19,8 @@ export type BlockerFacts = {
   leg: EndedLeg | null;
 };
 
-export type EndedLeg = { reason: string; code?: StopCode | null; head?: string | null };
+/** `fix`: the fix-up request the leg worked on. */
+export type EndedLeg = { reason: string; code?: StopCode | null; head?: string | null; fix?: number | null };
 
 /** Why the leg ended, its text's where the row has no code. */
 export const codeOf = (leg: EndedLeg): StopCode => leg.code ?? stopCodeOf(leg.reason);

@@ -14,7 +14,7 @@ import { parseOpusReply } from "../src/review/opus-parse.ts";
 import { advanceWorkflows, type FailedCheck } from "../src/workflow/advance.ts";
 import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
-import { liveWorkflow, workflowHistory } from "../src/workflow/store.ts";
+import { eventsOf, liveWorkflow, workflowHistory } from "../src/workflow/store.ts";
 import { legWait } from "../src/workflow/waits.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { SNAPSHOT_CACHE_MS } from "../src/data/runners/snapshot-cache.ts";
@@ -36,10 +36,6 @@ test("each blocker stops an approved item and keeps its approval", async () => {
   const cases: [Blocker, (w: World) => Promise<unknown>][] = [
     ["author-commits", async (w) => { await w.synced(1, "sha9"); await w.outOfScope(1, "sha9"); }],
     ["failed-twice", async (w) => { await fixup(w, { state: "failed" }); await fixup(w, { state: "refused" }); }],
-    // A review job of the PR's approved lane that fails before it records anything, twice in a row.
-    ["failed-twice", async (w) => {
-      for (const id of [901, 902]) await w.db.run(w.db.k.insertInto("main.jobs").values({ id, step: "opus-review", params: JSON.stringify({ repo: "app", number: 1, lane: "approved", limit: 10 }), requested_by: "pipeline", requested_at: later(), state: "failed", started_at: later(), ended_at: later(), error: "reply could not be read", repo: "app" }));
-    }],
   ];
   for (const [blocker, evidence] of cases) {
     const w = await approvedReview();
@@ -51,6 +47,46 @@ test("each blocker stops an approved item and keeps its approval", async () => {
     assert.notEqual(await legState(w), "review", `${blocker}: the merge leg stops`);
     w.close();
   }
+});
+
+test("jobs of an approved PR's own lane that fail before they record a try stop nothing, and a stop an earlier release made for them closes by itself", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  for (const id of [901, 902]) await db.run(db.k.insertInto("main.jobs").values({ id, step: "opus-review", params: JSON.stringify({ repo: "app", number: 1, lane: "approved", limit: 10 }), requested_by: "pipeline", requested_at: later(), state: "failed", started_at: later(), ended_at: later(), error: "reply could not be read", repo: "app" }));
+  await advanceWorkflows(db);
+  const wf = (await liveWorkflow(db, "app", 1))!;
+  assert.deepEqual([wf.state, wf.blocker], ["running", null]);
+  assert.equal(await legState(w), "review", "the merge leg goes on");
+  await db.run(db.k.updateTable("main.item_workflows").where("number", "=", 1).set({
+    state: "blocked", blocker: "failed-twice", blocker_params: JSON.stringify({ step: "review", count: 2 }), rec_at: later(), rec_head: "sha1",
+    rec: JSON.stringify({ text: "The review failed twice. Review it again, then merge.", parts: { fix: [], drop: [] }, merges: true, again: "review" }),
+  }));
+  await advanceWorkflows(db);
+  const resumed = (await liveWorkflow(db, "app", 1))!;
+  assert.deepEqual([resumed.state, resumed.blocker, resumed.rec, resumed.approvedBy], ["running", null, null, MAINT]);
+  assert.match(String((await eventsOf(db, "app", 1)).at(-1)?.line), /closed without an answer/);
+});
+
+test("a merge leg a fix-up try ended stops the approved PR while that try stands; once it is superseded the question closes by itself and a new leg starts", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  const [legRow] = await w.rows("SELECT id FROM preapprovals WHERE number = 1");
+  await db.run(db.k.insertInto("main.operator_fixups").values({ repo: "app", number: 1, from_head: "sha1", instructions: "Keep the box centred.", by: MAINT, at: new Date().toISOString(), state: "queued", preapproval_id: Number(legRow!.id) }));
+  const [req] = await w.rows("SELECT id FROM operator_fixups WHERE number = 1");
+  await db.run(db.k.updateTable("main.preapprovals").set({ state: "fixup", fix_id: Number(req!.id), from_head: "sha1" }).where("id", "=", Number(legRow!.id)));
+  await db.run(db.k.insertInto("main.fixups").values({ repo: "app", number: 1, from_head: "sha1", to_head: null, state: "too-large", reason: "the PR diff is over the 60000 character limit", files: "[]", attempt: 1, created_at: new Date().toISOString(), source: "operator", operator_fix: Number(req!.id) }));
+  await untilQuiet(db, [() => advancePreapprovals(db)], 3);
+  await advanceWorkflows(db);
+  const asked = (await liveWorkflow(db, "app", 1))!;
+  assert.deepEqual([asked.state, asked.blocker], ["blocked", "failed-twice"]);
+  await advanceWorkflows(db);
+  assert.equal((await liveWorkflow(db, "app", 1))!.state, "blocked", "the try still stands");
+
+  await db.run(db.k.updateTable("main.fixups").set({ state: "superseded" }).where("number", "=", 1));
+  await advanceWorkflows(db);
+  const resumed = (await liveWorkflow(db, "app", 1))!;
+  assert.deepEqual([resumed.state, resumed.rec, resumed.approvedBy], ["running", null, MAINT]);
+  assert.notEqual(await legState(w), "failed", "a new merge leg");
 });
 
 test("an approved workflow an earlier release stopped at a stop that no longer stops an approved merge resumes with its approval; one stopped for another reason waits", async () => {
@@ -687,22 +723,23 @@ test("one workflow's change that cannot be stored loses no other's, and the pass
   const write = db.write;
   // The joint write fails, then the first workflow's own.
   let failures = 2;
-  let woken = 0;
+  // The earliest time the pass asked to run again: a failure asks at once, a timed check of the facts no sooner than the facts say.
+  let woken = Infinity;
   const pass = async () => {
     db.write = (async (f: () => Promise<unknown>, o?: never) => {
       const joint = /moveWorkflows/.test(String(f));
       if (joint && failures > 0) { failures--; throw new Error("not stored"); }
       return await write.call(db, f, o);
     }) as typeof write;
-    woken = 0;
-    try { await advanceWorkflows(db, () => {}, () => { woken++; }); } finally { db.write = write; }
+    woken = Infinity;
+    try { await advanceWorkflows(db, () => {}, (at) => { woken = Math.min(woken, at); }); } finally { db.write = write; }
     return (await Promise.all([2, 3].map((n) => liveWorkflow(db, "app", n)))).map((x) => x!.state).sort();
   };
   // A hold with no recommendation and no class of its own comes back to the person first.
   assert.deepEqual(await pass(), ["recommending", "running"]);
-  assert.ok(woken > 0);
+  assert.ok(woken <= Date.now() + 1_000, "the failed one is tried again at once");
   assert.deepEqual(await pass(), ["recommending", "recommending"]);
-  assert.equal(woken, 0);
+  assert.ok(woken > Date.now() + 120_000, "nothing failed: no retry");
 });
 
 test("a workflow whose change cannot be stored keeps its merge leg where it is, shows on its item and in the health check after three failures and is not tried on every tick; the others go on", async () => {

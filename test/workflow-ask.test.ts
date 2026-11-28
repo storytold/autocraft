@@ -222,6 +222,31 @@ test("what a person settles on GitHub is asked about; a yes looks again, and onc
   }
 });
 
+test("a conflict on an approved PR that a person has to resolve is asked about while it conflicts, and the question closes by itself once GitHub says it merges; so does one kept with only the wait that asked it", async () => {
+  for (const kept of ["conflict", "wait"] as const) {
+    const w = await started("review and merge");
+    await w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "main", mergeable: "CONFLICTING", maintainer_can_modify: 0 }).where("number", "=", 1));
+    await checks(w, { mergeable: "CONFLICTING" });
+    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ maintainer_can_modify: 0 }));
+    await w.db.run(w.db.k.insertInto("main.conflict_merges").values({ repo: "app", number: 1, from_head: "sha1", to_head: null, base_sha: "base", state: "asked", attempt: 1, created_at: new Date().toISOString() }));
+    await settle(w);
+    assert.deepEqual(await shown(w), ["blocked", "conflict-person", MAINT], kept);
+    if (kept === "wait") {
+      const row = await wf(w);
+      await w.db.run(w.db.k.updateTable("main.item_workflows").set({ rec: JSON.stringify({ ...row.rec, cause: { code: "wait", wait: "conflict-person" } }) }).where("id", "=", row.id));
+    }
+    await settle(w);
+    assert.deepEqual(await shown(w), ["blocked", "conflict-person", MAINT], `${kept}: it still conflicts`);
+    await w.db.run(w.db.k.updateTable("main.items").set({ mergeable: "MERGEABLE" }).where("number", "=", 1));
+    await checks(w, { mergeable: "MERGEABLE" });
+    await settle(w);
+    assert.deepEqual(await shown(w), ["running", null, MAINT], kept);
+    assert.ok(["review", "ci", "queued"].includes(String(await leg(w))), `${kept}: ${await leg(w)}`);
+    assert.ok((await eventsOf(w.db, "app", 1)).some((e) => /closed without an answer/.test(String(e.line))), kept);
+    w.close();
+  }
+});
+
 test("a question whose cause went does not close by itself where the author pushed meanwhile: the commits go to the review round", async () => {
   const w = await started("review and merge");
   await checks(w, { overall: "none" });

@@ -193,7 +193,7 @@ function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Reco
 
 /**
  * A hold that plans no fix, where the review gave no recommendation of its own. One that waits for the other items it names goes to the
- * backlog: nothing of the PR's own can settle it. Otherwise its author finishes it: a hold the review classed as blocking the merge
+ * backlog: nothing of the PR's own can settle it, and once none of them blocks any more the question closes and the PR is reviewed again. Otherwise its author finishes it: a hold the review classed as blocking the merge
  * (`hold`: a regression, the PR not doing what it says, security, data loss) asks the author at once; one that blocks nothing an
  * approval would merge may be a question of scope, and one with no class says neither, so a person answers first. A bare fix makes the fix-up build what the review found (withFinding).
  */
@@ -201,7 +201,7 @@ function held(finding: string | null, blockedBy: readonly string[], hold: Blocki
   const said = finding?.trim() ? asSentence(clipText(finding.trim(), FINDING_CHARS)) : null;
   const holds = (then: string) => (said ? t("The review holds it: {finding} {then}", { finding: said, then }) : t("The review holds it. {then}", { then }));
   if (blockedBy.length) {
-    return { text: holds(t("It waits for {items}. Put it in the backlog.", { items: listText(blockedBy.map((r) => `\`${r}\``)) })), parts: { fix: [], drop }, merges: false, backlog: true };
+    return { text: holds(t("It waits for {items}. Put it in the backlog.", { items: listText(blockedBy.map((r) => `\`${r}\``)) })), parts: { fix: [], drop }, merges: false, backlog: true, cause: { code: "blocked-by", items: [...blockedBy] } };
   }
   // Only a hold the review classed as blocking asks at once; one stored before reviews classed holds (no class) asks a person first.
   return { text: holds(textFor({ author: true })), parts: { fix: [], drop }, merges: false, author: hold != null && hold.class !== null ? "ask" : "scope" };
