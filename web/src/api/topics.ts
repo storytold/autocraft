@@ -71,7 +71,9 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["runner-pending:", ["access"]],
   ["model-queue", ["remote-queue"]],
   ["audit:", ["access"]],
-  ["prompts", ["prompts", "access"]],
+  // Prompts, their revisions and the repos' guidance; the list also says who may edit, which follows access.
+  ["prompt", ["prompts", "access"]],
+  ["guidance:", ["prompts", "access"]],
   ["pipeline-state", ["settings", "jobs", "limits", "outside"]],
   ["outside-held", ["outside", "items", "repos"]],
   ["pipeline-jobs:", ["jobs", "usage"]],

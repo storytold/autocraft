@@ -29,6 +29,7 @@ export function editState(id: string, mayEdit: boolean): PromptEditState {
   return {
     ...codeEditState(id),
     rev: row?.rev ?? null,
+    author: row?.author ?? null,
     following: !edited,
     newerDefault: edited && (isClaudePrompt(target) || isJevPrompt(target)) && row.defaultHash !== codeDefault(target).version,
     structureChanged: edited && (isClaudePrompt(target) ? mergeEdit(codeBody(target), row.body) === null : isJevPrompt(target) && jevRequestWith(target, row.body) === null),

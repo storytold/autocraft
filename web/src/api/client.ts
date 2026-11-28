@@ -78,6 +78,14 @@ import type {
   MainCi,
   Progress,
   PromptsReport,
+  PromptInfo,
+  PromptHistory,
+  PromptCheckReply,
+  PromptDiffReply,
+  PromptGuidanceList,
+  PromptSaveBody,
+  PromptSaveReply,
+  RepoGuidance,
   BatchDetail,
   QueuePage,
   QueuePageFilter,
@@ -450,6 +458,27 @@ export interface Api {
   rates(window: "24h" | "7d"): Promise<Rates>;
   /** Every registered model prompt, with the server's commit. */
   prompts(): Promise<PromptsReport>;
+  /** One base prompt's revisions. Reading is for everyone; writes are for operators and maintainers who write a tracked repo. A save on a revision other than `baseRev`'s fails with status 409; a refused text replies ok false with its problems and stores nothing. */
+  prompt: {
+    get(id: string): Promise<PromptInfo>;
+    /** Newest first. */
+    history(id: string): Promise<PromptHistory>;
+    /** The line diff between two revisions; "release" is the running release's default, "active" the text that runs. */
+    diff(id: string, from: number | "release" | "active", to: number | "release" | "active"): Promise<PromptDiffReply>;
+    check(id: string, body: PromptSaveBody): Promise<PromptCheckReply>;
+    save(id: string, body: PromptSaveBody): Promise<PromptSaveReply>;
+    rollback(id: string, body: { rev: number; note: string }): Promise<PromptSaveReply>;
+    useRelease(id: string, body: { note: string }): Promise<PromptSaveReply>;
+  };
+  /** Each repository's guidance. Writes are for whoever runs the repo (operator, or maintainer with write on it). */
+  guidance: {
+    /** The visible repos that have guidance, and the prompts that receive it. */
+    list(): Promise<PromptGuidanceList>;
+    get(repo: RepoName): Promise<RepoGuidance>;
+    check(repo: RepoName, body: PromptSaveBody): Promise<PromptCheckReply>;
+    save(repo: RepoName, body: PromptSaveBody): Promise<PromptSaveReply>;
+    rollback(repo: RepoName, body: { rev: number; note: string }): Promise<PromptSaveReply>;
+  };
   signOut(): Promise<void>;
   /** Called after any write so open views can refetch. Returns an unsubscribe function. */
   subscribe(fn: () => void): () => void;

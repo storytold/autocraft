@@ -55,6 +55,7 @@ preapproval-paths.test.ts
 premerge-review.test.ts
 prepush.test.ts
 prompt-harness.test.ts
+prompt-segments.test.ts
 prose.test.ts
 referee-final.test.ts
 regression-name.test.ts

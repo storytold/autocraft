@@ -13,6 +13,7 @@ import { useUser } from "../../shell/UserContext";
 import { RepoSettings } from "../admin/repoDetail";
 import { Toggle, useRepoWrite } from "../admin/repoParts";
 import { RepoAreasSection } from "./areas";
+import { RepoGuidanceSection } from "./guidance";
 import { Fold, List, Loading, RefPage } from "./parts";
 
 const counts = (r: MaintainRepo) => t("{open} open · {started} started · {waiting} waiting · {merged} merged this week", { open: r.open, started: r.started, waiting: r.waiting, merged: r.mergedWeek });
@@ -167,6 +168,7 @@ function RepoPage({ name }: { name: string }) {
             </p>
           </Fold>
           <RepoAreasSection repo={name} />
+          <RepoGuidanceSection repo={name} />
           {user.role !== "viewer" && r.canRun && <Settings name={name} />}
         </>
       )}

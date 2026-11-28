@@ -19,7 +19,7 @@ import { CommentCard, PromptCard } from "../prompts/views";
 import { EnvsPanel, PhoneEnvs, Tasks } from "../envs/views";
 import { Caches } from "../envs/Caches";
 import { WorkspacesList } from "../workspaces/views";
-import { Fold, List, Loading, RefPage } from "./parts";
+import { Fold, LinkRow, List, Loading, RefPage } from "./parts";
 
 const STAGE_ORDER = ["classify", "priority", "duplicates", "decide", "review", "fix", "integrate", "verify"];
 const stageRank = (s: string) => {
@@ -31,6 +31,8 @@ export function PromptsView(_: ViewProps) {
   const { data: r, error } = useQuery("prompts", (api) => api.prompts());
   if (!r) return <RefPage title={t("Prompts")}><Loading error={error} /></RefPage>;
   const stages = [...new Set(r.prompts.map((p) => p.stage))].map((s, i) => ({ s, i })).sort((x, y) => stageRank(x.s) - stageRank(y.s) || x.i - y.i).map((x) => x.s);
+  // A link to /prompts#<id> opens that prompt's stage; the card opens itself.
+  const target = decodeURIComponent(location.hash.slice(1));
   return (
     <RefPage title={t("Prompts")}>
       <p className="text-sm text-ink/70">{t("Every prompt the pipeline sends to a model, as it is sent. Item text is quoted into prompts as untrusted data.")}</p>
@@ -38,7 +40,7 @@ export function PromptsView(_: ViewProps) {
         {stages.map((s) => {
           const list = r.prompts.filter((p) => p.stage === s);
           return (
-            <Fold key={s} title={<span className="font-medium">{s}</span>} summary={list.length}>
+            <Fold key={s} title={<span className="font-medium">{s}</span>} summary={list.length} open={list.some((p) => p.id === target)}>
               <div className="space-y-3 py-2">{list.map((p) => <PromptCard key={p.id} p={p} fold />)}</div>
             </Fold>
           );
@@ -48,8 +50,28 @@ export function PromptsView(_: ViewProps) {
             <div className="space-y-3 py-2">{r.comments.map((c) => <CommentCard key={c.id} c={c} />)}</div>
           </Fold>
         )}
+        <GuidanceFold />
       </div>
     </RefPage>
+  );
+}
+
+/** The repos that add guidance to their review and fix prompts; each links to its repo page. */
+function GuidanceFold() {
+  const { data: list } = useQuery("prompt-guidance", (a) => a.guidance.list());
+  const data = list?.repos;
+  if (!data?.length) return null;
+  return (
+    <Fold title={<span className="font-medium">{t("Repo guidance")}</span>} summary={data.length}>
+      <div className="py-2">
+        <List>
+          {data.map((g) => (
+            <LinkRow key={g.repo} to={`/repos/${encodeURIComponent(g.repo)}#guidance`} title={g.repo}
+              line={<>r{g.rev}{g.author ? ` · ${g.author}` : ""}{g.at ? <> · <TimeAgo iso={g.at} /></> : null}</>} />
+          ))}
+        </List>
+      </div>
+    </Fold>
   );
 }
 

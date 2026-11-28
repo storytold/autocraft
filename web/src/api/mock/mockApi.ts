@@ -18,7 +18,7 @@ import { createBuildMock } from "./buildMock";
 import { createWorkspacesMock } from "./workspacesMock";
 import { createNightlyMock } from "./nightlyMock";
 import { createPipelineMock } from "./pipelineMock";
-import { promptsReport } from "../../../../src/prompts/index.ts";
+import { createPromptsMock } from "./promptsMock";
 import { semanticHits } from "./similarFixtures";
 import { downloadsReport } from "./downloadsMock";
 import { classifierReport, costReport, disagreementList } from "./insightFixtures";
@@ -258,7 +258,7 @@ export function createMockApi(): Api {
     ...createMaintainMock(me),
     ...createMaintainItemMock(me, changed),
     ...createChatMock(me, changed),
-    prompts: () => wait(promptsReport(null), 60),
+    ...createPromptsMock(me, changed, wait),
     next: () => wait(nextPageFixture(), 60),
     mention: () => wait({ mention: "autocraftbot" }, 20),
     batch: (id) => wait(batchDetailMock(id), 60),

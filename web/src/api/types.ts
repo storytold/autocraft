@@ -1078,6 +1078,8 @@ export interface PromptRevisionInfo {
 export interface PromptEditState {
   /** The active revision; null while no revision is stored (the release default runs as revision 1). */
   rev: number | null;
+  /** Who made the active revision ("release" for a release default); null while no revision is stored. */
+  author: string | null;
   /** The release default runs (no edit is active). */
   following: boolean;
   /** The active edit was made against an older release default than the running release's. */
