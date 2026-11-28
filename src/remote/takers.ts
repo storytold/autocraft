@@ -102,7 +102,7 @@ export type RunnerWait = { login: string; hold: RunnerHold; until: number | null
 export function waitingOnIn(v: RemoteView, c: TakerCall): RunnerWait[] {
   const runners = takersIn(v), canWrite = canWriteOf(v.snapshot), s = startedOf(v);
   if (runners.some((r) => autoTakes(r, c, canWrite)) || [...s.ownersFor(c)].some((o) => s.canTake(o, c))) return [];
-  return [...s.waitersFor(c)].sort().map((login) => ({ ...runnerHoldOf(v, login), role: s.roleOf(login, { refs: c.refs ?? [], repos: c.repos }) }));
+  return [...s.waitersFor(c)].sort().map((login) => ({ ...runnerHoldOf(v, login), role: s.roleOf(login, { refs: c.refs ?? [], repos: c.repos, ...(c.step !== undefined && { step: c.step }) }) }));
 }
 
 /** Why none of `login`'s Task Runners can claim now (RunnerWait), for a login whose runners cannot. */
