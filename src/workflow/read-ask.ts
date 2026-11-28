@@ -4,6 +4,15 @@
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { COMMANDS, WEIGHT_HELP, YES_WORDS } from "./vocab.ts";
 
+/** The score from which a command read from a message runs without asking. */
+export const READ_RUN_SCORE = 0.9;
+/** The lead Jev's chosen command must have over the next most probable choice to run without asking. */
+export const READ_MARGIN = 0.2;
+/** The score from which the next most probable command is proposed beside the chosen one. */
+export const READ_SECOND_SCORE = 0.2;
+/** The label of the choice that is no command. */
+export const NONE_CHOICE = "none of these";
+
 /** The longest message text a call carries. */
 export const READ_TEXT_CHARS = 2000;
 /** Items whose state a call carries at most. */

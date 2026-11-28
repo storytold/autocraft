@@ -13,7 +13,7 @@ const send = async (w: World, text: string, deps: ReadDeps) => {
   assert.equal(parsed.kind, "ambiguous", text);
   return (await runText(w.db, actor, "github", { parsed, items: [item] }, { text, own: [item], named: false, parse: { repo: "app" }, deps })).items[0]!;
 };
-const reads = (command: string, confidence: number, jev: number | null): ReadDeps => ({ translate: async () => ({ command, confidence }), score: async () => jev });
+const reads = (command: string, confidence: number, jev: number | null): ReadDeps => ({ choose: async () => null, translate: async () => ({ command, confidence }), score: async () => jev });
 
 test("a message the parser cannot read runs the command a model reads in it only on a clear Jev score, and is proposed otherwise", async () => {
   const w = await unstarted();
@@ -62,4 +62,35 @@ test("with no reading (no Task Runner took the call), the reply is the parser's 
   const own = (await runCommand(w.db, actor, "github", { parsed: parse(text, { repo: "app" }), items: [item] })).items[0]!;
   const none = await send(w, text, { translate: async () => null });
   assert.deepEqual({ outcome: none.outcome, line: none.line }, { outcome: own.outcome, line: own.line });
+});
+
+test("Jev's choice among the item's commands runs only when it is sure and well ahead, is proposed otherwise, and Haiku reads it when Jev gives no answer", async () => {
+  const w = await unstarted();
+  const text = "could you take a look at this one for me";
+  const labels: string[][] = [];
+  const choose = (score: number, second: number): ReadDeps["choose"] => async (_db, a) => {
+    labels.push(a.candidates.map((c) => c.label));
+    return { label: "review", score, second: { label: "merge", score: second } };
+  };
+  let translated = 0;
+  const haiku: ReadDeps = { translate: async () => { translated++; return { command: "review", confidence: 0.5 }; }, score: async () => 0.95 };
+
+  const unsure = await send(w, text, { choose: choose(0.85, 0.3), ...haiku });
+  assert.equal(unsure.outcome, "ambiguous", unsure.line);
+  assert.match(unsure.line, /`review`/);
+  assert.match(unsure.line, /`merge`/, "the next choice is proposed too");
+  const close = await send(w, text, { choose: choose(0.92, 0.8), ...haiku });
+  assert.equal(close.outcome, "ambiguous", "a choice with a close second is only proposed");
+  assert.equal(translated, 0, "Haiku is not asked when Jev answers");
+  assert.equal(await liveWorkflow(w.db, "app", 1), null);
+  assert.ok(labels[0]!.includes("review") && labels[0]!.includes("none of these"), labels[0]!.join(", "));
+
+  const sure = await send(w, text, { choose: choose(0.95, 0.3), ...haiku });
+  assert.equal(sure.outcome, "run", sure.line);
+  assert.equal((await liveWorkflow(w.db, "app", 1))?.entry, "review");
+
+  const w2 = await unstarted();
+  const fallback = (await runText(w2.db, actor, "github", { parsed: parse(text, { repo: "app" }), items: [item] }, { text, own: [item], named: false, parse: { repo: "app" }, deps: { choose: async () => null, ...haiku } })).items[0]!;
+  assert.equal(translated, 1, "with no answer from Jev, Haiku reads the text");
+  assert.equal(fallback.outcome, "run", fallback.line);
 });

@@ -1,14 +1,18 @@
 // A model reading of text the command parser could not read, on every surface. When parse() gives `ambiguous` and the sender may
-// send commands on the items, Haiku translates the text into one command in the parser's words: on the sender's own Task Runner
-// first (a bound call, outside its slots), else on any Task Runner's Interactive slots (never for a quiet item), never on pipeline
-// slots. The command must parse in full, name no item the text does not, and hold no word in a fix's instructions that the text (or a
-// plan part's title) does not; Jev then scores whether the text asks for exactly it.
-// It runs through runCommand as if the sender had typed it only with Jev's score at READ_RUN_SCORE or more, with the message's own
-// items, and with no condition or hedge in the text (a hold runs anyway); otherwise the reply proposes it. A reading of `ask` (the text
-// is only a question) puts the text to Opus as `ask <text>` would (ReadText.ask) when Jev's question score is at READ_RUN_SCORE or
-// more and the text is about one item; otherwise the reply proposes it. On a surface without questions it is no reading. With no reading (no Task
-// Runner took the call, it failed or timed out, or the model found it unclear) the reply is the parser's own. The text goes only
-// into the calls, whose recorded texts are deleted when they end; each reading is logged as a `read` event with the text's hash.
+// send commands on the items, the code lists the commands the items can take now (read-choice.ts) and Jev picks one with a single
+// choice question, server side, with no Task Runner. It runs through runCommand as if the sender had typed it only with Jev's
+// probability at READ_RUN_SCORE or more, a lead of READ_MARGIN or more over the next choice, the message's own items (a text that names
+// another item is only proposed), and no condition or hedge in the text (a hold runs anyway); otherwise the reply proposes it, and the
+// next choice too at READ_SECOND_SCORE or more. "None of these" is no reading. A reading of `ask` (the text is only a question) puts the
+// text to Opus as `ask <text>` would (ReadText.ask) at the same bar when the text is about one item; otherwise the reply proposes it. On
+// a surface without questions `ask` is no choice.
+// When Jev gives no answer (unavailable, an error), Haiku translates the text into one command in the parser's words: on the sender's
+// own Task Runner first (a bound call, outside its slots), else on any Task Runner's Interactive slots (never for a quiet item), never
+// on pipeline slots. The command must parse in full, name no item the text does not, and hold no word in a fix's instructions that the
+// text (or a plan part's title) does not; Jev's score of whether the text asks for exactly it decides as above, and without one it is
+// only proposed. With no reading (no Task Runner took the call, it failed or timed out, or the model found it unclear) the reply is the
+// parser's own. The text goes only into the calls, whose recorded texts are deleted when they end; each reading is logged as a `read`
+// event with the text's hash.
 import { createHash } from "node:crypto";
 import { runModelStep, type ClaudeStep, type JevStep } from "../agents/step.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
@@ -23,13 +27,13 @@ import { ownerOf } from "../owners.ts";
 import { jevRequestOf } from "../prompts/index.ts";
 import { runCommand, type Actor, type CommandInput, type CommandResult } from "./apply.ts";
 import { askedQuestion, CONDITION, GUARD, parse, type ParseOptions } from "./parse.ts";
-import { addedWords, jevScore, parseTranslation, READ_ITEMS_MAX, READ_TEXT_CHARS, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
+import { addedWords, jevScore, NONE_CHOICE, parseTranslation, READ_ITEMS_MAX, READ_MARGIN, READ_RUN_SCORE, READ_SECOND_SCORE, READ_TEXT_CHARS, readState, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
+import { ASK_CHOICE, candidatesFor, choiceCriteria, jevChoice, type Candidate, type Choice, type ChoiceItem } from "./read-choice.ts";
 import { isLive, optionNamed } from "./resolve.ts";
 import { MEANING_WORDS, recommendationText } from "./status.ts";
 import { openRecommendation, shownWorkflow, type ItemRef, type Parsed, type Surface } from "./types.ts";
 
-/** The score from which a command read from a message runs without asking. */
-export const READ_RUN_SCORE = 0.9;
+export { READ_MARGIN, READ_RUN_SCORE, READ_SECOND_SCORE } from "./read-ask.ts";
 /** The longest a reading may take, from the first call to the score, while the sender waits for the reply (dashboard, agent, Discord); past it the parser's own reply goes out. */
 export const READ_WAIT_MS = 45_000;
 /** The same for a reading off the request (a GitHub comment, read off the comment drain). */
@@ -52,14 +56,21 @@ export function hedged(text: string): boolean {
 }
 
 export type Translation = { command: string | null; confidence: number };
-/** `fit`: how its items fit the message (itemsFit). `asks`: the command is ask, the text only a question. */
-export type Reading = { command: string; parsed: Parsed; score: number; source: "jev" | "haiku"; fit: "own" | "text"; asks?: true };
+/**
+ * `fit`: how its items fit the message (itemsFit). `asks`: the command is ask, the text only a question. `lead`: how far Jev's choice is
+ * ahead of the next most probable one (absent for a translation). `also`: the next most probable command, proposed beside it.
+ */
+export type Reading = { command: string; parsed: Parsed; score: number; source: "jev" | "haiku"; fit: "own" | "text"; asks?: true; lead?: number; also?: string };
 
 /** A translation that reads the text as a question: `ask` alone, or with words after it other than the author's. */
 const readsAsk = (command: string): boolean => /^ask$/i.test(command.trim()) || askedQuestion(command) !== null;
 
-/** What tests replace: the translate call (null: no answer) and Jev's score (null: no answer). */
+/** The choice question's input: the message and its items as the call shows them, and the choices. */
+export type ChooseAsk = { ask: ReadAsk; candidates: Candidate[] };
+
+/** What tests replace: Jev's choice, the translate call and Jev's score (each null: no answer). */
 export type ReadDeps = {
+  choose?: (db: Db, ask: ChooseAsk) => Promise<Choice | null>;
   /** `ownOnly`: only the sender's own Task Runner may read it (a quiet item). */
   translate?: (db: Db, ask: ReadAsk, login: string, o: { ownOnly: boolean }) => Promise<Translation | null>;
   score?: (db: Db, ask: ScoreAsk) => Promise<number | null>;
@@ -139,12 +150,13 @@ async function mayRead(db: Db, actor: Actor, own: readonly ItemRef[]): Promise<b
 }
 
 /** The call's input: the text, and each item's kind, AutoCraft's work on it and an open question with its plan parts (left out on a quiet item). */
-async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boolean }> {
+async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boolean; choice: ChoiceItem[] }> {
   const refs = read.own.slice(0, READ_ITEMS_MAX).map((i) => ({ repo: i.repo.split("/").pop()!, number: i.number }));
   const keys = refs.map((r) => `${r.repo}#${r.number}`);
   // Quiet over every item of the message, not only those the call describes: one quiet item keeps the text on the sender's own Task Runner.
   const [items, history, quiet] = await Promise.all([loadItems(db, refs, "pr"), loadWorkflowHistory(db, refs), loadQuiet(db, read.own.map((i) => `${i.repo.split("/").pop()!}#${i.number}`))]);
   const out: ReadItem[] = [];
+  const choice: ChoiceItem[] = [];
   for (const key of keys) {
     const it = items.get(key as never);
     if (!it) continue;
@@ -152,12 +164,18 @@ async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boo
     const wf = all.findLast((w) => isLive(w)) ?? shownWorkflow(all);
     const rec = isLive(wf) ? openRecommendation(wf) : null;
     const veiled = quiet.has(key);
+    const live = isLive(wf);
+    choice.push({
+      kind: it.kind === "pr" ? "pr" : "issue", live, held: wf?.state === "stopped", approved: !!wf?.approvedBy && live,
+      rec: rec ? { text: veiled ? null : recommendationText(rec), merges: rec.merges } : null,
+      parts: rec && !veiled ? wf!.plan.filter((p) => p.state === "planned").map((p) => ({ n: p.n, title: p.title })) : [],
+    });
     out.push({
       ref: key, kind: it.kind === "pr" ? "pull request" : "issue", work: wf ? wf.state : "not started",
       ...(rec && !veiled ? { question: recommendationText(rec), parts: wf!.plan.filter((p) => p.state !== "dropped").map((p) => ({ n: p.n, title: p.title })) } : {}),
     });
   }
-  return { ask: { ...(keys[0] ? { ref: keys[0] } : {}), message: read.text.slice(0, READ_TEXT_CHARS), items: out }, quiet: quiet.size > 0 };
+  return { ask: { ...(keys[0] ? { ref: keys[0] } : {}), message: read.text.slice(0, READ_TEXT_CHARS), items: out }, quiet: quiet.size > 0, choice };
 }
 
 const TRANSLATE = (id: "command.read" | "interactive.command-read"): ClaudeStep<ReadAsk, Translation> => ({
@@ -168,9 +186,23 @@ const TRANSLATE = (id: "command.read" | "interactive.command-read"): ClaudeStep<
     return v === null ? null : { value: v };
   },
 });
+/** The request of command.read.jev with only the named question (the choice question with these criteria). */
+function readRequest(field: "command" | "exact" | "question", state: string, criteria?: Record<string, string>): string {
+  const req = jevRequestOf("command.read.jev");
+  const q = req.questions[field]!;
+  return JSON.stringify({ ...req, state, questions: { [field]: criteria ? { ...q, criteria } : q } });
+}
+const CHOOSE: JevStep<ChooseAsk, Choice> = {
+  provider: "jev", id: "command.read.jev",
+  request: (a) => ({ item: { ref: "command" }, body: readRequest("command", readState(a.ask), choiceCriteria(a.candidates)) }),
+  parse: (answers, a, ctx) => {
+    const c = ctx.code === 0 ? jevChoice(answers, a.candidates) : null;
+    return c === null ? null : { value: c };
+  },
+};
 const SCORE: JevStep<ScoreAsk, number> = {
   provider: "jev", id: "command.read.jev",
-  request: (a) => ({ item: { ref: "command" }, body: JSON.stringify({ ...jevRequestOf("command.read.jev"), state: scoreState(a) }) }),
+  request: (a) => ({ item: { ref: "command" }, body: readRequest(readsAsk(a.command) ? "question" : "exact", scoreState(a)) }),
   parse: (answers, _a, ctx) => {
     const p = ctx.code === 0 ? jevScore(answers, readsAsk(_a.command) ? "question" : "exact") : null;
     return p === null ? null : { value: p };
@@ -196,6 +228,17 @@ async function translate(db: Db, a: ReadAsk, login: string, o: { ownOnly: boolea
   }
 }
 
+async function choose(db: Db, a: ChooseAsk): Promise<Choice | null> {
+  try {
+    const r = await runModelStep(db, CHOOSE, a);
+    return r.ok ? r.value : null;
+  } catch {
+    return null;
+  } finally {
+    await removeRunTexts(db, { steps: [READ_STEP], finishedOnly: true }).catch(() => 0);
+  }
+}
+
 async function score(db: Db, a: ScoreAsk): Promise<number | null> {
   try {
     const r = await runModelStep(db, SCORE, a);
@@ -207,9 +250,37 @@ async function score(db: Db, a: ScoreAsk): Promise<number | null> {
   }
 }
 
-/** The command a model reads in the text, checked by the parser and scored; null when there is none. */
+/** The text's question as `ask` proposes it: whole when it is short, else the usage. */
+const askProposal = (text: string): string => {
+  const said = text.trim().replace(/\s+/g, " ");
+  return said.length <= PROPOSED_QUESTION_CHARS ? `ask ${said}` : "ask <question>";
+};
+
+/**
+ * Jev's choice among the commands the items can take now: undefined when Jev gave no answer, null when it chose none of them. A text
+ * that names an item that is not one of the message's own only proposes it.
+ */
+async function chosen(db: Db, read: ReadText, ask: ReadAsk, items: ChoiceItem[]): Promise<Reading | null | undefined> {
+  const candidates = candidatesFor(items, read.text, { asks: !!read.ask });
+  const c = await (read.deps?.choose ?? choose)(db, { ask, candidates });
+  if (!c) return undefined;
+  const pick = candidates.find((x) => x.label === c.label)!;
+  if (pick.label === NONE_CHOICE) return null;
+  const next = c.second ? candidates.find((x) => x.label === c.second!.label) : undefined;
+  const also = next && c.second!.score >= READ_SECOND_SCORE ? (next.label === ASK_CHOICE ? askProposal(read.text) : next.parsed ? next.command : undefined) : undefined;
+  const lead = c.score - (c.second?.score ?? 0);
+  const base = { score: c.score, source: "jev" as const, lead, ...(also ? { also } : {}) };
+  if (pick.label === ASK_CHOICE) return { ...base, command: "ask", parsed: { kind: "ambiguous", understood: "", rest: "" }, fit: read.own.length === 1 ? "own" : "text", asks: true };
+  const others = refsIn(read.text, read.parse?.repo).some((r) => !read.own.some((o) => sameRef(r, o)));
+  const parsed: Parsed = read.named ? { ...pick.parsed!, items: [...read.own] } as Parsed : pick.parsed!;
+  return { ...base, command: pick.command, parsed, fit: others ? "text" : "own" };
+}
+
+/** The command a model reads in the text: Jev's choice, or when Jev gives no answer, Haiku's translation checked by the parser and scored; null when there is none. */
 export async function readCommand(db: Db, login: string, read: ReadText): Promise<Reading | null> {
-  const { ask, quiet } = await askOf(db, read);
+  const { ask, quiet, choice } = await askOf(db, read);
+  const picked = await chosen(db, read, ask, choice);
+  if (picked !== undefined) return picked;
   const tr = await (read.deps?.translate ?? translate)(db, ask, login, { ownOnly: quiet });
   if (!tr?.command) return null;
   if (readsAsk(tr.command)) {
@@ -227,6 +298,9 @@ export async function readCommand(db: Db, login: string, read: ReadText): Promis
   return p === null ? { command: tr.command, parsed, score: tr.confidence, source: "haiku", fit } : { command: tr.command, parsed, score: p, source: "jev", fit };
 }
 
+/** The longest question a proposal quotes whole; a longer one is proposed as the usage. */
+const PROPOSED_QUESTION_CHARS = 200;
+
 /** Resolves after `ms` with null, or with the promise's value; a rejection is null. */
 const within = <T>(ms: number, p: Promise<T>): Promise<T | null> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -236,14 +310,12 @@ const within = <T>(ms: number, p: Promise<T>): Promise<T | null> => {
 const isHold = (p: Parsed): boolean => p.kind === "commands" && p.parts.length > 0 && p.parts.every((x) => x.word === "hold");
 
 /**
- * Whether a reading runs without asking: Jev's score at READ_RUN_SCORE or more (Haiku's own confidence only proposes), items that are
+ * Whether a reading runs without asking: Jev's score at READ_RUN_SCORE or more with Jev's choice READ_MARGIN or more ahead of the next
+ * (Haiku's own confidence only proposes), items that are
  * the message's own, and no condition the parser found and no hedge in the text, unless it is a hold.
  */
 export const readingRuns = (r: Reading, read: Pick<ReadText, "text" | "condition">): boolean =>
-  r.source === "jev" && r.score >= READ_RUN_SCORE && r.fit === "own" && (isHold(r.parsed) || !!r.asks || (!read.condition && !hedged(read.text)));
-
-/** The longest question a proposal quotes whole; a longer one is proposed as the usage. */
-const PROPOSED_QUESTION_CHARS = 200;
+  r.source === "jev" && r.score >= READ_RUN_SCORE && (r.lead === undefined || r.lead >= READ_MARGIN) && r.fit === "own" && (isHold(r.parsed) || !!r.asks || (!read.condition && !hedged(read.text)));
 
 /** Adds the note to every item's line and to the reply. */
 function noted(res: CommandResult, note: string): CommandResult {
@@ -285,8 +357,8 @@ export async function runText(db: Db, actor: Actor, via: Surface, given: Command
   // Logged before the command's own event, which stays the item's latest.
   await recordEvents(db, read.own.map((i) => ({ workflowId: null, repo: i.repo.split("/").pop()!, number: i.number, login: actor.login!, via, kind: "read" as const, parsed: reading.parsed, line, at })));
   const items = input.items.length ? input.items : [...read.own];
-  const said = read.text.trim().replace(/\s+/g, " ");
-  const proposed = !reading.asks ? reading.command : said.length <= PROPOSED_QUESTION_CHARS ? `ask ${said}` : "ask <question>";
+  const first = reading.asks ? askProposal(read.text) : reading.command;
+  const proposed = reading.also && reading.also !== first ? [first, reading.also] : first;
   if (!runs) return await runCommand(db, actor, via, { ...input, items, proposed });
   if (reading.asks) return noted(await read.ask!(read.text.trim()), t("Read from your words as a question."));
   const note = t("Read from your words as `{command}`.", { command: reading.command });

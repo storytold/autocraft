@@ -64,8 +64,8 @@ export type CommandInput = {
   keepBatch?: boolean;
   /** The app's mention name, for replies that tell the sender what to write back. */
   mention?: string;
-  /** A command a model read in text the parser could not read (read.ts): the unclear reply proposes it. */
-  proposed?: string;
+  /** One or two commands a model read in text the parser could not read (read.ts), likeliest first: the unclear reply proposes them. */
+  proposed?: string | readonly string[];
 };
 
 export type ItemOutcome = { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null; /** The question the line shows: it took the place of the one the person answered. */ question?: { workflowId: number; recAt: string }; /** Why a clear command is not possible on the item. */ refusal?: Refusal["why"]; /** A list item's Task Runner line (runnerLine), which the reply shows once. */ runners?: string };
