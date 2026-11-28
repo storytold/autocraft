@@ -6,16 +6,19 @@
 // command's words. The command runs for each item on its own.
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type Ref, type RefObject } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { CaretDownIcon, ChatCircleIcon, CheckCircleIcon, CircleDashedIcon, DiscordLogoIcon, FunnelIcon, GitPullRequestIcon, RadioButtonIcon, UsersThreeIcon, XCircleIcon, XIcon } from "@phosphor-icons/react";
+import {
+  CaretDownIcon, ChatCircleIcon, CheckCircleIcon, CircleDashedIcon, DiscordLogoIcon, FunnelIcon, GitPullRequestIcon, HourglassMediumIcon, PlayIcon, QuestionIcon, RadioButtonIcon,
+  StopCircleIcon, UsersThreeIcon, XCircleIcon, XIcon, type Icon,
+} from "@phosphor-icons/react";
 import { t } from "../../../../../src/i18n/index.ts";
 import {
-  AUTOCRAFT_STATES, DEFAULT_QUERY, itemOfValue, itemsTerm, KINDS, MAX_ITEMS, PRESETS, PRIORITIES, parseItemQuery, presetOf, splitWords, termValues, tokens, withTerm,
-  type QueryKey, type QueryTerm,
+  AUTOCRAFT_STATES, DEFAULT_QUERY, itemOfValue, itemsTerm, KINDS, MAX_ITEMS, PRESETS, PRIORITIES, parseItemQuery, presetOf, splitWords, STEPS, termValues, tokens, withTerm,
+  type QueryKey, type QueryTerm, type StepValue,
 } from "../../../../../src/core/item-query.ts";
 import { itemsIn, listForm, parse } from "../../../../../src/workflow/parse.ts";
 import { useApi, useQuery } from "../../../api/client";
 import { usePageProject } from "../../../api/scope";
-import type { BrowseAutocraft, BrowseRow, MaintainCommandResult } from "../../../api/types";
+import type { BrowseAutocraft, BrowseRow, BrowseStepState, MaintainCommandResult } from "../../../api/types";
 import { githubItemUrl, itemPath, ownerOfRepo } from "../../../lib/links";
 import { num } from "../../../lib/format";
 import { useUser } from "../../../shell/UserContext";
@@ -105,6 +108,33 @@ const AUTOCRAFT_WORD: Record<BrowseAutocraft, { label: string; tone: Tone } | nu
 const AUTOCRAFT_TITLE: Record<BrowseAutocraft, string> = {
   running: "AutoCraft is working on it", waiting: "AutoCraft waits for a person", stopped: "Stopped by the automatic merge rule; a maintainer's yes takes it over", held: "Held", backlog: "In the Backlog", done: "AutoCraft is done with it", none: "Not started",
 };
+/** Each step as the item's step list names it (src/workflow/status.ts), and the shorter name a phone row shows. */
+const STEP_WORD: Record<StepValue, { label: string; short: string }> = {
+  implement: { label: "Implement", short: "Implement" },
+  review: { label: "Review", short: "Review" },
+  "fix-up": { label: "Fix-up", short: "Fix-up" },
+  "review-again": { label: "Review again", short: "Re-review" },
+  update: { label: "Update from main", short: "Update" },
+  "fix-ci": { label: "Fix CI and conflicts", short: "Fix CI" },
+  batch: { label: "Batch", short: "Batch" },
+  merge: { label: "Merge", short: "Merge" },
+  recommend: { label: "Recommendation", short: "Waiting" },
+  "new-commits": { label: "Review new commits", short: "New commits" },
+};
+const STEP_STATE: Record<BrowseStepState, { word: string; icon: Icon }> = {
+  running: { word: "running", icon: PlayIcon },
+  waiting: { word: "waiting", icon: HourglassMediumIcon },
+  answer: { word: "waiting for an answer", icon: QuestionIcon },
+  stopped: { word: "stopped", icon: StopCircleIcon },
+};
+
+/** "Fix-up · running". Back with its recommendation the state says it all: "Waiting for an answer". */
+function stepText(r: BrowseRow, step: NonNullable<BrowseRow["step"]>): string {
+  const state = r.autocraft === "stopped" ? t("stopped by the rule") : t(STEP_STATE[step.state].word);
+  if (step.name === "recommend" && (step.state === "answer" || step.state === "stopped")) return state.charAt(0).toUpperCase() + state.slice(1);
+  return t("{step} · {state}", { step: t(STEP_WORD[step.name].label), state });
+}
+
 const priorityTone = (p: string): Tone => (p === "P0" ? "bad" : p === "P1" ? "warn" : "neutral");
 
 function Ci({ ci }: { ci: BrowseRow["ci"] }) {
@@ -151,7 +181,7 @@ function factsOf(r: BrowseRow, compact = false) {
   const size = r.size ? t("Size {s}", { s: r.size }) : "";
   return {
     asks: r.asksYou && <Badge tone="accent">{t("Asks you")}</Badge>,
-    state: (short: boolean) => word && (
+    state: (short: boolean) => r.step ? <StepBadge r={r} step={r.step} short={short} className={pad} /> : word && (
       <span title={t(AUTOCRAFT_TITLE[r.autocraft])} className="relative z-10">
         <Badge tone={word.tone} className={pad}>
           {short && r.autocraft === "stopped" ? (
@@ -200,6 +230,22 @@ function factsOf(r: BrowseRow, compact = false) {
   };
 }
 
+/** The step a live workflow is at and how it stands. A phone row shows the state as an icon beside the step's short name. */
+function StepBadge({ r, step, short, className }: { r: BrowseRow; step: NonNullable<BrowseRow["step"]>; short: boolean; className?: string }) {
+  const text = stepText(r, step);
+  const tone = AUTOCRAFT_WORD[r.autocraft]?.tone ?? "accent";
+  if (!short) return <Badge tone={tone} className={cn("relative z-10", className)}>{text}</Badge>;
+  const StateIcon = STEP_STATE[step.state].icon;
+  return (
+    <span title={text} className="relative z-10">
+      <Badge tone={tone} className={className} icon={<StateIcon weight="fill" aria-hidden />}>
+        <span aria-hidden>{step.name === "recommend" && step.state === "stopped" ? t("Stopped") : t(STEP_WORD[step.name].short)}</span>
+        <span className="sr-only">{text}</span>
+      </Badge>
+    </span>
+  );
+}
+
 /** Lines 2 and 3 start under the ref, past the kind icon (1.2em of the title's 14 px) and its gap. */
 const UNDER_TITLE = "pl-[calc(16.8px+0.5rem)]";
 
@@ -237,9 +283,9 @@ function PhoneFacts({ r, byCreated }: { r: BrowseRow; byCreated: boolean }) {
   const more = r.labels.length - shownLabels;
   return (
     <div className={cn("mt-1 flex flex-col gap-1.5 text-xs text-ink/70", UNDER_TITLE)}>
-      {/* Slot widths hold the widest value of each (a state word, P0, XL, two-digit counts, a five-digit number). */}
+      {/* Slot widths hold the widest value of each (a state word, P0, XL, two-digit counts, a five-digit number); a longer step widens its slot. */}
       <div className="flex h-5 flex-nowrap items-center gap-1 overflow-hidden">
-        {slot(f.state(true), "w-[3.6rem]")}
+        {slot(f.state(true), "min-w-[3.6rem]")}
         {slot(f.priority, "w-[1.75rem]")}
         {slot(f.size, "w-[1.4rem]")}
         {slot(f.ci, "w-4")}
@@ -381,6 +427,12 @@ function FilterControls({ q, set, facets, repos, meaning }: { q: string; set: (q
         onChange={setOne("autocraft")}
         options={[any, ...AUTOCRAFT_STATES.map((s): [string, string] => [s, s === "none" ? t("Not started") : t(AUTOCRAFT_WORD[s]!.label)])]}
       />
+      <FilterField
+        label={t("Step")}
+        value={one("step")}
+        onChange={setOne("step")}
+        options={[any, ...(Object.keys(STEPS) as StepValue[]).map((v): [string, string] => [v, t(STEP_WORD[v].label)])]}
+      />
       <FilterField label={t("Discord")} value={one("discord")} onChange={setOne("discord")} options={[any, ["mentioned", t("Mentioned")]]} />
       {/* Hits by meaning come best first: no sort applies. */}
       {!meaning && <FilterField label={t("Sort")} value={sort} onChange={(v) => set(withTerm(q, "sort", v === "updated" ? [] : [v]))} options={SORT_OPTIONS.map(([v, l]): [string, string] => [v, t(l)])} />}
@@ -408,6 +460,7 @@ function termLabel(term: QueryTerm): string {
     case "discord": return not(t("On Discord"));
     case "review": return not(t("Clean review"));
     case "kind": return not(t("{key}: {value}", { key: t("Kind"), value: vs.map((v) => KINDS[v] ?? v).join(", ") }));
+    case "step": return not(t("{key}: {value}", { key: t("Step"), value: vs.map((v) => t(STEP_WORD[v as StepValue]?.label ?? v)).join(", ") }));
     case "autocraft": return not(t("{key}: {value}", { key: "AutoCraft", value: vs.map((v) => (v === "none" ? t("Not started") : t(AUTOCRAFT_WORD[v as BrowseAutocraft]?.label ?? v))).join(", ") }));
     default: return not(t("{key}: {value}", { key: t(KEY_LABEL[term.key] ?? term.key), value: vs.map((v) => t(VALUE_LABEL[v] ?? v)).join(", ") }));
   }

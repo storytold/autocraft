@@ -4,9 +4,10 @@
 // Words that are no qualifier are the full-text search; `#123` matches the number. `items:craft-libs/3217,designcraft/12` lists
 // items by `[owner/]repo/number`: exactly those items, and none for a repo that is not tracked. Qualifiers this file does not know
 // are returned in `unknown`, so the page can say they were not applied.
+import type { StepName } from "../workflow/status.ts";
 
 export type QueryKey =
-  | "type" | "state" | "label" | "priority" | "area" | "author" | "repo" | "kind" | "size" | "discord" | "has" | "ci" | "review" | "autocraft" | "flag" | "items";
+  | "type" | "state" | "label" | "priority" | "area" | "author" | "repo" | "kind" | "size" | "discord" | "has" | "ci" | "review" | "autocraft" | "step" | "flag" | "items";
 
 /** One qualifier: all its values are alternatives; `not` negates the whole term. Values are normalised (see VALUES). */
 export type QueryTerm = { key: QueryKey; values: string[]; not: boolean };
@@ -41,6 +42,18 @@ export const KINDS: Record<string, string> = {
 };
 export const KIND_NAMES: Record<string, string> = Object.fromEntries(Object.entries(KINDS).map(([k, v]) => [v, k]));
 export const AUTOCRAFT_STATES = ["running", "waiting", "stopped", "held", "backlog", "done", "none"] as const;
+/**
+ * `step:` values: the step a live workflow is at, by a short name, and the step as the workflow stores it (src/workflow/status.ts
+ * StepName). `recommend` is an item back with its recommendation.
+ */
+export const STEPS = {
+  implement: "implement", review: "review", "fix-up": "fix-up", "review-again": "review again", update: "update from main", "fix-ci": "fix CI and conflicts",
+  batch: "batch", merge: "merge", recommend: "recommend", "new-commits": "review new commits",
+} as const satisfies Record<string, StepName>;
+export type StepValue = keyof typeof STEPS;
+/** The `step:` value of a stored step name; null for a name it does not know. */
+export const stepValueOf = (name: string | null): StepValue | null =>
+  (Object.keys(STEPS) as StepValue[]).find((k) => STEPS[k] === name) ?? null;
 export const PRIORITIES = ["P0", "P1", "P2", "P3", "P4"] as const;
 export const SIZES = ["S", "M", "L", "XL"] as const;
 export const CI_STATES = ["green", "red", "pending"] as const;
@@ -100,6 +113,7 @@ function value(key: QueryKey, raw: string): string | null {
     case "ci": return (CI_STATES as readonly string[]).includes(lower) ? lower : lower === "success" ? "green" : lower === "failure" ? "red" : null;
     case "review": return lower === "clean" ? lower : null;
     case "autocraft": return (AUTOCRAFT_STATES as readonly string[]).includes(lower) ? lower : null;
+    case "step": return Object.hasOwn(STEPS, lower) ? lower : lower === "fixup" ? "fix-up" : null;
     case "flag": return (FLAGS as readonly string[]).includes(lower) ? lower : null;
     case "area": return lower === "none" ? "none" : v;
     case "items": {
@@ -131,7 +145,7 @@ function isTerm(v: string): { key: QueryKey; value: string } | null {
 
 const ALIASES: Record<string, QueryKey> = {
   type: "type", state: "state", label: "label", priority: "priority", area: "area", author: "author", repo: "repo", kind: "kind", size: "size",
-  discord: "discord", has: "has", ci: "ci", review: "review", autocraft: "autocraft", items: "items",
+  discord: "discord", has: "has", ci: "ci", review: "review", autocraft: "autocraft", step: "step", items: "items",
 };
 
 export function parseItemQuery(q: string): ItemQuery {

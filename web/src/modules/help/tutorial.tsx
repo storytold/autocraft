@@ -360,7 +360,7 @@ function FollowStep() {
       <Bullets>
         <Term term={<A to="/">{t("Home")}</A>}>{t("your items and their last message; questions for you are marked")}</Term>
         <Term term={<A to="/items">{t("Items")}</A>}>
-          {q("is:draft")}, {q("is:ready")}, {q("is:asked")}, {q("autocraft:waiting")}
+          {q("is:draft")}, {q("is:ready")}, {q("is:asked")}, {q("autocraft:waiting")}, {q("is:mine step:merge")}
         </Term>
         <Term term={<A to="/queue">{t("Work queue")}</A>}>{t("what runs, what waits and why")}</Term>
         <Term term={<A to="/agents">{t("Agents")}</A>}>{t("model calls running, waiting and finished; why a call waits")}</Term>

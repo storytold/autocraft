@@ -1,5 +1,5 @@
 // reads: mirror.items, mirror.comments, triage.item_rank, triage.item_areas, triage.dupe_group_items, triage.classifications, workflow.item_workflows,
-//        workflow.workflow_events, discord.discord_mentions, review.opus_reviews, intake.outside_holds, planner.liveness_items, access.access
+//        workflow.workflow_events, discord.discord_mentions, security.security_findings, security.security_quiet_prs, review.opus_reviews, intake.outside_holds, planner.liveness_items, access.access
 // The Items browser: the items of the visible repos that match a parsed query (src/core/item-query.ts), one page in the asked order,
 // with the facts each row shows. Every request is a fixed number of statements: the page, its total and, when asked, the count of
 // every preset and the quick-filter values. All of them start from one derived table of an item and its narrow facts.
@@ -8,7 +8,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { parseSearch } from "../../db/search.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { itemOfValue, KINDS, type ItemQuery, type QueryTerm } from "../../core/item-query.ts";
+import { itemOfValue, KINDS, STEPS, type ItemQuery, type QueryTerm, type StepValue } from "../../core/item-query.ts";
 import { ownerOf } from "../../owners.ts";
 import { reviewBots } from "../../review/bots.ts";
 import { hiddenRepos } from "../control/fragments.ts";
@@ -29,7 +29,7 @@ export type BrowseItem = {
   repo: string; number: number; kind: string; state: string; is_draft: number | null; title: string | null; author: string | null; outside: number; team: number;
   labels: string | null; priority: string | null; size: string | null; classified: string | null; area: string | null;
   comments: number; reactions: number; discord: number; linked: number | null; ci_state: string | null;
-  autocraft: string; asks_me: number; approved: number; duplicate: number; created_at: string | null; updated_at: string | null;
+  autocraft: string; step: string | null; step_state: string | null; asks_me: number; approved: number; duplicate: number; created_at: string | null; updated_at: string | null;
 };
 
 export type BrowsePage = { rows: BrowseItem[]; total: number };
@@ -100,6 +100,25 @@ function facts(db: Db, scope: BrowseScope, inner: (eb: kx.AnyEb) => Expression<S
         .when("lw.state", "=", "backlog").then("backlog")
         .when("lw.state", "in", ["done", "closed"]).then("done")
         .else("none").end().as("autocraft"),
+      // The step the live workflow is at: the one its advance pass recorded, or before its first pass where it starts (as stepsOf in
+      // src/dash/api/maintain-item.ts reads a row with no plan yet).
+      eb.case()
+        .when("w.id", "is", null).then(null)
+        .when("w.step", "is not", null).then(eb.ref("w.step"))
+        .when(eb.and([eb("w.state", "=", "recommending"), eb("w.approved_by", "is", null), eb("w.entry", "<>", "merge")])).then("recommend")
+        .when("w.state", "=", "recommending").then("merge")
+        .when("w.entry", "=", "merge").then("update from main")
+        .when(eb.and([eb("w.entry", "=", "implement"), eb("w.kind", "=", "issue")])).then("implement")
+        .else("review").end().as("step"),
+      // How it stands at that step, in the step list's words. A quiet pull request shows a viewer a blocker as a question, as its status comment does.
+      eb.case()
+        .when("w.id", "is", null).then(null)
+        .when(eb.and([eb("w.state", "in", [...ASKING_STATES]), eb("w.started_by", "=", RULE_STARTER), eb("w.approved_by", "is", null), eb("w.taken_by", "is", null)])).then("stopped")
+        .when("w.state", "=", "recommending").then("answer")
+        .when(eb.and([eb("w.state", "=", "blocked"), ...(scope.staff ? [] : [eb.not(quietPrExpr(eb, "i.repo", "i.number"))])])).then("stopped")
+        .when("w.state", "=", "blocked").then("answer")
+        .when("w.state", "=", "waiting").then("waiting")
+        .else("running").end().as("step_state"),
       eb.case().when(eb.and([
         eb("w.state", "in", [...ASKING_STATES]),
         eb.or([eb.and([kx.ciEq(db, "w.started_by", eb.val(me)), eb("w.started_by", "<>", RULE_STARTER)]), kx.ciEq(db, eb.fn.coalesce("w.approved_by", eb.val("")), eb.val(me)), kx.ciEq(db, eb.fn.coalesce("w.taken_by", eb.val("")), eb.val(me))]),
@@ -162,6 +181,8 @@ function termExpr(db: Db, eb: kx.AnyEb, scope: BrowseScope, t: QueryTerm): Expre
     case "review": return eb.exists((eb as any).selectFrom("main.opus_reviews as o").select(one(eb)).whereRef("o.repo", "=", "x.repo").whereRef("o.number", "=", "x.number")
       .whereRef("o.head_oid", "=", "x.head_oid").where("o.verdict", "=", "take").where("o.sure", "=", 1));
     case "autocraft": return eb("x.autocraft", "in", vs);
+    // Null-safe, so `-step:merge` keeps the items with no live workflow.
+    case "step": return eb(eb.fn.coalesce("x.step", eb.val("")), "in", vs.map((v) => STEPS[v as StepValue]));
     case "items": {
       // A written owner must be the tracked repo's owner; an item of another owner's repo of the same name matches nothing.
       const refs = vs.flatMap((v) => {
@@ -221,7 +242,7 @@ function ordered(b: any, q: ItemQuery, normalWeight: number) {
 }
 
 const ROW_COLS = ["repo", "number", "kind", "state", "is_draft", "title", "author", "outside", "team", "labels", "priority", "size", "classified", "area",
-  "comments", "reactions", "discord", "linked", "ci_state", "autocraft", "asks_me", "approved", "duplicate", "created_at", "updated_at"].map((c) => `x.${c}`);
+  "comments", "reactions", "discord", "linked", "ci_state", "autocraft", "step", "step_state", "asks_me", "approved", "duplicate", "created_at", "updated_at"].map((c) => `x.${c}`);
 
 /** The statements of one page of the items matching `q` and of their count (exported for measuring them). */
 export function browseStatements(db: Db, scope: BrowseScope, q: ItemQuery, o: BrowseOpts) {
