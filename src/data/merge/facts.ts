@@ -32,7 +32,7 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
       ]).as("t")).selectAll().where("rn", "=", 1)) as Promise<any[]>,
     mergedInfoOf(db, keys),
     q.all(k.selectFrom("verifications as v").innerJoin(resolveKeys(db, keys, "kk"), onKey("v"))
-      .select(["v.repo", "v.number", "v.head_sha", "v.state", "v.kind", "v.summary", "v.note", "v.finished_at"])) as Promise<any[]>,
+      .select(["v.repo", "v.number", "v.head_sha", "v.state", "v.kind", "v.summary", "v.note", "v.finished_at", "v.errors"])) as Promise<any[]>,
     q.all(k.selectFrom("ci_run_approvals as a").innerJoin(resolveKeys(db, keys, "kk"), onKey("a"))
       .select(["a.repo", "a.number", "a.head_oid", "a.runs", "a.approved", "a.reread", "a.failed", "a.cross_repo", "a.checked_at", "a.approved_at"])) as Promise<any[]>,
     q.all(k.selectFrom("merge_state as s").innerJoin(resolveKeys(db, keys, "kk"), onKey("s"))
@@ -62,7 +62,7 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
     facts.attempts.set(headOf(r.repo, r.number, r.head_oid), { outcome: r.outcome, reason: r.reason, ci: r.ci, mergeable: r.mergeable, at: r.at, refusals: Number(r.refusals), path: r.path, method: r.method } as MergeAttempt);
   }
   for (const r of verifs) {
-    facts.verifications.set(headOf(r.repo, r.number, r.head_sha), { head: r.head_sha, state: r.state as VerificationState, kind: r.kind, summary: r.summary, note: r.note, finishedAt: r.finished_at } satisfies VerificationFact);
+    facts.verifications.set(headOf(r.repo, r.number, r.head_sha), { head: r.head_sha, state: r.state as VerificationState, kind: r.kind, summary: r.summary, note: r.note, finishedAt: r.finished_at, errors: Number(r.errors ?? 0) } satisfies VerificationFact);
   }
   for (const r of runs) {
     facts.runs.set(headOf(r.repo, r.number, r.head_oid), {

@@ -94,7 +94,8 @@ export function defaultOpusDeps(): OpusDeps {
 }
 
 type Saved = { snap?: Snapshot; mode: "full" | "delta" | "carried"; base: string | null; model: string | null; review: OpusReview;
-  /** The base branch the reviewed diff was read against (a delta or carried review: the earlier review's); absent: the cached diff's, else the mirrored base. */ baseRef?: string | null };
+  /** The base branch the reviewed diff was read against (a delta or carried review: the earlier review's); absent: the cached diff's, else the mirrored base. */ baseRef?: string | null;
+  /** A too-large hold: the diff size cap it was made under. */ sizeCap?: number };
 
 /**
  * Stores the Opus row of a head commit, then a `reviewed` stages row and a take/hold/close
@@ -114,7 +115,7 @@ export async function saveOpus(db: Db, runId: string | null, c: { repo: string; 
   await saveReviews(db, [{
     runId, repo: c.repo, number: c.number, head: c.head_oid, mode: s.mode, base: s.base, baseRef: baseRef ?? null, defaultBranch: repos.get(c.repo)?.default_branch ?? null,
     model: s.model, review: { verdict: r.verdict, sure: r.sure, reason: r.reason, fixes: r.fixes as never, risks: r.risks, workflow: (r.workflow ?? null) as never, summary: r.summary, why: r.why, public: r.public, conflicts: r.conflicts, claims: r.claims },
-    ...(s.snap ? { snap: { seen: s.snap.seen, hash: s.snap.hash } } : {}), blockedBy: blockers, jobId: currentJobId(),
+    ...(s.snap ? { snap: { seen: s.snap.seen, hash: s.snap.hash } } : {}), blockedBy: blockers, jobId: currentJobId(), ...(s.sizeCap !== undefined ? { sizeCap: s.sizeCap } : {}),
   }]);
 }
 
@@ -403,7 +404,7 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
     }
     if (p.kind === "large") {
       const r: OpusReview = { ref: refOf(c), verdict: "hold", sure: true, reason: p.reason ?? TOO_LARGE, fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: [] };
-      await saveOpus(db, runId, c, { mode: p.mode, base: p.base, baseRef: p.baseRef, model: null, review: r });
+      await saveOpus(db, runId, c, { mode: p.mode, base: p.base, baseRef: p.baseRef, model: null, review: r, sizeCap: deps.maxChars });
       await tally(c, r);
       params.onHandled?.(++handled);
       return;
@@ -442,8 +443,10 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
       await saveOpus(db, runId, c, { mode, base, baseRef, model: (r.ok && r.model) || deps.model, review: got, snap });
       await tally(c, got);
     } else {
-      await recordReviewFailure(db, c.repo, c.number, c.head_oid);
-      await jobItem(db, c.repo, c.number, "no valid Opus review", log);
+      // A call lost with its Task Runner, or to an outage, says nothing about the PR: it counts apart and never holds the PR for a person.
+      const lost = !r.ok && r.lost === true;
+      await recordReviewFailure(db, c.repo, c.number, c.head_oid, Date.now(), lost);
+      await jobItem(db, c.repo, c.number, lost ? "no Opus review: the call ended without a reply" : "no valid Opus review", log);
       summary.missing.push(refOf(c));
     }
     params.onHandled?.(++handled);

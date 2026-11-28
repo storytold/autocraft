@@ -345,6 +345,8 @@ export type AskOptions = {
   firstWaitMs?: number;
   /** User-local mode: the call failed because the model's safety filter declined it, after its retry elsewhere (src/remote/calls.ts); the ask returns null. */
   onRefused?: (error: string) => void;
+  /** Called with the error of each remote call that failed (src/data/jobs lostCallError tells a lost one). */
+  onFailed?: (error: string) => void;
 };
 
 /** The repo-docs directory for the item's repository, or undefined (no docs, or a checkout that is not one of ours). */
@@ -535,6 +537,7 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
       if (o.state === "failed") {
         if (o.runId !== null) await finishRun(db, o.runId, { state: "failed", ...(o.tokens && { tokens: o.tokens }), error: scrubError(o.error), summary: "failed" });
         if (o.error.startsWith(REFUSED_PREFIX)) opts.onRefused?.(o.error);
+        opts.onFailed?.(o.error);
         return "failed";
       }
       const { usage, all: tokens } = remoteUsage(o, model);

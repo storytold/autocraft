@@ -126,7 +126,7 @@ const stageRows = (rows: (StageRow | undefined)[]): StageEventRow[] => rows.filt
 
 /**
  * Upserts verification rows (a new verification of a head clears the earlier note) and records each row's stage event, in one
- * `db.write`.
+ * `db.write`. A row written over an errored one counts that retry in `errors`.
  */
 export async function saveVerifications(db: Db, rows: SavedVerification[]): Promise<void> {
   if (rows.length === 0) return;
@@ -140,7 +140,11 @@ export async function saveVerifications(db: Db, rows: SavedVerification[]): Prom
       head_task_id: r.headTaskId, base_task_id: r.baseTaskId, state: r.state, summary: r.summary, note: r.note, created_at: r.at, finished_at: r.finishedAt,
     }))))
       await q.run(q.k.insertInto("verifications").values(values).onConflict((oc) => oc.columns(["repo", "number", "head_sha"])
-        .doUpdateSet(kx.excluded(["base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"]))));
+        .doUpdateSet((eb) => ({
+          ...kx.excluded(["base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"])(eb),
+          // A run made over an errored verification is a retry of that error (src/core/rules.ts verifyRetryAt).
+          errors: eb.case().when("verifications.state", "=", "error").then(eb("verifications.errors", "+", 1)).else(eb.ref("verifications.errors")).end(),
+        }))));
     const stages = stageRows(list.map((r) => r.stage));
     if (stages.length) await addStageEvents(db, stages);
   });

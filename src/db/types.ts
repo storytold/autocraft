@@ -1725,6 +1725,7 @@ export interface OpusReviews {
   claims: string | null;
   blocked_by: string | null;
   workflow: string | null;
+  size_cap: number | null;
 }
 
 export interface OutsideAdmitted {
@@ -1990,6 +1991,7 @@ export interface PremergeReviews {
   base_ref: string | null;
   unsure: number | null;
   claims: string | null;
+  lost: Generated<number>;
 }
 
 export interface PromptRevisions {
@@ -2289,6 +2291,8 @@ export interface ReviewState {
   fail_head: string | null;
   fail_count: Generated<number>;
   fail_at: string | null;
+  lost_count: Generated<number>;
+  lost_at: string | null;
 }
 
 export interface RunnerLogins {
@@ -2645,6 +2649,7 @@ export interface Verifications {
   note: string | null;
   created_at: string;
   finished_at: string | null;
+  errors: Generated<number>;
 }
 
 export interface WebhookRedeliveries {
@@ -3364,7 +3369,7 @@ export const COLUMNS = {
   operator_fixups: ["id", "repo", "number", "from_head", "instructions", "by", "at", "state", "preapproval_id"],
   opus_carried_fixes: ["repo", "number", "head_oid", "from_head", "file", "change", "outcome", "at"],
   opus_review_history: ["repo", "number", "head_oid", "at", "model", "mode", "verdict", "sure", "reason", "risks", "fixes", "summary", "why", "public_review", "claims", "blocked_by", "trigger", "job_id"],
-  opus_reviews: ["repo", "number", "head_oid", "run_id", "at", "model", "mode", "base_head", "verdict", "sure", "reason", "fixes", "risks", "base_ref", "seen_at", "disc_hash", "public_review", "summary", "why", "conflicts", "claims", "blocked_by", "workflow"],
+  opus_reviews: ["repo", "number", "head_oid", "run_id", "at", "model", "mode", "base_head", "verdict", "sure", "reason", "fixes", "risks", "base_ref", "seen_at", "disc_hash", "public_review", "summary", "why", "conflicts", "claims", "blocked_by", "workflow", "size_cap"],
   outside_admitted: ["repo", "number", "at"],
   outside_holds: ["repo", "number", "author", "kind", "reason"],
   outside_released: ["repo", "number", "by", "at"],
@@ -3388,7 +3393,7 @@ export const COLUMNS = {
   pr_status_comments: ["repo", "number", "comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at", "pinged", "ping_failures"],
   preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id", "workflow_id", "reason_code", "reason_params"],
   premerge_followups: ["repo", "number", "head_oid", "issue_number", "url", "state", "at", "note"],
-  premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims"],
+  premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims", "lost"],
   prompt_revisions: ["id", "prompt_id", "scope", "rev", "kind", "body", "version", "default_hash", "follows", "from_rev", "active", "author", "at", "note"],
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
   release_apps: ["repo", "name", "stars", "updated_at"],
@@ -3412,7 +3417,7 @@ export const COLUMNS = {
   review_followups: ["repo", "number", "head_oid", "issue_number", "url", "state", "at", "note"],
   review_gates: ["repo", "number", "blocked", "by_login", "read_at", "failures"],
   review_posts: ["repo", "number", "review_id", "head_oid", "posted_at", "edited_at", "posted_as", "opus_at"],
-  review_state: ["repo", "number", "stale_at", "rerun_day", "rerun_count", "fail_head", "fail_count", "fail_at"],
+  review_state: ["repo", "number", "stale_at", "rerun_day", "rerun_count", "fail_head", "fail_count", "fail_at", "lost_count", "lost_at"],
   runner_logins: ["id", "user_code", "secret_hash", "label", "machine", "ip", "helper_version", "created_at", "expires_at", "state", "login", "token_id", "want_agent", "want_answer"],
   screenshot_config: ["repo", "package", "example", "driver", "commands", "ui_paths", "size", "updated_by", "updated_at"],
   screenshot_runs: ["repo", "number", "head_sha", "base_sha", "state", "reason", "plan", "head_task_id", "base_task_id", "verdict", "clear", "comparison", "model", "held", "created_at", "finished_at"],
@@ -3440,7 +3445,7 @@ export const COLUMNS = {
   user_settings: ["login", "key", "value", "updated_at"],
   user_token_revocations: ["id", "login", "token_enc", "queued_at", "kind", "aad", "attempts"],
   user_tokens: ["login", "github_id", "token_enc", "version", "updated_at", "status", "refresh_error"],
-  verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"],
+  verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at", "errors"],
   webhook_redeliveries: ["guid", "asked", "asked_at", "updated_at"],
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],

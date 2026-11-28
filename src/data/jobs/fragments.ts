@@ -58,6 +58,14 @@ export const itemsSumSince = (eb: kx.AnyEb, step: string, sinceRef: kx.Ex): Expr
 export const RUNNER_STOPPED = "The runner stopped while this job ran; start it again if needed.";
 /** Error text of a job whose model call no Task Runner took within the queue's wait limit (src/remote/calls.ts). */
 export const CALL_WAIT_LIMIT = "no user-local helper took the call in time";
+/** Errors of AutoCraft's services that say nothing about the work: an HTTP 5xx answer, a network error. */
+export const INFRA_ERROR = /\bHTTP\/?[\d.]* ?5\d\d\b|\b5\d\d (?:Bad Gateway|Service Unavailable|Gateway Timeout|Internal Server Error)\b|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|ENOTFOUND|EAI_AGAIN/i;
+/**
+ * A failed model call's error that says nothing about the model's work: its Task Runner went quiet or never started it (the lease
+ * expiries of src/data/runners), the runner stopped, the call row went away, or a service error. A call past its time limit is the model's.
+ */
+export const lostCallError = (error: string): boolean =>
+  /^lease expired: (?:no heartbeat|still preparing)|^The runner stopped during this call\.$|^the call is gone$/.test(error) || INFRA_ERROR.test(error);
 
 /** The items one job handled: `{ jobId }`, for `mirror.loadShown` in the same statement as the job's items. */
 registerKeySource<{ jobId: number }>("jobs.itemsOfJob", (db, a) => queryDb(db).k.selectFrom("job_items").select(["repo", "number"]).where("job_id", "=", a.jobId));

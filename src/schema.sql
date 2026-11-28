@@ -735,6 +735,7 @@ CREATE TABLE IF NOT EXISTS opus_reviews (
   -- public_review (added column): JSON {summary, points}, the text posted on the PR; NULL when the reply had none
   -- base_ref (added column): the base branch the reviewed diff was computed against; NULL for reviews stored before it was recorded
   -- workflow (added column): for an item on the maintainer workflow, JSON {outside_purpose: {lines, note} | null, recommendation: string | null}
+  -- size_cap (added column): on a too-large hold (model NULL), the diff size cap in characters it was made under
   PRIMARY KEY (repo, number, head_oid)
 );
 
@@ -1350,6 +1351,7 @@ CREATE TABLE IF NOT EXISTS verifications (
   note TEXT,                          -- on a pass: what the result does not show
   created_at TEXT NOT NULL,
   finished_at TEXT,
+  -- errors (added column): runs at this head made over an errored verification (AutoCraft's retries of an error)
   PRIMARY KEY (repo, number, head_sha)
 );
 CREATE INDEX IF NOT EXISTS verifications_state ON verifications(state);
@@ -2086,6 +2088,7 @@ CREATE TABLE IF NOT EXISTS premerge_reviews (
   searched TEXT,
   error TEXT,
   tries INTEGER NOT NULL DEFAULT 0,
+  -- lost (added column): calls in a row at this head that ended without a reply; they use no try
   PRIMARY KEY (repo, number, head_oid)
 );
 
@@ -3113,6 +3116,7 @@ CREATE TABLE IF NOT EXISTS review_state (
   fail_head TEXT,
   fail_count INTEGER NOT NULL DEFAULT 0,
   fail_at TEXT,
+  -- lost_count, lost_at (added columns): review calls at fail_head that ended without a reply, counted apart from fail_count
   PRIMARY KEY (repo, number)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS opus_reviews_item_at ON opus_reviews(repo, number, at);

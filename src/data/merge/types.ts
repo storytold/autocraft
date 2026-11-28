@@ -56,7 +56,8 @@ export type AttemptInput = {
 };
 export type WaitingRun = { id: number; name: string; event: string };
 export type RunApproval = { head: string; runs: WaitingRun[]; approved: number[]; reread: boolean; failed: Record<string, number>; crossRepo: boolean; checkedAt: string; approvedAt: string | null };
-export type VerificationFact = { head: string; state: VerificationState; kind: string; summary: string | null; note: string | null; finishedAt: string | null };
+/** `errors`: the runs at the head made over an errored verification (src/core/rules.ts verifyRetryAt). */
+export type VerificationFact = { head: string; state: VerificationState; kind: string; summary: string | null; note: string | null; finishedAt: string | null; errors: number };
 export type UnknownState = { head: string; since: string; reads: number; rereads: number; stuck: boolean };
 /** `membersReviewed`: every member has a final take or take-fix review at its batched head, the head of its newest verdict review, or is approved for merge and handed over at that head with a clean pre-merge review. */
 export type BatchOfPr = { id: number; repo: string; branch: string; state: BatchState; commitSha: string; prNumber: number | null; members: BatchMember[]; membersReviewed: boolean };

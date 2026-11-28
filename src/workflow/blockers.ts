@@ -43,7 +43,7 @@ const PREMERGE_STOP = /pre-merge review found/;
 export const premergeStop = (leg: EndedLeg): boolean => (leg.code ? leg.code === "premerge-defect" : PREMERGE_STOP.test(leg.reason));
 
 /** Stops a check of the leg's head made: what they found is about that head's code, not about a later head. */
-const HEAD_CHECKS: readonly StopCode[] = ["premerge-defect", "premerge-failed", "ci-failed", "verification-failed", "review-hold", "review-close"];
+const HEAD_CHECKS: readonly StopCode[] = ["premerge-defect", "premerge-failed", "ci-failed", "verification-failed", "verification-error", "review-hold", "review-close"];
 
 /** The leg ended on a check of a head other than `head`. */
 export const checkedOtherHead = (leg: EndedLeg, head: string): boolean => !!leg.head && leg.head !== head && HEAD_CHECKS.includes(codeOf(leg));

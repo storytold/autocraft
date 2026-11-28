@@ -49,7 +49,7 @@ export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number;
     loadFollowupRows(db, keys, "review"),
     q.all(q.k.selectFrom("main.postmerge_reviews as r").innerJoin(keyed("kk"), (j) => j.onRef("kk.repo", "=", "r.repo").onRef("kk.number", "=", "r.number")).select(["r.repo", "r.number", "r.at", "r.error"])),
     q.all(q.k.selectFrom("main.review_state as s").innerJoin(keyed("kk"), (j) => j.onRef("kk.repo", "=", "s.repo").onRef("kk.number", "=", "s.number"))
-      .select(["s.repo", "s.number", "s.stale_at", "s.rerun_day", "s.rerun_count", "s.fail_head", "s.fail_count", "s.fail_at"])),
+      .select(["s.repo", "s.number", "s.stale_at", "s.rerun_day", "s.rerun_count", "s.fail_head", "s.fail_count", "s.fail_at", "s.lost_count", "s.lost_at"])),
     q.all(discussionAgg(db, keys, own)),
     q.all(discussionBodies(db, keys, own)),
     q.all(q.k.selectFrom(blockerWin.as("t")).select(["t.repo", "t.number", "t.verdict", "t.blocked_by"]).where("t.rn", "=", 1).distinct()),
@@ -65,7 +65,7 @@ export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number;
   facts.reviewFollowups = reviewFollowups;
   for (const r of postmerge) facts.postmerge.set(refKey(r.repo, r.number), { at: r.at, error: r.error });
   for (const r of marks) {
-    const m: ReviewMarks = { staleAt: r.stale_at, rerunDay: r.rerun_day, rerunCount: Number(r.rerun_count), failHead: r.fail_head, failCount: Number(r.fail_count), failAt: r.fail_at };
+    const m: ReviewMarks = { staleAt: r.stale_at, rerunDay: r.rerun_day, rerunCount: Number(r.rerun_count), failHead: r.fail_head, failCount: Number(r.fail_count), failAt: r.fail_at, lostCount: Number(r.lost_count), lostAt: r.lost_at };
     facts.marks.set(refKey(r.repo, r.number), m);
   }
   const counted = new Map<string, { id: string; body: string | null }[]>();

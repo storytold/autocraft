@@ -1,6 +1,6 @@
 // decidePr: the review-to-merge rules for one open PR, in one place. Pure: no database, no clock (facts carry `now`).
 import {
-  BATCHABLE, MAIN_RED_HELD, OFF_DEFAULT_REASON, autoEligible, PREMERGE_DEFECT_REASON, PREMERGE_UNSURE_REASON, PREMERGE_FAILED_REASON, PREMERGE_MAX_TRIES, RETRY_AFTER_MS,
+  BATCHABLE, MAIN_RED_HELD, OFF_DEFAULT_REASON, autoEligible, PREMERGE_DEFECT_REASON, PREMERGE_UNSURE_REASON, PREMERGE_FAILED_REASON, PREMERGE_MAX_TRIES, premergeRetryAt, RETRY_AFTER_MS,
   RULE_LABELS, RULE_SIZES, RULE_TIERS, UNSURE_REASON, VERIFY_UNAVAILABLE, ciAllows, conflictNote, verifyAllows, verifyOk,
   FIXUP_MAX_ATTEMPTS, CIFIX_FINAL_STATES, CIFIX_MAX_PUSHES_PER_PR, CIFIX_MAX_TRIES, CIFIX_MAX_TRIES_PER_PR, STATE_REFUSAL, TRANSIENT_REFUSAL,
 } from "./rules.ts";
@@ -19,13 +19,16 @@ const excerpt = (t: string): string => { const s = t.replace(/\s+/g, " ").trim()
 type PremergeState = "none" | "clean" | "fix" | "defect" | "unsure" | "failed" | "retry";
 export type Entry = { state: QueueState; path: MergePath; reasons: string[]; note: string | null; conflictNote: string | null; premerge: PremergeState | null; premergeDefects: number; handed: boolean; noCi: boolean; refusedReason: string | null };
 
+/** An errored verification that AutoCraft runs again (retryAt): the PR waits for verification, as before its first run. */
+const verifyRetries = (f: PrFacts): boolean => f.verification?.state === "error" && f.verification.retryAt !== undefined;
+
 const verifyState = (f: PrFacts): QueueState | null => {
   const s = f.verification?.state;
   if (verifyOk(s) || s === VERIFY_UNAVAILABLE) return null;
-  return s === "failed" ? "verify-failed" : s === "error" ? "verify-error" : "waiting-verify";
+  return s === "failed" ? "verify-failed" : s === "error" && !verifyRetries(f) ? "verify-error" : "waiting-verify";
 };
 
-const verifyFailed = (f: PrFacts): boolean => f.verification?.state === "failed" || f.verification?.state === "error";
+const verifyFailed = (f: PrFacts): boolean => f.verification?.state === "failed" || (f.verification?.state === "error" && !verifyRetries(f));
 
 // ---- the maintainer workflow (src/workflow)
 
@@ -244,7 +247,8 @@ const premergeRetryDue = (f: PrFacts): boolean => {
   const row = f.premerge;
   if (!row) return true;
   if (row.hasFindings) return false;
-  return row.tries < PREMERGE_MAX_TRIES && f.now - Date.parse(row.at) >= RETRY_AFTER_MS;
+  const at = premergeRetryAt(row);
+  return at !== null && f.now >= at;
 };
 
 /** What a plan waits on: its code, who settles it, and the sentence a person reads. */
@@ -278,7 +282,7 @@ const WAITS: Partial<Record<QueueState, Wait>> = {
   "needs-decision": ANSWER, "waiting-main-ci": MAIN_RED, "in-batch": BATCH, "batch-checking": BATCH,
   // Nothing puts the PR into a batch again but a person: their answer hands it over anew.
   "batch-failed": person("batch-failed", "its batch"),
-  "verify-failed": person("verification-failed", "a person: verification failed"), "verify-error": person("verification-failed", "a person: verification errored"),
+  "verify-failed": person("verification-failed", "a person: verification failed"), "verify-error": person("verification-error", "a person: verification errored"),
   "changes-requested": person("changes-requested", "the maintainer's review"), refused: system("refusal-retry", "a change in CI or mergeable state"),
 };
 
@@ -791,7 +795,8 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // Verify: a take at the head (or a merge entry, which has no review), CI not failing, not verified yet (a stale verification does not count).
   // A PR approved for merge is verified once, at the head it merges (verifyDue).
   const verifiable = mx ? !!f.head : !!r && r.head === f.head && r.verdict === "take" && !r.stale && verifyDue(f);
-  if (!held && !f.draft && verifiable && f.ci !== "failure" && (!f.verification || f.verification.state === "stale")) {
+  const again = f.verification?.retryAt !== undefined && f.verification.retryAt <= f.now;
+  if (!held && !f.draft && verifiable && f.ci !== "failure" && (!f.verification || f.verification.state === "stale" || again)) {
     actions.push(act("verify", f.head, { bucket: f.verifyUnavailable ? "unavailable" : "plan" }));
   }
 
@@ -884,6 +889,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
       return stuckState() ?? system("mergeable-unknown", `GitHub's merge state, unknown since ${f.unknown.since.slice(11, 16)} (unknown for ${f.unknown.reads} checks reads in a row)`);
     }
     if (st === "ci-approval") return runsWait(f);
+    if (st === "waiting-verify" && f.verification?.retryAt !== undefined) {
+      return system("verification", `verification, run again at ${new Date(f.verification.retryAt).toISOString().slice(11, 16)} UTC after it errored`);
+    }
     // What no approval gets past; a started PR nobody approved is asked about as a whole.
     const w = workflowOf(f);
     if (st === "needs-decision" && (!w || w.approved || w.entry === "merge")) {

@@ -17,7 +17,7 @@ import { EXTRAS_PENDING_REASON } from "../core/sensitive.ts";
 import { loadPass } from "../core/facts.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { PrFacts } from "../core/plan.ts";
-import { PREMERGE_MAX_TRIES, RETRY_AFTER_MS } from "../core/rules.ts";
+import { premergeRetryAt, RETRY_AFTER_MS } from "../core/rules.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { referenceDir } from "../reference.ts";
 import { defaultSemanticDeps, type SemanticDeps } from "../reference-lint.ts";
@@ -75,7 +75,8 @@ export async function premergeCandidates(db: Db, opts: { repo?: string; at?: num
     ...rest, by, ...(at !== undefined ? { now: at } : {}),
     onPlan: wake ? (f, plan) => {
       const pm = f.premerge;
-      if ((plan.state === "waiting-premerge" || f.operator?.premerge) && mergePermission(f).ok && pm && !pm.hasFindings && pm.tries < PREMERGE_MAX_TRIES) wake.push(Date.parse(pm.at) + RETRY_AFTER_MS);
+      const due = pm && !pm.hasFindings ? premergeRetryAt(pm) : null;
+      if ((plan.state === "waiting-premerge" || f.operator?.premerge) && mergePermission(f).ok && due !== null) wake.push(due);
       if (f.diffPending) {
         const t = Math.max(f.diffPending.lastRead != null ? f.diffPending.lastRead + RETRY_AFTER_MS : 0, pace);
         if (t > f.now) wake.push(t);
@@ -117,9 +118,9 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
   };
   await pool(cands.map((e) => async () => await leased(e, async () => {
     const ref = refOf(e), head = e.head;
-    const fail = async (error: string, final = false) => {
+    const fail = async (error: string, final = false, lost = false) => {
       await jobItem(db, repo, e.number, error, log);
-      await saveReviews(db, [{ repo, number: e.number, head, at: now(), runId, model: deps.model, error, final }]);
+      await saveReviews(db, [{ repo, number: e.number, head, at: now(), runId, model: deps.model, error, final, ...(lost ? { lost } : {}) }]);
       s.failed.push(ref);
     };
     // A diff that waits for what the merge rule reads beside it is read again, with no model call, within the hour's re-reads
@@ -185,7 +186,8 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
         await saveReviews(db, [{ repo, number: e.number, head, at: now(), runId, model: (r.ok && r.model) || deps.model, findings: got.findings, searched: got.searched, conflicts: got.conflicts, unsure: got.unsure, claims: got.claims, baseRef: p.baseRef }]);
         await jobItem(db, repo, e.number, `pre-merge review: ${got.findings.length} findings`, log);
         s.reviewed++; s.findings += got.findings.length; s.defects += got.findings.filter((f) => f.severity === "defect" && !notBlocking(f)).length; s.notBlocking += got.findings.filter((f) => f.severity === "defect" && notBlocking(f)).length;
-      } else await fail(!r.ok && r.error.startsWith(REFUSED_PREFIX) ? `retry: ${r.error}` : "retry: no valid reply from the model");
+      } else if (!r.ok && r.lost) await fail("retry: the call ended without a reply", false, true);
+      else await fail(!r.ok && r.error.startsWith(REFUSED_PREFIX) ? `retry: ${r.error}` : "retry: no valid reply from the model");
     }
     params.onHandled?.(++handled);
   })), poolRoom(db, () => [repo], (i) => [{ repo, number: cands[i]!.number }]));

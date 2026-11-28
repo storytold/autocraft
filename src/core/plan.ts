@@ -274,7 +274,8 @@ export type PrFacts = {
   runsApprovedAfterMerge: boolean;
   /** The merge was approved after the failed or errored verification of the head: that approval stands over it. */
   verifyOverride: boolean;
-  verification: { state: string; kind: string | null; summary: string | null; note: string | null } | null;
+  /** `retryAt`: an errored verification that AutoCraft runs again then (ms; src/core/rules.ts verifyRetryAt); absent once a person settles the error. */
+  verification: { state: string; kind: string | null; summary: string | null; note: string | null; retryAt?: number } | null;
   /** Why Verify cannot build the repo (private, not Rust without CI), or null. */
   verifyUnavailable: string | null;
 
@@ -288,7 +289,7 @@ export type PrFacts = {
   screenshots?: { summary: string | null };
 
   /** The pre-merge review row at the reviewed head. */
-  premerge: { /** The head the row reviewed: the reviewed (queue) head. */ head?: string; at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; /** The defects that stop the merge: on a PR approved for merge only the blocking ones. */ defects: number; /** On a PR approved for merge, its defects that do not stop it: filed as follow-ups. */ followUps: number; /** Every defect names a safe path (its fix's, or its own file), so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
+  premerge: { /** The head the row reviewed: the reviewed (queue) head. */ head?: string; at: string; tries: number; /** Calls in a row since the last try that ended without a reply: they use no try. */ lost?: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; /** The defects that stop the merge: on a PR approved for merge only the blocking ones. */ defects: number; /** On a PR approved for merge, its defects that do not stop it: filed as follow-ups. */ followUps: number; /** Every defect names a safe path (its fix's, or its own file), so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
   /** The follow-up issue of a PR approved for merge (premerge_followups, review_followups): the heads whose pre-merge (`heads`) and review (`reviewHeads`) follow-ups were filed or tried, and the newest issue they went to. */
   followUps?: { heads: string[]; reviewHeads: string[]; issue: number | null; /** Heads whose filing sent nothing and waits for its retry (src/core/rules.ts unsentAsk), the earliest at `at` (ms). */ retry?: { heads: string[]; reviewHeads: string[]; at: number } };
   premergeFixUsed: boolean;

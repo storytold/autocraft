@@ -133,7 +133,7 @@ test("a head made only by our own push skips the interval", async () => {
   assert.equal(await reviews(w, 1), 1);
 });
 
-test("review calls and failed tries count: runs fill the day's cap, failures back off then hold", async () => {
+test("review calls and failed tries count: runs fill the day's cap, failures back off for a day then hold, lost calls never hold", async () => {
   const w = await noGaps(await (await (await world()).repo()).pr(1, { head: "h1" }));
   await review(w, 1, "h1", "take");
   await w.synced(1, "h2");
@@ -147,10 +147,22 @@ test("review calls and failed tries count: runs fill the day's cap, failures bac
   assert.equal(await reviews(w, 1), 1);
   await recordReviewFailure(w.db, "app", 1, "h2");
   assert.equal(await reviews(w, 1), 0);
-  assert.equal((await planOf(w, 1, Date.now() + 11 * 60_000)).actions.filter((a) => a.kind === "review").length, 1);
-  for (let i = 0; i < 3; i++) await recordReviewFailure(w.db, "app", 1, "h2");
-  assert.equal((await planOf(w, 1, Date.now() + 24 * 3600_000 * 0.5)).actions.filter((a) => a.kind === "review").length, 0);
-  assert.match((await planOf(w, 1)).wait ?? "", /failed 4 times/);
+  const at = async (h: number) => (await planOf(w, 1, Date.now() + h * 3600_000)).actions.filter((a) => a.kind === "review").length;
+  assert.equal(await at(0.2), 1);
+  // Calls that ended without a reply back off apart, by their own count, and leave the model's count as it was.
+  for (let i = 0; i < 9; i++) await recordReviewFailure(w.db, "app", 1, "h2", Date.now(), true);
+  assert.equal(await at(5), 0);
+  assert.equal(await at(7), 1);
+  assert.equal((await planOf(w, 1)).waitKind, "system");
+  // The model's failures: after the quick waits, every 6 hours for about a day.
+  for (let i = 0; i < 6; i++) await recordReviewFailure(w.db, "app", 1, "h2");
+  assert.equal(await at(5), 0);
+  assert.equal(await at(7), 1);
+  await recordReviewFailure(w.db, "app", 1, "h2");
+  assert.equal(await at(72), 0);
+  const held = await planOf(w, 1);
+  assert.match(held.wait ?? "", /failed 8 times/);
+  assert.equal(held.waitKind, "person");
 });
 
 test("the merge-time check ignores the PR author's new comment", async () => {

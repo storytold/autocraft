@@ -25,8 +25,20 @@ export const MIN_INTERVAL_KEY = "review_min_interval_minutes";
 export const MIN_INTERVAL_DEFAULT = 120;
 const MIN_INTERVAL_MAX = 7 * 24 * 60;
 
-/** Waits after the 1st, 2nd and 3rd failed review at one head; a 4th failure holds the head until a new commit or Review again. */
-export const FAILURE_BACKOFF_MS = [10 * 60_000, 30 * 60_000, 2 * 3600_000];
+const HOUR = 3600_000;
+/**
+ * Waits after each failed review at one head: 10 and 30 minutes and 2 hours, then every 6 hours for about a day. The failure after the
+ * last wait holds the head for a person: a new commit, a Review again press or a maintainer's comment.
+ */
+export const FAILURE_BACKOFF_MS = [10 * 60_000, 30 * 60_000, 2 * HOUR, 6 * HOUR, 6 * HOUR, 6 * HOUR, 6 * HOUR];
+/** Waits after review calls in a row at one head that ended without a reply (a lost Task Runner, an outage), then every 6 hours: they never hold the head for a person. */
+export const LOST_BACKOFF_MS = [10 * 60_000, 30 * 60_000, 2 * HOUR, 6 * HOUR];
+
+/** When the review may run again after the `n`th failure counted by `delays`, made at `at`; past the last delay null, or with `repeat` that delay again. */
+const retryAt = (delays: readonly number[], n: number, at: string | null, repeat: boolean): number | null => {
+  const d = delays[n - 1] ?? (repeat ? delays.at(-1)! : undefined);
+  return d === undefined ? null : Date.parse(at ?? "") + d;
+};
 
 /** The setting's value as stored. */
 export function minIntervalOf(v: string | null | undefined): number {
@@ -44,9 +56,9 @@ export async function setReviewMinInterval(db: Db, input: unknown, by: string): 
   return n;
 }
 
-/** Counts a review call at this head that gave no valid review; the earlier heads' counts are forgotten. */
-export async function recordReviewFailure(db: Db, repo: string, number: number, head: string, nowMs: number = Date.now()): Promise<void> {
-  await recordReviewFailures(db, [{ repo, number, head, at: new Date(nowMs).toISOString() }]);
+/** Counts a review call at this head that gave no valid review, or with `lost` one that ended without a reply; the earlier heads' counts are forgotten. */
+export async function recordReviewFailure(db: Db, repo: string, number: number, head: string, nowMs: number = Date.now(), lost = false): Promise<void> {
+  await recordReviewFailures(db, [{ repo, number, head, at: new Date(nowMs).toISOString(), ...(lost ? { lost } : {}) }]);
 }
 
 /** `until`: when a timed wait ends (ms), so the planner wakes then. `red`: a ci hold whose head's CI has failed (not still running). */
@@ -119,14 +131,18 @@ export function holdsFrom(d: HoldInputs, nowMs: number): HoldCheck {
     const mark = facts.marks.get(ref);
     const failed = mark && mark.failHead === head && mark.failCount > 0 ? mark : undefined;
     if (failed) {
-      const [n, at] = [failed.failCount, Date.parse(failed.failAt ?? "")];
-      const delay = FAILURE_BACKOFF_MS[n - 1];
-      if (delay === undefined) {
+      const n = failed.failCount, until = retryAt(FAILURE_BACKOFF_MS, n, failed.failAt, false);
+      if (until === null) {
         // Final. A request newer than the last failure grants one more try; a failure then stamps a newer time and makes it final again.
         const since = failed.failAt ?? "";
         const asked = staleSince(repo, number, since) || await maintainerSince(states.get(ref), since, null);
         if (!asked) return { kind: "failed", wait: `its review failed ${n} times at this commit; a new commit, a Review again press or a maintainer's comment gives it one more try` };
-      } else if (at + delay > nowMs) return { kind: "failed", wait: `the review after ${n} failed ${n === 1 ? "try" : "tries"} at this commit, from ${new Date(at + delay).toISOString().slice(11, 16)}`, until: at + delay };
+      } else if (until > nowMs) return { kind: "failed", wait: `the review after ${n} failed ${n === 1 ? "try" : "tries"} at this commit, from ${new Date(until).toISOString().slice(11, 16)}`, until };
+    }
+    const lost = mark && mark.failHead === head && mark.lostCount > 0 ? mark : undefined;
+    const lostUntil = lost ? retryAt(LOST_BACKOFF_MS, lost.lostCount, lost.lostAt, true)! : 0;
+    if (lost && lostUntil > nowMs) {
+      return { kind: "failed", wait: `the review after ${lost.lostCount} ${lost.lostCount === 1 ? "call" : "calls"} at this commit that ended without a reply, from ${new Date(lostUntil).toISOString().slice(11, 16)}`, until: lostUntil };
     }
     // A person's pre-approved merge waits for the review of the head the pipeline pushed for it: that is their request for it, as a review-again press would be.
     // So does the review round of the author's new commits on a PR approved for merge.

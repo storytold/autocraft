@@ -21,7 +21,7 @@ import { loadReviewRows, type PremergeRow, type ReviewRow } from "../data/review
 import { adoptLegs, fixupRequestsAt, listWorkflows, loadFixupRequests, moveFixupRequests, loadActions, loadGoOnAt, loadLegs, moveWorkflows, recordEvents, retryActions, saveWorkflows, type GoneOn, type Preapproval, type WorkflowPatch, type WorkflowRead } from "../data/workflow/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
-import { CALL_WAIT_LIMIT, loadLaneRuns, RUNNER_STOPPED, saveWorkflowFailures, type LaneRun, type WorkflowFailure } from "../data/jobs/index.ts";
+import { CALL_WAIT_LIMIT, INFRA_ERROR, loadLaneRuns, RUNNER_STOPPED, saveWorkflowFailures, type LaneRun, type WorkflowFailure } from "../data/jobs/index.ts";
 import { isFenced } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
@@ -172,7 +172,6 @@ function failures(pass: Pass, ref: string, since: string, head: string, facts: P
  * in time, the GitHub write pacing held it back) and its services' (an HTTP 5xx answer, a network error). They neither count nor end a
  * streak.
  */
-const INFRA_ERROR = /\bHTTP\/?[\d.]* ?5\d\d\b|\b5\d\d (?:Bad Gateway|Service Unavailable|Gateway Timeout|Internal Server Error)\b|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|ENOTFOUND|EAI_AGAIN/i;
 const notTheItems = (error: string | null): boolean =>
   !!error && (error === RUNNER_STOPPED || error === CALL_WAIT_LIMIT || error.startsWith("write paced:") || INFRA_ERROR.test(error));
 
@@ -712,13 +711,14 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       },
       blocks: (items) => openFrom(pass.blockers, items).length > 0,
       laneDone: (lane, at) => (pass.laneRuns.get(ref) ?? []).some((r) => r.step === lane && r.head === at && r.state === "done" && r.endedAt > (w.recAt ?? "")),
+      unread: () => (head ? reviewAt(pass, ref, head)?.model === null : undefined),
     };
     const went = head && w.recHead !== null && now?.head === head ? causeWent(w.rec?.cause, now, approved, causeNow) ?? recounted(pass, w, ref, head, now) : null;
     if (went === null) return settle(base);
     const cause = w.rec?.cause?.code;
     legWent = cause === "fix-unmade" || cause === "leg" ? fixUnmade
       : cause === "merge-refused" ? (l) => codeOf(l) === "merge-refused"
-        : cause === "blocked-by" ? (l) => codeOf(l) === "review-hold" : null;
+        : cause === "blocked-by" || cause === "too-large" ? (l) => codeOf(l) === "review-hold" : null;
     await closeQuestion(went, head);
     repushed = false;
     // The items the review held it for went: the facts read its review as stale then (review/discussion.ts staleFrom), so it is reviewed
@@ -834,7 +834,10 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       else if (read?.head === head && read.reviewHold?.kind === "failed" && read.reviewHold.until === undefined) {
         round = { blocker: "other", params: { reason: t("the review of the author's new commits failed"), round: "review-failed" } };
       }
-      if (round) return await block({ ...patch, blocker: round.blocker, blockerParams: round.params, rec: ask(blockerRec(round, plan), head), recAt: pass.at, recHead: head }, patch);
+      if (round) {
+        const rec = blockerRec(round, plan);
+        return await block({ ...patch, blocker: round.blocker, blockerParams: round.params, rec: ask(unread && !rec.cause ? { ...rec, cause: { code: "too-large" } } : rec, head), recAt: pass.at, recHead: head }, patch);
+      }
       const owes = w.reviewAskedAt !== null && !(pass.reviews.get(ref) ?? []).some((r) => r.at > w.reviewAskedAt!);
       if (w.entry === "merge" && !owes) patch.reviewAskedAt = pass.at;
       step = ROUND_STEP;
@@ -886,7 +889,10 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       return await stop({ blocker: "failed-twice", params: { step: "fix-up", count: tried, reason: t("the fix-up ended without a push") } }, plan, triedEnough(t(FIX_WHAT[cause]), tried, plan, parts, last.reason));
     }
     const reviewed = cause === "review-hold" || cause === "review-close";
-    if (reviewed && stored && stored.model === null) return await stop({ blocker: "other", params: { reason: unreadReason(stored.reason), round: "too-large" } });
+    if (reviewed && stored && stored.model === null) {
+      const x: Found = { blocker: "other", params: { reason: unreadReason(stored.reason), round: "too-large" } }, rec = blockerRec(x, plan);
+      return await stop(x, plan, rec.cause ? rec : { ...rec, cause: { code: "too-large" } });
+    }
     if (cause === "review-close") return await stop({ blocker: "other", params: { reason: t("the review says to close it") } }, plan, closeRec(stored?.public_summary ?? null, plan));
     if (reviewed && stored?.blocked_by?.length) return await stop({ blocker: "other", params: { reason: t("the review holds it until other items are settled") } }, plan, waitsForOthers(stored.public_summary, stored.blocked_by, plan));
     let fixPlan = plan, fix: number[] = [], instruction: Instruction | null = null;

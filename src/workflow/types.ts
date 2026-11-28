@@ -98,7 +98,9 @@ export type Recommendation = {
     /** The day's review rounds of the author's commits are used up; it clears at `until`, the next 00:00 UTC. */
     | { code: "daily-cap"; until: string }
     /** Jobs of the lane step `lane` failed in a row at `head`; it clears once a job of that step runs through there, or the PR has a new head. */
-    | { code: "lane-failed"; lane: string; head: string };
+    | { code: "lane-failed"; lane: string; head: string }
+    /** The head's review is a hold made without a model call, as the PR is over the diff size cap; it clears once that hold is gone (a raised cap, src/review/too-large.ts, or Review again). */
+    | { code: "too-large" };
   /** The review failed for good at this head: the word merge starts the PR at the merge queue, without it. Not past what an earlier review there asks: its planned parts, or its verdict. */
   skipsReview?: { parts: number[]; verdict?: "hold" | "close" };
   /** A yes answers this question of the implementation with this option, as the person (a stuck implementation's Try again). */

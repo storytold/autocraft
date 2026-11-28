@@ -51,7 +51,8 @@ export type StoredHistory = Omit<HistoryRow, "verdict"> & { verdict: string | nu
 export type StoredReview = Omit<ReviewRow, "verdict"> & { verdict: Verdict | null; claims: string | null };
 export type ReviewPost = { repo: string; number: number; review_id: string; head: string; posted_at: string; edited_at: string | null; opus_at: string | null; posted_as: string | null };
 /** The `review_state` row. */
-export type ReviewMarks = { staleAt: string | null; rerunDay: string | null; rerunCount: number; failHead: string | null; failCount: number; failAt: string | null };
+/** `failCount`: review calls at `failHead` the model gave no valid review for; `lostCount`: calls there that ended without a reply (lostCallError), counted apart. */
+export type ReviewMarks = { staleAt: string | null; rerunDay: string | null; rerunCount: number; failHead: string | null; failCount: number; failAt: string | null; lostCount: number; lostAt: string | null };
 export type PremergeRow = Selectable<DB["premerge_reviews"]>;
 export type Finding = { title: string; detail?: string; file?: string; line?: number; severity?: string; [k: string]: unknown };
 export type PostmergeRow = { repo: string; number: number; merge_sha: string; at: string; model: string | null; run_id: string | null; findings: Finding[]; error: string | null; tries: number };
@@ -98,10 +99,14 @@ export type ReviewInput = {
 export type SaveReviewInput = {
   runId: string | null; repo: string; number: number; head: string; mode: "full" | "delta" | "carried"; base: string | null; baseRef: string | null;
   defaultBranch: string | null; model: string | null; review: ReviewInput; snap?: { seen: string; hash: string | null }; blockedBy: RefKey[]; jobId: number | null; trigger?: string | null; at?: string;
+  /** A too-large hold: the diff size cap (characters) it was made under. */
+  sizeCap?: number;
 };
 export type SaveReviewResult = { repo: string; number: number; head: string; saved: boolean; rebased: boolean };
 /** A stored review has `findings`; without them `error` records a failed try (`final`: no more tries). Empty `conflicts` and `claims` are stored as null. */
 export type PremergeSave = {
+  /** The try's call ended without a reply (lostCallError): it uses no try. */
+  lost?: boolean;
   repo: string; number: number; head: string; at: string; runId?: string | null; model?: string | null;
   findings?: unknown[]; searched?: string | null; conflicts?: unknown[]; unsure?: boolean; claims?: unknown[]; baseRef?: string | null;
   error?: string | null; final?: boolean;

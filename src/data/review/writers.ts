@@ -8,8 +8,8 @@ import { addStageEvents } from "../planner/index.ts";
 import { headTuples, refKey } from "./rows.ts";
 import type { Finding, FollowupClaim, FollowupRow, PostSave, PostmergeSave, PremergeSave, RefKey, SaveReviewInput, SaveReviewResult } from "./types.ts";
 
-/** A pre-merge head with this many failed tries is not tried again. */
-export const PREMERGE_MAX_TRIES = 3;
+import { PREMERGE_MAX_TRIES, PREMERGE_QUICK_TRIES } from "../../core/rules.ts";
+export { PREMERGE_MAX_TRIES };
 /** A post-merge review that fails with a `retry:` error is stored as held at this try. */
 const MAX_RETRIES = 3;
 
@@ -66,14 +66,14 @@ export async function saveReviews(db: Db, inputs: SaveReviewInput[]): Promise<Sa
       return {
         history: { repo: i.repo, number: i.number, head_oid: i.head, at, model: i.model, mode: i.mode, verdict: r.verdict, sure: r.sure ? 1 : 0, reason: r.reason, risks, fixes, summary: r.summary, why: r.why, public_review: pub, claims, blocked_by: blockedBy, trigger, job_id: i.jobId },
         review: { repo: i.repo, number: i.number, head_oid: i.head, run_id: i.runId, at, model: i.model, mode: i.mode, base_head: i.base, verdict: r.verdict, sure: r.sure ? 1 : 0, reason: r.reason, fixes, risks, public_review: pub,
-          seen_at: i.snap?.seen ?? at, disc_hash: i.snap?.hash ?? null, summary: r.summary, why: r.why, conflicts: json(r.conflicts), claims, blocked_by: blockedBy, base_ref: i.baseRef, workflow: r.workflow ? JSON.stringify(r.workflow) : null },
+          seen_at: i.snap?.seen ?? at, disc_hash: i.snap?.hash ?? null, summary: r.summary, why: r.why, conflicts: json(r.conflicts), claims, blocked_by: blockedBy, base_ref: i.baseRef, workflow: r.workflow ? JSON.stringify(r.workflow) : null, size_cap: i.sizeCap ?? null },
       };
     });
     for (const part of kx.batches(rows)) await q.run(q.k.insertInto("main.opus_review_history").values(part.map((x) => x.history)));
     for (const part of kx.batches(rows)) {
       await q.run(q.k.insertInto("main.opus_reviews").values(part.map((x) => x.review))
         .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet(kx.excluded(["run_id", "at", "model", "mode", "base_head", "verdict", "sure", "reason", "fixes", "risks", "public_review",
-          "seen_at", "disc_hash", "summary", "why", "conflicts", "claims", "blocked_by", "base_ref", "workflow"]))));
+          "seen_at", "disc_hash", "summary", "why", "conflicts", "claims", "blocked_by", "base_ref", "workflow", "size_cap"]))));
     }
     const reruns = new Map<RefKey, { repo: string; number: number; rerun_day: string; rerun_count: number }>();
     for (const p of plans) {
@@ -88,7 +88,7 @@ export async function saveReviews(db: Db, inputs: SaveReviewInput[]): Promise<Sa
         rerun_day: eb.ref("excluded.rerun_day"),
       }))));
     }
-    await q.run(q.k.updateTable("main.review_state").set({ fail_head: null, fail_count: 0, fail_at: null }).where(kx.tupleIn(db, ["repo", "number", "fail_head"], headTuples(heads), TUPLE)));
+    await q.run(q.k.updateTable("main.review_state").set({ fail_head: null, fail_count: 0, fail_at: null, lost_count: 0, lost_at: null }).where(kx.tupleIn(db, ["repo", "number", "fail_head"], headTuples(heads), TUPLE)));
     await addStageEvents(db, plans.flatMap(({ i, at }) => [
       { repo: i.repo, number: i.number, stage: "reviewed", at, actor: "opus-review", note: `${i.review.verdict}${i.review.sure ? "" : " (unsure)"} at ${i.head.slice(0, 7)}: ${i.review.reason}` },
       { repo: i.repo, number: i.number, stage: i.review.verdict === "take-fix" ? "take" : i.review.verdict, at, actor: "opus-review", note: i.review.reason },
@@ -115,21 +115,29 @@ export async function markStale(db: Db, items: { repo: string; number: number }[
   });
 }
 
-/** One upsert: a failure at the head already counted adds to its count, a failure at another head sets the count again. */
-export async function recordReviewFailures(db: Db, items: { repo: string; number: number; head: string; at: string }[]): Promise<void> {
-  const rows = new Map<RefKey, { repo: string; number: number; fail_head: string; fail_count: number; fail_at: string }>();
+/**
+ * One upsert: a failure at the head already counted adds to its count, a failure at another head sets both counts again. A `lost` call
+ * (it ended without a reply, lostCallError) counts in lost_count and leaves the model's fail_count as it was.
+ */
+export async function recordReviewFailures(db: Db, items: { repo: string; number: number; head: string; at: string; lost?: boolean }[]): Promise<void> {
+  type R = { repo: string; number: number; fail_head: string; fail_count: number; fail_at: string | null; lost_count: number; lost_at: string | null };
+  const rows = new Map<RefKey, R>();
   for (const i of items) {
-    const ref = refKey(i.repo, i.number), cur = rows.get(ref);
-    rows.set(ref, { repo: i.repo, number: i.number, fail_head: i.head, fail_count: cur?.fail_head === i.head ? cur.fail_count + 1 : 1, fail_at: i.at });
+    const ref = refKey(i.repo, i.number), was = rows.get(ref), cur = was?.fail_head === i.head ? was : undefined;
+    rows.set(ref, i.lost
+      ? { repo: i.repo, number: i.number, fail_head: i.head, fail_count: cur?.fail_count ?? 0, fail_at: cur?.fail_at ?? null, lost_count: (cur?.lost_count ?? 0) + 1, lost_at: i.at }
+      : { repo: i.repo, number: i.number, fail_head: i.head, fail_count: (cur?.fail_count ?? 0) + 1, fail_at: i.at, lost_count: cur?.lost_count ?? 0, lost_at: cur?.lost_at ?? null });
   }
   if (!rows.size) return;
   const q = queryDb(db);
   for (const part of kx.batches([...rows.values()])) {
-    await q.run(q.k.insertInto("main.review_state").values(part).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({
-      fail_count: eb.case().when(eb("main.review_state.fail_head", "=", eb.ref("excluded.fail_head"))).then(eb("main.review_state.fail_count", "+", eb.ref("excluded.fail_count"))).else(eb.ref("excluded.fail_count")).end(),
-      fail_head: eb.ref("excluded.fail_head"),
-      fail_at: eb.ref("excluded.fail_at"),
-    }))));
+    await q.run(q.k.insertInto("main.review_state").values(part).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => {
+      const same = eb("main.review_state.fail_head", "=", eb.ref("excluded.fail_head"));
+      const sum = (c: "fail_count" | "lost_count") => eb.case().when(same).then(eb(`main.review_state.${c}`, "+", eb.ref(`excluded.${c}`))).else(eb.ref(`excluded.${c}`)).end();
+      // A time this upsert does not set keeps the stored one at the same head.
+      const time = (c: "fail_at" | "lost_at") => eb.case().when(same).then(eb.fn.coalesce(eb.ref(`excluded.${c}`), eb.ref(`main.review_state.${c}`))).else(eb.ref(`excluded.${c}`)).end();
+      return { fail_count: sum("fail_count"), lost_count: sum("lost_count"), fail_at: time("fail_at"), lost_at: time("lost_at"), fail_head: eb.ref("excluded.fail_head") };
+    })));
   }
 }
 
@@ -147,44 +155,58 @@ export async function dropHoldReviews(db: Db, items: { repo: string; number: num
   });
 }
 
-/** Stored reviews (`tries` kept, error cleared) and failed tries (one more try, or the maximum when final) as multi-row upserts. */
+/**
+ * Stored reviews (`tries` kept, error cleared) and failed tries (one more try, or the maximum when final) as multi-row upserts. A `lost`
+ * try (the call ended without a reply) uses no try: it adds to `lost`, which a stored review or a counted try sets back to 0.
+ */
 export async function savePremerge(db: Db, saves: PremergeSave[]): Promise<void> {
   if (!saves.length) return;
   const q = queryDb(db);
-  const stored = new Map<string, any>(), failed = new Map<string, any>(), final = new Map<string, any>();
+  const stored = new Map<string, any>(), failed = new Map<string, any>(), final = new Map<string, any>(), lost = new Map<string, any>();
   for (const s of saves) {
     const key = `${s.repo}#${s.number}@${s.head}`, id = { repo: s.repo, number: s.number, head_oid: s.head };
     if (s.findings) {
-      stored.set(key, { ...id, at: s.at, run_id: s.runId ?? null, model: s.model ?? null, findings: JSON.stringify(s.findings), searched: s.searched ?? null, conflicts: json(s.conflicts), unsure: s.unsure ? 1 : 0, claims: json(s.claims), base_ref: s.baseRef ?? null, error: null, tries: 0 });
+      stored.set(key, { ...id, at: s.at, run_id: s.runId ?? null, model: s.model ?? null, findings: JSON.stringify(s.findings), searched: s.searched ?? null, conflicts: json(s.conflicts), unsure: s.unsure ? 1 : 0, claims: json(s.claims), base_ref: s.baseRef ?? null, error: null, tries: 0, lost: 0 });
     } else if (s.final) {
-      final.set(key, { ...id, at: s.at, run_id: s.runId ?? null, model: s.model ?? null, error: s.error ?? "failed", tries: PREMERGE_MAX_TRIES });
+      final.set(key, { ...id, at: s.at, run_id: s.runId ?? null, model: s.model ?? null, error: s.error ?? "failed", tries: PREMERGE_MAX_TRIES, lost: 0 });
+    } else if (s.lost) {
+      lost.set(key, { ...id, at: s.at, run_id: s.runId ?? null, model: s.model ?? null, error: s.error ?? "failed", tries: 0, lost: (lost.get(key)?.lost ?? 0) + 1 });
     } else {
       const n = (failed.get(key)?.tries ?? 0) + 1;
-      failed.set(key, { ...id, at: s.at, run_id: s.runId ?? null, model: s.model ?? null, error: s.error ?? "failed", tries: n });
+      failed.set(key, { ...id, at: s.at, run_id: s.runId ?? null, model: s.model ?? null, error: s.error ?? "failed", tries: n, lost: 0 });
     }
   }
   await db.write(async () => {
     for (const part of kx.batches([...stored.values()])) {
       await q.run(q.k.insertInto("main.premerge_reviews").values(part).onConflict((oc) => oc.columns(["repo", "number", "head_oid"])
-        .doUpdateSet((eb) => ({ ...kx.excluded(["at", "run_id", "model", "findings", "searched", "conflicts", "unsure", "claims", "base_ref"])(eb), error: null }))));
+        .doUpdateSet((eb) => ({ ...kx.excluded(["at", "run_id", "model", "findings", "searched", "conflicts", "unsure", "claims", "base_ref"])(eb), error: null, lost: 0 }))));
     }
     for (const part of kx.batches([...failed.values()])) {
       await q.run(q.k.insertInto("main.premerge_reviews").values(part).onConflict((oc) => oc.columns(["repo", "number", "head_oid"])
-        .doUpdateSet((eb) => ({ ...kx.excluded(["at", "run_id", "model", "error"])(eb), tries: eb("main.premerge_reviews.tries", "+", eb.ref("excluded.tries")) }))));
+        .doUpdateSet((eb) => ({ ...kx.excluded(["at", "run_id", "model", "error", "lost"])(eb), tries: eb("main.premerge_reviews.tries", "+", eb.ref("excluded.tries")) }))));
+    }
+    for (const part of kx.batches([...lost.values()])) {
+      // A stored review stays as it is: a lost call says nothing about it.
+      await q.run(q.k.insertInto("main.premerge_reviews").values(part).onConflict((oc) => oc.columns(["repo", "number", "head_oid"])
+        .doUpdateSet((eb) => ({ ...kx.excluded(["at", "run_id", "model", "error"])(eb), lost: eb("main.premerge_reviews.lost", "+", eb.ref("excluded.lost")) }))
+        .where("main.premerge_reviews.findings", "is", null)));
     }
     for (const part of kx.batches([...final.values()])) {
       await q.run(q.k.insertInto("main.premerge_reviews").values(part).onConflict((oc) => oc.columns(["repo", "number", "head_oid"])
-        .doUpdateSet(kx.excluded(["at", "run_id", "model", "error", "tries"]))));
+        .doUpdateSet(kx.excluded(["at", "run_id", "model", "error", "tries", "lost"]))));
     }
   });
 }
 
-/** Gives each head's pre-merge review that failed for good one more try: its failed tries go back to one below the maximum. A stored review is left as it is. */
+/**
+ * Gives each head's pre-merge review that failed for good one more try, due an hour after its last failure: its failed tries go back to
+ * the last quick one, so a failure of that try starts the slow tries of the day again. A stored review is left as it is.
+ */
 export async function retryPremergeAt(db: Db, heads: { repo: string; number: number; head: string }[]): Promise<void> {
   if (!heads.length) return;
   const q = queryDb(db);
   await db.write(async () => {
-    await q.run(q.k.updateTable("main.premerge_reviews").set({ tries: PREMERGE_MAX_TRIES - 1 })
+    await q.run(q.k.updateTable("main.premerge_reviews").set({ tries: PREMERGE_QUICK_TRIES - 1, lost: 0 })
       .where("findings", "is", null).where("tries", ">=", PREMERGE_MAX_TRIES).where(kx.tupleIn(db, ["repo", "number", "head_oid"], headTuples(heads), TUPLE)));
   });
 }

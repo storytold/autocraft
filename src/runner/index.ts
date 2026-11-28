@@ -29,6 +29,7 @@ import { assertFence, FencedError, isFenced, setFence } from "../db/fence.ts";
 import { dropRetired } from "../db/retired.ts";
 import { holdsToItems } from "../db/holds-to-items.ts";
 import { resumeRetiredStops } from "../workflow/retired-stops.ts";
+import { reviewTooLargeAgain } from "../review/too-large.ts";
 import { switchOver } from "../db/switch-over.ts";
 import { inClusterApi } from "../build/kube-api.ts";
 import { workerEndpointFromEnv, WorkerEndpointPublisher } from "../build/worker-endpoint.ts";
@@ -114,6 +115,8 @@ async function serve(): Promise<void> {
   if (held) console.log(`runner: ${held} merge holds of an earlier release became held items`);
   const resumed = await resumeRetiredStops(db);
   if (resumed.length) console.log(`runner: resumed ${resumed.join(", ")}, stopped by an earlier release at a stop that no longer stops an approved merge`);
+  const large = await reviewTooLargeAgain(db);
+  if (large.length) console.log(`runner: ${large.join(", ")} reviewed again: their too-large holds were made under a smaller diff size cap`);
   const linked = await linkRepeatedFindings(db);
   if (linked) console.log(`runner: linked ${linked} security findings to the earlier findings they repeat`);
   const fixes = await autoFixConfirmed(db);

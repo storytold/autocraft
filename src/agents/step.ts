@@ -12,6 +12,7 @@ import type { Lint, LintProblem } from "../replylint.ts";
 import type { Db } from "../db/index.ts";
 import { loadLiveConfig, loadTrackedRepos } from "../data/control/index.ts";
 import { keepEarlierUsage, loadUnsure, pruneUnsure, saveUnsure } from "../data/inference/index.ts";
+import { lostCallError } from "../data/jobs/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { ensurePrompts } from "../data/prompts/index.ts";
 import { createHash } from "node:crypto";
@@ -104,7 +105,7 @@ export type StepOpts<I, C = void> = Omit<AskOptions, "lint"> & {
 
 export type StepResult<I, V> =
   | { ok: true; value: V; values: V[]; rest?: I; usage: Usage; runId: string | undefined; /** The model id that gave the last answer, when the harness reported one (user-local calls); otherwise absent. */ model?: string }
-  | { ok: false; error: string; usage: Usage; runId: string | undefined };
+  | { ok: false; error: string; usage: Usage; runId: string | undefined; /** The last attempt's call ended without a reply because it was lost (lostCallError), not for the model's work. */ lost?: true };
 
 const zero = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -129,21 +130,22 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
   let usage = zero();
   let todo: I | undefined = input, rest: I | undefined = input;
   let fallback: V | null = null, error = "no answer", sawUsage = false;
-  let ran: string | undefined, untaken: NoTakerError | undefined;
+  let ran: string | undefined, untaken: NoTakerError | undefined, lost = false;
   for (let attempt = 0; attempt < attempts && todo !== undefined; attempt++) {
     if (await opts.cancelled?.()) break;
     if (step.provider === "jev" && !await (opts.available ?? (() => jevAvailable(db)))()) { error = "jev unavailable"; break; }
     if (attempt > 0 && step.backoffMs) await sleep(step.backoffMs);
     opts.onAttempt?.(todo, attempt);
     let r: Reply | null;
-    let refusal: string | null = null;
-    try { r = await call(db, step, todo, { ...opts, onRefused: (e) => { refusal = e; opts.onRefused?.(e); } }); } catch (e) {
+    let refusal: string | null = null, failed: string | null = null;
+    try { r = await call(db, step, todo, { ...opts, onRefused: (e) => { refusal = e; opts.onRefused?.(e); }, onFailed: (e) => { failed = e; opts.onFailed?.(e); } }); } catch (e) {
       if (!(e instanceof NoTakerError)) throw e;
       // A call withdrawn for its item ends the item's work, earlier answers included.
       if (!values.length || e instanceof ItemWithdrawnError) untaken = e;
       break;
     }
     if (!r && refusal !== null) { error = refusal; break; }
+    lost = !r && failed !== null && lostCallError(failed);
     if (!r) { error = "no answer"; continue; }
     usage = add(usage, r.usage);
     if ("text" in r) opts.onReply?.(r as LintedReply);
@@ -181,7 +183,7 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
   }
   if (untaken) throw untaken;
   const runId = opts.usage?.run;
-  if (!ok) return { ok: false, error, usage, runId };
+  if (!ok) return { ok: false, error, usage, runId, ...(lost && error === "no answer" ? { lost: true as const } : {}) };
   return { ok: true, value: values[values.length - 1]!, values, ...(rest !== undefined && { rest }), usage, runId, ...(ran && { model: ran }) };
 }
 

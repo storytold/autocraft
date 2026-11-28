@@ -24,7 +24,7 @@ import { byHand, conflictPath, decidePr, fixAllowed, fixupOf, isDraft as draftPr
 import { pushRefusal } from "../core/gates.ts";
 import { draftOf, loadPrFact, loadPrFacts } from "../core/facts.ts";
 import { askedParts, chainsOwn, ciAt, neededReview, type HeadReview, type RecordedPush } from "../core/evidence.ts";
-import { PREMERGE_MAX_TRIES } from "../core/rules.ts";
+import { PREMERGE_MAX_TRIES, verifyRetryAt } from "../core/rules.ts";
 import { mayPush } from "../core/may.ts";
 import { standingFor } from "../core/standing.ts";
 import { ensureAuthorWrites } from "../fixup/author-permission.ts";
@@ -393,20 +393,28 @@ async function loadPassFacts(db: Db, { rows, context }: LegPass): Promise<PassFa
 }
 
 const verifyFailed = (p: Row): Stop => stopOf("verification-failed", `verification failed at ${headName(p)}`);
+const verifyErrored = (p: Row): Stop => stopOf("verification-error", `verification errored at ${headName(p)}`);
 
-/** Why a failed verification of the head stops the leg; null without one, and when the person answered after it. */
+/**
+ * Why a failed verification of the head stops the leg; null without one, and when the person answered after it. An errored one stops it
+ * only once AutoCraft's own retries of it are used up (verifyRetryAt): until then the leg waits for the next run.
+ */
 function verifyStop(p: Row, head: string, pf: PassFacts, leg: LegContext | null): Stop | null {
   const v = pf.merge.verifications.get(`${refOf(p.repo, p.number)}@${head}`);
-  return v && (v.state === "failed" || v.state === "error") && !(leg && v.finishedAt && v.finishedAt <= leg.since) ? verifyFailed(p) : null;
+  if (!v || (v.state !== "failed" && v.state !== "error") || (leg && v.finishedAt && v.finishedAt <= leg.since)) return null;
+  if (v.state === "failed") return verifyFailed(p);
+  return verifyRetryAt(v) === null ? verifyErrored(p) : null;
 }
 
 type Hand = { done: true } | { gone: true } | { wait: true } | { stop: Stop };
 
 /** Moves the row from ci to queued: the merge queue merges it as the workflow's approver from here. Idempotent. */
 async function handOver(db: Db, p: Row, head: string, pf: PassFacts, leg: LegContext | null, unsure = false, past: "overruled" | "premerge-failed" | null = null): Promise<Hand> {
-  // A hand-over waits for a running verification, and goes on over a failed one only when the person answered after it.
+  // A hand-over waits for a running verification, and for the next run of an errored one AutoCraft retries; it goes on over a failed one
+  // only when the person answered after it.
   const v = pf.merge.verifications.get(`${refOf(p.repo, p.number)}@${head}`);
   if (v && (v.state === "planned" || v.state === "running")) return { wait: true };
+  if (v?.state === "error" && verifyRetryAt(v) !== null && !(leg && v.finishedAt && v.finishedAt <= leg.since)) return { wait: true };
   const failed = verifyStop(p, head, pf, leg);
   if (failed) return { stop: failed };
   if (!await moveRaw(db, p, "queued", { head })) return { gone: true };

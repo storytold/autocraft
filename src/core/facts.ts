@@ -24,7 +24,7 @@ import { staleFrom } from "../review/discussion.ts";
 import { holdsFrom, MIN_INTERVAL_KEY, minIntervalOf, nextUtcMidnight, type HoldCheck } from "../review/gate.ts";
 import { personReviewSince, roundWaits } from "./author-round.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
-import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, OFF_DEFAULT_REASON, PIPELINE_LOGIN_KEY, RULE_SIZES, pipelineWrites, sizeOf, unsentAsk } from "./rules.ts";
+import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, OFF_DEFAULT_REASON, PIPELINE_LOGIN_KEY, RULE_SIZES, pipelineWrites, sizeOf, unsentAsk, verifyRetryAt } from "./rules.ts";
 import { workScore } from "./work-score.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
@@ -210,7 +210,7 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
     // The timed waits the facts hold end at their own times; the refresh also covers the clock uses they do not show.
     const until = (u: { until: number } | "final" | undefined): number | undefined => (typeof u === "object" ? u.until : undefined);
     for (const f of out) {
-      const at = refresh.at(`${f.repo}#${f.number}`, f.reviewHold?.until, f.conflict?.until, until(f.fixup?.unsent), until(f.cifix?.unsent), f.cifix?.readAgainAt);
+      const at = refresh.at(`${f.repo}#${f.number}`, f.reviewHold?.until, f.conflict?.until, until(f.fixup?.unsent), until(f.cifix?.unsent), f.cifix?.readAgainAt, f.verification?.retryAt);
       if (at !== undefined) f.refreshAt = at;
     }
     return out;
@@ -500,7 +500,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.runsApprovedAfterMerge = !!wait?.approvedAt && wait.approvedAt > last.at;
   }
   const v = d.merge.verifications.get(`${ref}@${qh}`);
-  base.verification = v ? { state: v.state, kind: v.kind, summary: v.summary, note: v.note } : null;
+  const verifyAgainAt = v ? verifyRetryAt(v) : null;
+  base.verification = v ? { state: v.state, kind: v.kind, summary: v.summary, note: v.note, ...(verifyAgainAt !== null ? { retryAt: verifyAgainAt } : {}) } : null;
   // The leg went to the queue over this result: the person had seen it when they answered (src/preapproval handOver).
   base.verifyOverride = !!handed && !!v?.finishedAt && (v.state === "failed" || v.state === "error") && v.finishedAt <= handed.updated_at;
   const shots = state === "OPEN" ? d.merge.regressions.get(`${ref}@${qh}`) : undefined;
@@ -534,7 +535,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   if (pmRow) {
     const all = findingsOf(pmRow), approved = !!wfFact?.approved, dropped = base.workflow?.overruled ?? [];
     const defects = stoppingDefects(all, approved, dropped), followUps = approved ? followUpDefects(all).length : 0;
-    base.premerge = { head: qh, at: pmRow.at, tries: pmRow.tries, hasFindings: pmRow.findings !== null, unsure: pmRow.unsure !== 0, defects: defects.length, followUps, fixesSafe: parseFixes(JSON.stringify(defects.map(defectFix))).length === defects.length, minor: all.length - defects.length - followUps, error: pmRow.error ?? null };
+    base.premerge = { head: qh, at: pmRow.at, tries: pmRow.tries, lost: Number(pmRow.lost ?? 0), hasFindings: pmRow.findings !== null, unsure: pmRow.unsure !== 0, defects: defects.length, followUps, fixesSafe: parseFixes(JSON.stringify(defects.map(defectFix))).length === defects.length, minor: all.length - defects.length - followUps, error: pmRow.error ?? null };
     if (defects.length) {
       const defectsAt = (h: string) => { const r = d.review.premerge.get(`${ref}@${h}`); return r?.findings ? stoppingDefects(findingsOf(r), approved, dropped) : null; };
       base.premergeFixUsed = premergeFixUsedIn(patch.fixups, premergeStalledIn(patch.fixups, qh, defectsAt));

@@ -32,7 +32,7 @@ import { conflictOf, planOf, premergeFirst, ruleStopped } from "./recommend.ts";
 import { RULE_STARTER, WEIGHT_NORMAL, type ItemWorkflow, type PlanPart, type Recommendation, type WorkflowState } from "./types.ts";
 
 /** The waits of a stop that only a person's judgement settles. */
-export const JUDGEMENT_WAITS: readonly WaitCode[] = ["answer", "verification-failed", "screenshots"];
+export const JUDGEMENT_WAITS: readonly WaitCode[] = ["answer", "verification-failed", "verification-error", "screenshots"];
 /** Reasons of the rule that go by themselves once a check has read the diff and the files beside it. */
 const PASSING: ReadonlySet<string> = new Set([EXTRAS_PENDING_REASON, UNCHECKED_REASON]);
 /** The plan states those waits come from; a stored plan keeps its state while other work on the item is due, unlike its wait. */

@@ -61,12 +61,38 @@ export function sizeOf(linesChanged: number): Size {
 
 /** Approval attempts per CI run before the PR is left to a person. */
 export const MAX_FAILURES = 2;
-/** A failed head counts as failed after this many pre-merge tries. */
-export const PREMERGE_MAX_TRIES = 3;
+/** Pre-merge tries of a head an hour apart (RETRY_AFTER_MS); the tries after them are 6 hours apart, for about a day. */
+export const PREMERGE_QUICK_TRIES = 3;
+/** A failed head counts as failed after this many pre-merge tries: the quick ones, then 4 slow ones. */
+export const PREMERGE_MAX_TRIES = 7;
 /** Automatic fix-up rounds of a PR's pre-merge defects over its whole life; a round that brings a defect back stops them sooner. */
 export const PREMERGE_FIX_ROUNDS = 3;
 /** How long a failed try waits before the next one. */
 export const RETRY_AFTER_MS = 3600_000;
+const SLOW_RETRY_MS = 6 * RETRY_AFTER_MS;
+/** Waits after pre-merge calls in a row that ended without a reply (a lost Task Runner, an outage), then every 6 hours: they use no try. */
+const PREMERGE_LOST_MS = [10 * 60_000, 30 * 60_000, 2 * RETRY_AFTER_MS, SLOW_RETRY_MS];
+
+/**
+ * Waits before AutoCraft runs an errored verification of a head again (an error is its own: the build, the plan, a lost task), after the
+ * 1st, 2nd and later errors there: an hour, then 6 hours, for about a day. After the last one the error is a person's to settle.
+ */
+const VERIFY_ERROR_RETRY_MS = [RETRY_AFTER_MS, SLOW_RETRY_MS, SLOW_RETRY_MS, SLOW_RETRY_MS, SLOW_RETRY_MS];
+
+/** When an errored verification runs again (ms); null for a verification in another state, and once its retries are used up. `errors`: the runs made over an error at its head so far. */
+export function verifyRetryAt(v: { state: string; finishedAt: string | null; errors?: number | null }): number | null {
+  if (v.state !== "error" || !v.finishedAt) return null;
+  const d = VERIFY_ERROR_RETRY_MS[Number(v.errors ?? 0)];
+  return d === undefined ? null : Date.parse(v.finishedAt) + d;
+}
+
+/** When the next pre-merge try of a head whose row holds no findings is due (ms); null once its tries are used up. */
+export function premergeRetryAt(row: { at: string; tries: number; lost?: number | null }): number | null {
+  if (row.tries >= PREMERGE_MAX_TRIES) return null;
+  const lost = Number(row.lost ?? 0);
+  if (lost > 0) return Date.parse(row.at) + (PREMERGE_LOST_MS[lost - 1] ?? SLOW_RETRY_MS);
+  return Date.parse(row.at) + (row.tries < PREMERGE_QUICK_TRIES ? RETRY_AFTER_MS : SLOW_RETRY_MS);
+}
 
 /** Queue states a PR leaves for its batch's state while it is in a batch. */
 export const BATCHABLE = ["ready", "decision-answered-merge", "refused", "waiting-ci"];

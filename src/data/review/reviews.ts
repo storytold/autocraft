@@ -6,6 +6,7 @@ import { resolveKeys, type KeySource } from "../keys.ts";
 import { loadOwnLogins } from "../access/index.ts";
 import { listAudit } from "../control/index.ts";
 import { unclearWrite } from "../../github/unsent.ts";
+import { itemHead, openItem } from "../mirror/fragments.ts";
 import { discussionEntries, followupFixLinks, mergeEntryReviews, premergeBase } from "./cross.ts";
 import { headRef, headTuples, latestRows, listOf, noKeys, parseHistory, parseReview, pushTo, refKey, reviewSelect, reviewWindow } from "./rows.ts";
 import type { Filing, Finding, Followup, HeadKey, HeadRef, HistoryRow, MirrorEntry, PendingDefect, PostmergeRow, PremergeRow, RefKey, ReviewPost, ReviewRow, ReviewTexts, StoredHistory } from "./types.ts";
@@ -258,4 +259,19 @@ export async function loadReviewedRefs(db: Db, repo: string, head: string): Prom
     .where("o.verdict", "is not", null);
   const rows = await q.all(q.k.selectFrom(win.as("t")).select(["t.repo", "t.number"]).where("t.rn", "=", 1).where("t.head_oid", "=", head).orderBy("t.number"));
   return rows.map((r) => refKey(r.repo, r.number));
+}
+
+/**
+ * The too-large holds (verdict hold, no model) at the current head of an open PR made under a diff size cap below `cap`; a hold stored
+ * without its cap counts as made under `unstamped`.
+ */
+export async function loadTooLargeHolds(db: Db, cap: number, unstamped: number): Promise<{ repo: string; number: number; head: string }[]> {
+  const q = queryDb(db);
+  const rows = await q.all((q.k as any).selectFrom("main.opus_reviews as o")
+    .select(["o.repo", "o.number", "o.head_oid"])
+    .where("o.verdict", "=", "hold").where("o.model", "is", null)
+    .where((eb: any) => eb(eb.fn.coalesce("o.size_cap", eb.lit(unstamped)), "<", cap))
+    .where((eb: any) => openItem(eb, "o.repo", "o.number", { kind: "pr" }))
+    .where((eb: any) => eb("o.head_oid", "=", itemHead(eb, "o.repo", "o.number")))) as { repo: string; number: number; head_oid: string }[];
+  return rows.map((r) => ({ repo: r.repo, number: Number(r.number), head: r.head_oid }));
 }

@@ -72,6 +72,7 @@ const onGithub = (code: WaitCode): code is GithubCode => Object.hasOwn(ON_GITHUB
 const MERGE_PAST: Partial<Record<WaitCode, (f: PrFacts) => string>> = {
   "batch-failed": () => t("It failed alone in a merge batch: merge it again in a new one."),
   "verification-failed": () => t("Its verification failed: merge it anyway."),
+  "verification-error": () => t("Its verification kept erroring, also when AutoCraft ran it again over a day: merge it without it."),
   "merge-refused": (f) => (f.lastMerge?.reason ? t("The merge was refused ({reason}): try it again.", { reason: f.lastMerge.reason }) : t("The merge was refused: try it again.")),
   screenshots: (f) => regression(f, t("merge it anyway.")),
 };
@@ -258,6 +259,8 @@ export type CauseNow = {
   blocks?: (items: readonly string[]) => boolean | undefined;
   /** Whether a job of the lane step `lane` ran through at `head` after the question was asked. */
   laneDone?: (lane: string, head: string) => boolean | undefined;
+  /** Whether the review stored at the head is a hold made without a model call (too large to review). */
+  unread?: () => boolean | undefined;
 };
 
 /** Why a question whose cause clears without an answer closes: what the facts at its head say now. Null while the cause stands, or while they do not say. */
@@ -296,6 +299,7 @@ export function causeWent(cause: Recommendation["cause"], f: PrFacts | ItemFacts
     case "merge-refused": return !refusalStuck(f) ? t("What refused the merge changed since, so it can be tried again.") : null;
     case "conflict": return f.mergeable === "MERGEABLE" ? t("It no longer conflicts with its base branch.") : null;
     case "blocked-by": return now.blocks?.(cause.items) === false ? t("The items its review waited for no longer block it.") : null;
+    case "too-large": return now.unread?.() === false ? t("Its hold for size is gone, so the pull request is reviewed again.") : null;
     case "lane-failed":
       if ("head" in f && f.head !== null && f.head !== cause.head) return t("It has a new commit, so the step runs there.");
       return now.laneDone?.(cause.lane, cause.head) === true ? t("The step ran through at this commit since.") : null;

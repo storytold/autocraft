@@ -487,6 +487,15 @@ const STATE_COLUMNS: [table: string, column: string, type: string][] = [
   ["github_commands", "model", "TEXT"],
   // When a person's turn was answered or failed: a question's lost answer is swept a while after it.
   ["conversation_turns", "ended_at", "TEXT"],
+  // Review calls at the fail head that ended without a reply (a lost Task Runner, an outage): counted apart from the model's failures.
+  ["review_state", "lost_count", "INTEGER NOT NULL DEFAULT 0"],
+  ["review_state", "lost_at", "TEXT"],
+  // Pre-merge review calls in a row at the head that ended without a reply: they use no try.
+  ["premerge_reviews", "lost", "INTEGER NOT NULL DEFAULT 0"],
+  // Runs of the verification of the head made over an errored one: AutoCraft's own retries of an error.
+  ["verifications", "errors", "INTEGER NOT NULL DEFAULT 0"],
+  // The diff size cap a too-large review hold was made under: a higher cap reviews the head again.
+  ["opus_reviews", "size_cap", "INTEGER"],
 ];
 
 const STATE_INDEXES = [

@@ -10,7 +10,7 @@ export type RefusalCode =
 
 /** What an item waits on when nothing of it is due. */
 export type WaitCode = RefusalCode
-  | "answer" | "not-started" | "ci" | "mergeable-unknown" | "mergeable-stuck" | "premerge" | "verification" | "verification-failed"
+  | "answer" | "not-started" | "ci" | "mergeable-unknown" | "mergeable-stuck" | "premerge" | "verification" | "verification-failed" | "verification-error"
   | "ci-approval" | "ci-approval-failed" | "main-red" | "batch" | "batch-failed" | "changes-requested" | "merge-refused" | "refusal-retry"
   | "sign-in" | "hand-over" | "followups" | "leg" | "base-off-default" | "no-ci" | "review-hold" | "review-failed" | "review-cap"
   | "fix-contributor" | "fix-running" | "fix-failed" | "conflict-contributor" | "conflict-person" | "conflict-cap"
@@ -20,7 +20,7 @@ export type WaitCode = RefusalCode
 
 /** Why a merge leg ended without a merge. */
 export type StopCode =
-  | "author-push" | "head-back" | "review-hold" | "review-close" | "review-failed" | "not-reviewable" | "verification-failed"
+  | "author-push" | "head-back" | "review-hold" | "review-close" | "review-failed" | "not-reviewable" | "verification-failed" | "verification-error"
   | "premerge-defect" | "premerge-failed" | "merge-refused" | "fix-failed" | "fix-too-large" | "fix-cannot-run" | "ci-failed" | "no-ci"
   | "approval-gone" | "actor-gone" | "workflow-ended" | "pr-gone" | "pr-closed" | "pr-merged" | "person" | "blocked" | "other";
 
@@ -57,6 +57,7 @@ const STOP_FORM: readonly (readonly [RegExp, StopCode])[] = [
   [/the review says hold/, "review-hold"],
   [/the review says close/, "review-close"],
   [/verification failed/, "verification-failed"],
+  [/^verification errored at /, "verification-error"],
   [/too-large/, "fix-too-large"],
   [/^the fix-up cannot run: |^the review of .* asks for fixes and its fix-up cannot run/, "fix-cannot-run"],
   [/^the fix-up /, "fix-failed"],
