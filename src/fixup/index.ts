@@ -51,7 +51,7 @@ import { referenceDir } from "../reference.ts";
 import { cleanReason } from "../act/templates.ts";
 import { defaultSemanticDeps, referenceProblems } from "../reference-lint.ts";
 import { dropTexts } from "../replylint.ts";
-import { buildScriptsAt, fixupEditable, operatorEditable, quotesText, splitChanges, validatePatch, type ConflictPr, type FixupPr } from "./patch.ts";
+import { DIFF_CAP, buildScriptsAt, fixupEditable, operatorEditable, quotesText, splitChanges, validatePatch, type ConflictPr, type FixupPr } from "./patch.ts";
 import { outsideShown, shownSize, viewFile } from "./excerpt.ts";
 import { HOLD_CANNOT_PUSH, askText, commentText, commitMessage, fixupCommentEdited, fixupCommentLines, operatorCommentText } from "./template.ts";
 import { jobItem } from "../runner/job-items.ts";
@@ -71,7 +71,7 @@ const CONFLICT = CLAUDE_PROMPTS["fixup.conflict"];
 /** Characters of one file shown whole (a larger file is shown in part, and the part is held to the same limit), of all files shown, and of the PR diff; over any of them a PR without a checkout is held. With a checkout a longer diff is trimmed to DIFF_CAP (`checkoutDiff`). */
 export const FILE_CAP = 40_000;
 export const TOTAL_CAP = 120_000;
-export const DIFF_CAP = 60_000;
+export { DIFF_CAP };
 
 export type FixupDeps = {
   querier: Querier;

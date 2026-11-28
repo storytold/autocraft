@@ -22,12 +22,12 @@ const hash = (s: string): string => createHash("sha256").update(s).digest("hex")
 const codeVersion = (id: ClaudePromptId | JevPromptId): string =>
   id in CLAUDE_PROMPTS ? hash(CLAUDE_PROMPTS[id as ClaudePromptId].template) : hash(JSON.stringify(JEV_PROMPTS[id as JevPromptId].request));
 /**
- * The versions the guidance prompts recorded before their templates got the guidance line: with no guidance they must still
- * send that text. A deliberate change to one of these templates updates its entry here.
+ * The versions the guidance prompts record with no guidance: their text without the guidance line, which for the older
+ * ones is what they recorded before their templates got the line. A deliberate change to one of these templates updates its entry here.
  */
 const BEFORE_SLOT: Record<(typeof GUIDANCE_PROMPTS)[number], string> = {
   "review.opus": "39d27a37c9", "premerge.opus": "de590c35f4", "postmerge.opus": "cf241da7cd", "review.issue": "6fcdf12ad8",
-  "fixup.patch": "72ead667fc", "cifix.patch": "a942377ddd", "fixup.conflict": "946e1e8281",
+  "fixup.patch": "72ead667fc", "cifix.patch": "a942377ddd", "fixup.conflict": "946e1e8281", "fix.session": "196aa1a193",
 };
 
 test("an active edit and a repo's guidance reach the Task Runner; versions and the system prompt follow", async () => {
