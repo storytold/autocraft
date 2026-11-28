@@ -10,6 +10,8 @@ import { SCRATCH } from "./scratch.ts";
 import { world } from "./world-db.ts";
 import { fixPod } from "./helpers/fix-pod.ts";
 import { createEnv } from "../src/build/envs.ts";
+import { bindWorkspaceCall } from "../src/data/build/workspaces.ts";
+import { loadCalls } from "../src/data/runners/index.ts";
 import { runGate, type StepGate } from "../src/fixsession/gates.ts";
 import type { StepTurn } from "../src/fixsession/messages.ts";
 import { loadSessions, turnsOf, type FixSessionKind } from "../src/fixsession/store.ts";
@@ -122,4 +124,26 @@ test("a fix-up's pod diff keeps its CRLF lines as written, a new file belongs to
   const empty = "diff --git a/crates/app/src/exploit.rs b/crates/app/src/exploit.rs\nnew file mode 100644\nindex 0000000..e69de29\n";
   assert.ok((await runGate(gate, empty, null)).ok);
   assert.ok(!(await runGate({ ...gate, quiet: true }, empty, null)).ok, "a quiet pull request's new file may not name what the fix protects against");
+});
+
+test("a fix step goes on past a patch check's call that a stopped job left leased on the session's workspace", async () => {
+  const s = await ready();
+  const session = await s.session("pr", 40);
+  const ws = session.workspaceId!;
+  const now = Date.now();
+  await s.db.run(s.db.k.insertInto("main.remote_calls").values({
+    id: 4000, step: "fixup", stage: 0, prompt_id: "fixup.check", prompt_version: "v1", tier: "opus", effort: "medium", asked_model: "opus", bundle: "{}",
+    state: "leased", since: now, seen_at: now, max_attempts: 2, timeout_ms: 1000, parent_id: null,
+  } as never));
+  await bindWorkspaceCall(s.db, ws, 4000);
+  // The real queue binds each turn's call to the workspace, which refuses while another call holds it.
+  const env: StepEnv = { ...s.env, calls: { ...s.env.calls!, queue: async (d, r) => {
+    const id = await s.env.calls!.queue(d, r);
+    await bindWorkspaceCall(d, r.workspaceId, id, r.parentId === undefined ? {} : { parentId: r.parentId });
+    return id;
+  } } };
+  s.model(() => ({ [LIB]: "pub fn a() -> u8 { 1 }\n" }));
+  const out = await runStep(env, session, prStep(s.db, fixupTurn(s.head), fixupGate));
+  assert.equal(out.kind, "ok", "reason" in out ? out.reason : out.kind === "refused" ? out.problems.join("; ") : "");
+  assert.notEqual((await loadCalls(s.db, [4000])).get(4000)?.state, "leased", "the left call no longer holds the workspace");
 });

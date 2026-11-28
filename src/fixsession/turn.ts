@@ -19,6 +19,7 @@ import { runChecks, statOf, workspacePod, type CheckRound, type Pod } from "../i
 import { workspaceDiff } from "../implement/diff.ts";
 import { CLAUDE_PROMPTS, claudeParts } from "../prompts/index.ts";
 import { promptTier } from "../remote/bundle.ts";
+import { withdrawCall } from "../remote/calls.ts";
 import { leaseItem } from "../runner/leases.ts";
 import { repoDocsFor } from "../sandbox/repo-docs.ts";
 import { runGate, type GateOk, type StepGate } from "./gates.ts";
@@ -304,6 +305,22 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
   }
 }
 
+/** The error of a call that a fix step withdrew from its session's workspace. */
+const STEP_TOOK_WORKSPACE = "withdrawn: a fix step needs the fix session's workspace";
+
+/**
+ * Withdraws the call bound to the session's workspace while it is queued or leased and is not a turn of the session: a patch check's
+ * call (check.ts) that a stopped job left running. The step holds the session's lease, so no running job's call is withdrawn, and the
+ * step's reseed and its turn's bind are never refused for it.
+ */
+async function takeWorkspaceBack(db: Db, s: Pick<FixSession, "id">, workspaceId: number, log: (line: string) => void): Promise<void> {
+  const bound = (await getWorkspace(db, workspaceId))?.remote_call_id ?? null;
+  if (bound === null) return;
+  const own = new Set((await turnsOf(db, s.id)).flatMap((t) => (t.callId === null ? [] : [t.callId])));
+  if (own.has(Number(bound))) return;
+  if (await withdrawCall(db, Number(bound), STEP_TOOK_WORKSPACE)) log(`fix session ${s.id}: call ${bound} withdrawn from workspace ${workspaceId}: the step needs the workspace`);
+}
+
 async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Promise<StepOutcome> {
   const db = env.db;
   const calls = env.calls ?? realCalls;
@@ -350,6 +367,7 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
     round = queued;
     if (!await settled(round, r)) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, s.workspaceId);
   }
+  if (s.workspaceId !== null) await takeWorkspaceBack(db, s, s.workspaceId, env.log);
   // The adopted turn's tree is kept only when nothing reseeded or restored it after the turn was queued.
   const ws = await ensureWorkspace(s, spec.head, env, { keepTree: resume || !!spec.lint, ...(resume && { keptSince: pending!.createdAt }) });
   if (ws.kind === "wait") return done({ kind: "wait", reason: ws.reason, ...(ws.stuck && { stuck: true as const }) }, s.workspaceId);
