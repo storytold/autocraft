@@ -25,7 +25,7 @@ const isBasePrompt = (id: string): id is ClaudePromptId | JevPromptId => id in C
  * The version a revision's body runs at now: a Claude edit with the code's locked blocks, a Jev edit with the code's keys
  * and labels (the code's own when an edit no longer fits), guidance by its own hash.
  */
-function versionOf(id: string, body: string, follows: boolean): string {
+export function versionOf(id: string, body: string, follows: boolean): string {
   if (isGuidance(id)) return body ? sha256Hex(body).slice(0, 6) : "";
   if (follows) return codeDefault(id as ClaudePromptId | JevPromptId).version;
   if (id in JEV_PROMPTS) return jevBodyVersion(id as JevPromptId, body);

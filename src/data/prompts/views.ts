@@ -4,11 +4,10 @@ import type { PromptCheckReply, PromptEditState, PromptRevisionInfo, PromptSaveR
 import type { Db } from "../../db/index.ts";
 import { checkEdit, normaliseBody } from "../../prompts/checks.ts";
 import { lineDiff, type DiffLine } from "../../prompts/diff.ts";
-import { BASE_SCOPE, CLAUDE_PROMPTS, GUIDANCE_PROMPTS, GUIDANCE_PROMPT_ID, JEV_PROMPTS, bodyVersion, codeBody, codeDefault, codeEditState, jevRequestWith, sameTemplateOf, type ClaudePromptId, type JevPromptId } from "../../prompts/index.ts";
+import { BASE_SCOPE, CLAUDE_PROMPTS, GUIDANCE_PROMPTS, GUIDANCE_PROMPT_ID, JEV_PROMPTS, codeBody, codeDefault, codeEditState, jevRequestWith, sameTemplateOf, type ClaudePromptId, type JevPromptId } from "../../prompts/index.ts";
 import { mergeEdit, stripLocks } from "../../prompts/locks.ts";
-import { sha256Hex } from "../../prompts/sha256.ts";
 import { activeRow } from "./active.ts";
-import type { SaveResult } from "./ops.ts";
+import { versionOf, type SaveResult } from "./ops.ts";
 import { listRevisions } from "./revisions.ts";
 import type { PromptRevision } from "./types.ts";
 
@@ -91,7 +90,7 @@ export async function checkSave(db: Db, o: { id: string; scope: string; body: st
   const problems = (active?.rev ?? 1) !== (o.baseRev ?? 1) ? [{ where: "rev", message: `the prompt changed since revision ${o.baseRev ?? 1}: revision ${active?.rev ?? 1} is active now` }] : [];
   problems.push(...checkEdit(o.id, o.scope, body, o.note, active ? { rev: active.rev, body: active.body, follows: active.follows } : null));
   const ok = problems.length === 0;
-  const version = !ok ? null : o.id === GUIDANCE_PROMPT_ID ? (body ? sha256Hex(body).slice(0, 6) : "") : bodyVersion(body);
+  const version = ok ? versionOf(o.id, body, false) : null;
   return { ok, problems, diff: lineDiff(shown(o.id, runningOf(o.id, active)), shown(o.id, body)), version };
 }
 
