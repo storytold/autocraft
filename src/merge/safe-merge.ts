@@ -7,6 +7,9 @@
 //
 // --head SHA is the head the caller reviewed: the merge refuses when GitHub's head is another one.
 //
+// --allow-pending NAME accepts a check of that exact name that has not finished, and its workflow run while only such
+// checks of it are unfinished (an optional check).
+//
 // --allow-failed NAME accepts a failed check of that exact name (an optional check), only while GitHub's merge
 // state of the PR is not BLOCKED (a failing required check blocks it); every other check must still be green.
 //
@@ -71,34 +74,52 @@ export function refuseView(v: PrView, allow: string[] = [], allowFailed: string[
 }
 
 /** A failed run is accepted when it has failed jobs and every one of them is a listed check (a job's check name is `caller job / called job` for reusable workflows). */
-function runOnlyOptional(r: Run, failOk: string[], failedJobs: Map<number, string[]>): boolean {
-  const jobs = r.id === undefined ? undefined : failedJobs.get(r.id);
-  return !!jobs && jobs.length > 0 && jobs.every((j) => failOk.includes(j));
+function runOnlyOptional(r: Run, failOk: string[], jobsOf: Map<number, RunJobs>): boolean {
+  const jobs = r.id === undefined ? undefined : jobsOf.get(r.id);
+  return !!jobs && jobs.failed.length > 0 && jobs.failed.every((j) => failOk.includes(j));
 }
+
+/** A run still going whose unfinished jobs are all allowed to be pending and whose failed jobs are all accepted (an optional check's run). */
+function runOnlyPendingAllowed(r: Run, allow: string[], failOk: string[], jobsOf: Map<number, RunJobs>): boolean {
+  const jobs = r.id === undefined ? undefined : jobsOf.get(r.id);
+  return !!jobs && jobs.total > 0 && jobs.pending.every((j) => allow.includes(j)) && jobs.failed.every((j) => failOk.includes(j));
+}
+
+/** The jobs of one run that did not pass and that have not finished, with the number of jobs it has. */
+type RunJobs = { failed: string[]; pending: string[]; total: number };
 
 const JOB_FAILED = ["failure", "cancelled", "timed_out", "startup_failure", "action_required", "stale"];
 
-/** The jobs that did not pass, per failed run, read only when a failure may be accepted. */
-async function failedJobsOf(repo: string, runs: Run[], failOk: string[], gh: Gh): Promise<Map<number, string[]>> {
-  const out = new Map<number, string[]>();
-  if (!failOk.length) return out;
+/**
+ * The jobs of the runs that may still pass on accepted checks: failed runs when a failure may be accepted, and runs still going when a
+ * check may be pending (only those whose run name is not itself allowed).
+ */
+async function runJobsOf(repo: string, runs: Run[], allow: string[], failOk: string[], gh: Gh): Promise<Map<number, RunJobs>> {
+  const out = new Map<number, RunJobs>();
   for (const r of runs) {
-    if (r.id === undefined || r.status !== "completed" || GREEN_RUN.includes(r.conclusion ?? "")) continue;
-    const reply = JSON.parse(await gh(["api", `repos/${repo}/actions/runs/${r.id}/jobs?per_page=100`])) as { jobs?: { name?: string; conclusion?: string | null }[] };
-    out.set(r.id, (reply.jobs ?? []).filter((j) => JOB_FAILED.includes(j.conclusion ?? "")).map((j) => j.name ?? "?"));
+    if (r.id === undefined) continue;
+    const going = r.status !== "completed";
+    if (going ? !allow.length || allow.includes(r.name ?? "") : !failOk.length || GREEN_RUN.includes(r.conclusion ?? "")) continue;
+    const reply = JSON.parse(await gh(["api", `repos/${repo}/actions/runs/${r.id}/jobs?per_page=100`])) as { jobs?: { name?: string; status?: string | null; conclusion?: string | null }[] };
+    const jobs = reply.jobs ?? [];
+    out.set(r.id, {
+      failed: jobs.filter((j) => JOB_FAILED.includes(j.conclusion ?? "")).map((j) => j.name ?? "?"),
+      pending: jobs.filter((j) => (j.status ?? "completed") !== "completed").map((j) => j.name ?? "?"),
+      total: jobs.length,
+    });
   }
   return out;
 }
 
 /** The reason the head's Actions runs block the merge, or null. These cover workflows that never reach the rollup (startup failure, waiting for approval). */
-export function refuseRuns(runs: Run[], allow: string[] = [], failOk: string[] = [], failedJobs: Map<number, string[]> = new Map()): string | null {
+export function refuseRuns(runs: Run[], allow: string[] = [], failOk: string[] = [], jobsOf: Map<number, RunJobs> = new Map()): string | null {
   const bad: string[] = [];
   for (const r of runs) {
     const name = r.name ?? "";
     if (!name) continue;
     if (r.status !== "completed") {
-      if (!allow.includes(name)) bad.push(`${name}: ${r.status}`);
-    } else if (!GREEN_RUN.includes(r.conclusion ?? "") && !runOnlyOptional(r, failOk, failedJobs)) bad.push(`${name}: ${r.conclusion ?? ""}`);
+      if (!allow.includes(name) && !runOnlyPendingAllowed(r, allow, failOk, jobsOf)) bad.push(`${name}: ${r.status}`);
+    } else if (!GREEN_RUN.includes(r.conclusion ?? "") && !runOnlyOptional(r, failOk, jobsOf)) bad.push(`${name}: ${r.conclusion ?? ""}`);
   }
   return bad.length ? `workflow runs not green:\n${bad.join("\n")}` : null;
 }
@@ -157,7 +178,8 @@ export async function safeMerge(
   if (why) return refuse(why);
   const runs = JSON.parse(await gh(["api", `repos/${repo}/actions/runs?head_sha=${head}&per_page=100`])) as { workflow_runs?: Run[] };
   const failOk = failureAllowance(v, allowFailed);
-  why = refuseRuns(runs.workflow_runs ?? [], allow, failOk, await failedJobsOf(repo, runs.workflow_runs ?? [], failOk, gh));
+  const allowed = allow.filter((a) => a !== "");
+  why = refuseRuns(runs.workflow_runs ?? [], allowed, failOk, await runJobsOf(repo, runs.workflow_runs ?? [], allowed, failOk, gh));
   if (why) return refuse(why);
   why = await refuseChangesRequested(repo, pr, gh) ?? refuseAuthors(JSON.parse(await gh(["pr", "view", pr, "-R", repo, "--json", "author,commits"])) as Commits, method);
   if (why) return refuse(why);

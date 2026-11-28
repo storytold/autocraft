@@ -420,10 +420,14 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       // A resolution with Rust files is stored and linted before it is pushed (the collect step above pushes it, or asks again with the findings).
       const rs = resFiles.map((f) => f.path).filter((p) => p.endsWith(".rs"));
       dropSessions(c.lint?.session, keptNow);
-      const patch = rs.length ? await git.diffText(head, tree) : "";
-      // The lint task takes the merge as a patch on the head; one over the task limit is over it at every run for this head.
-      if (Buffer.byteLength(patch) > MAX_PATCH_BYTES) { await refuse("the merge is larger than 1 MiB as a patch, over the lint task limit"); return; }
-      const task = rs.length ? await queueLintFor(db, { step: "conflict", repo: x.repo, number: c.number, head, base: baseSha, patch, files: rs }) : null;
+      // The lint task takes the merge as a patch on one of its parents, whichever is smaller: on the head it carries everything the
+      // default branch gained since the PR branched, on the base only the PR's changes. Findings count only on the resolution's lines.
+      const onHead = rs.length ? await git.diffText(head, tree) : "";
+      const onBase = rs.length && baseSha ? await git.diffText(baseSha, tree) : null;
+      const [lintOn, patch] = onBase !== null && Buffer.byteLength(onBase) < Buffer.byteLength(onHead) ? [baseSha!, onBase] : [head, onHead];
+      // One over the task limit on both parents is over it at every run for this head.
+      if (Buffer.byteLength(patch) > MAX_PATCH_BYTES) { await refuse(`the merge is larger than 1 MiB as a patch on the pull request's head and on ${c.base}, over the lint task limit`); return; }
+      const task = rs.length ? await queueLintFor(db, { step: "conflict", repo: x.repo, number: c.number, head: lintOn, base: baseSha, patch, files: rs }) : null;
       if (task !== null) {
         const round = c.lint ? c.lint.round + 1 : 1;
         await storePatch(db, { kind: "conflict", storedId: c.lint?.rowid, repo: x.repo, number: c.number, head: c.head, patch: JSON.stringify(resFiles), files, lintTask: task, lintRound: round, lintState: "pending", session: storeSessions(keptNow, new Date(x.at())), sessionTurn, baseSha: baseSha ?? undefined, attempt: c.attempt, at: x.at() });
