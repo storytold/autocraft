@@ -8,7 +8,7 @@ import { setCommentApproval } from "../src/act/approval.ts";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
 import { FORMAT_ARTIFACT, gitFormatDiff, runCifix, type CifixDeps } from "../src/cifix/index.ts";
 import { formattingOnly, guardPatch } from "../src/cifix/guard.ts";
-import { parseFailedLog, readFailure } from "../src/cifix/logs.ts";
+import { parseFailedLog, parseJobLog, readFailure } from "../src/cifix/logs.ts";
 import { triage, unrelatedTests } from "../src/cifix/triage.ts";
 import type { CifixPr, CiFailure } from "../src/cifix/types.ts";
 import { REPO_PATH } from "../src/sandbox/command.ts";
@@ -127,29 +127,39 @@ describe("triage", () => {
     assert.equal(unrelatedTests(built, ["crates/ui-egui/src/autosave_name.rs"]), null);
   });
 
-  test("a failed job of a run still in progress is read from its own job log", async () => {
+  test("a failed job of a run still in progress is read from its own job log, one tail per failed step", async () => {
     const checks = { check_runs: [
       { id: 501, name: "ci / gate (linux)", status: "completed", conclusion: "failure", details_url: "https://github.com/o/r/actions/runs/9/job/501" },
       { id: 502, name: "ci / gate (windows)", status: "in_progress", conclusion: null, details_url: "https://github.com/o/r/actions/runs/9/job/502" },
     ] };
-    const raw = [
-      "\uFEFF2026-11-28T05:10:00.0000000Z ##[group]Run actions/checkout@v4", "2026-11-28T05:10:00.1000000Z with: x", "2026-11-28T05:10:00.2000000Z ##[endgroup]",
-      "2026-11-28T05:11:00.0000000Z ##[group]Run cargo test --workspace", "2026-11-28T05:11:00.1000000Z ##[endgroup]",
-      "2026-11-28T05:12:00.0000000Z \u001b[31merror[E0599]\u001b[0m: no method named `width` found", "2026-11-28T05:12:00.1000000Z ##[error]Process completed with exit code 101.",
-      "2026-11-28T05:12:01.0000000Z Post job cleanup.", "2026-11-28T05:12:01.1000000Z [command]/usr/bin/git config --local cleanup",
-    ].join("\r\n") + "\r\n";
+    const job = { steps: [
+      { name: "Set up job", conclusion: "success" }, { name: "Run actions/checkout@v4", conclusion: "success" }, { name: "Install tools", conclusion: "success" },
+      { name: "Lint", conclusion: "failure" }, { name: "Run the tests", conclusion: "failure" }, { name: "Upload report", conclusion: "skipped" },
+      { name: "Post Run actions/checkout@v4", conclusion: "success" }, { name: "Complete job", conclusion: "success" },
+    ] };
+    const raw = "\uFEFF" + [
+      "Current runner version: 1", "##[group]Run actions/checkout@v4", "with: x", "##[endgroup]",
+      "##[group]Run ./.github/actions/tools", "##[endgroup]", "##[start-action display=Install tools;id=tools]", "##[group]Run ./install.sh", "##[endgroup]", "installed", "##[end-action id=tools;outcome=success]",
+      "##[group]Run cargo clippy -- -D warnings", "##[endgroup]", "\u001b[1merror\u001b[0m: unused variable `n`", "##[error]Process completed with exit code 1.",
+      "##[group]Run cargo test --workspace", "##[endgroup]", "\u001b[31merror[E0599]\u001b[0m: no method named `width` found", "##[error]Process completed with exit code 101.",
+      "Post job cleanup.", "[command]/usr/bin/git config --local cleanup",
+    ].map((l, i) => `2026-11-28T05:10:${String(i).padStart(2, "0")}.0000000Z ${l}`).join("\r\n") + "\r\n";
     const gh = async (args: string[]): Promise<string> => {
       if (args[0] === "run") throw new Error("gh run view failed: run 9 is still in progress; logs will be available when it is complete");
       if (args[1]!.includes("/check-runs")) return JSON.stringify(checks);
       if (/^repos\/[^/]+\/r\/actions\/jobs\/501\/logs$/.test(args[1]!) && args.includes("--allow-escape-sequences")) return raw;
+      if (/^repos\/[^/]+\/r\/actions\/jobs\/501$/.test(args[1]!)) return JSON.stringify(job);
       throw new Error(`unexpected gh ${args.join(" ")}`);
     };
     const r = await readFailure(gh, "r", "h");
     assert.equal(r.kind, "failure");
     const [check] = r.kind === "failure" ? r.failure.checks : [];
-    assert.equal(check?.steps.length, 1);
-    assert.equal(check!.steps[0]!.step, "cargo test --workspace");
-    assert.ok(check!.steps[0]!.tail.includes("error[E0599]: no method") && check!.steps[0]!.tail.trimEnd().endsWith("exit code 101.") && !check!.steps[0]!.tail.includes("cleanup"));
+    assert.deepEqual(check?.steps.map((s) => s.step), ["Lint", "Run the tests"]);
+    const [lint, tests] = check!.steps;
+    assert.ok(lint!.tail.includes("error: unused variable") && !lint!.tail.includes("E0599") && !lint!.tail.includes("installed"));
+    assert.ok(tests!.tail.includes("error[E0599]: no method") && tests!.tail.trimEnd().endsWith("exit code 101.") && !tests!.tail.includes("cleanup") && !tests!.tail.includes("clippy"));
+    // Without the step list the log is cut at its last error and named after the nearest step start, not an earlier composite step.
+    assert.deepEqual(parseJobLog("j", raw).map((s) => s.step), ["cargo test --workspace"]);
   });
 });
 
