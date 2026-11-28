@@ -3,4 +3,5 @@ export * from "./revisions.ts";
 export * from "./active.ts";
 export * from "./ops.ts";
 export * from "./release.ts";
+export * from "./views.ts";
 export type * from "./types.ts";

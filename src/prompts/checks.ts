@@ -25,8 +25,8 @@ const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u2
 const TOKEN = /\b(?:bearer|token)\s+[A-Za-z0-9._~+/=-]{16,}/i;
 const MARKER = /[⟦⟧]/;
 
-/** A body as it is checked and stored: Windows line endings become newlines. */
-export const normaliseBody = (body: string): string => body.replace(/\r\n/g, "\n");
+/** A body as it is checked and stored: Windows line endings become newlines, and whitespace after the final locked block (an editor's last newline) is dropped, since nothing follows the data block. */
+export const normaliseBody = (body: string): string => body.replace(/\r\n/g, "\n").replace(/(⟦\/locked⟧)\s+$/, "$1");
 
 const hasCredential = (text: string): boolean => hasFixedCredential(text) || TOKEN.test(text);
 

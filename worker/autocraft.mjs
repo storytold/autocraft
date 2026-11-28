@@ -5011,8 +5011,9 @@ const pickWhy = (has) => (has.has("list_model_calls") ? "only maintainers and op
 
 /**
  * A server command. `args`: the tool arguments its positional words fill, in order; `flags`: CLI flag → tool argument;
+ * `files`: CLI flag → tool argument filled with the text of the local file the flag names;
  * `why`: one line on why the credential is not offered the tool. Options not named here pass through as `--<argument>`.
- * @typedef {{ path: string[], tool: string, usage: string, summary: string, args?: string[], flags?: Record<string, string>, why?: (has: Set<string>) => string }} CliCommand
+ * @typedef {{ path: string[], tool: string, usage: string, summary: string, args?: string[], flags?: Record<string, string>, files?: Record<string, string>, why?: (has: Set<string>) => string }} CliCommand
  */
 /** @type {readonly CliCommand[]} */
 export const CLI_COMMANDS = [
@@ -5029,6 +5030,12 @@ export const CLI_COMMANDS = [
   { path: ["commands"], tool: "help", usage: "", summary: "the commands AutoCraft takes, what each does and when it comes back to you" },
   { path: ["repos"], tool: "list_repos", usage: "", summary: "tracked repositories with their fix-ups waiting" },
   { path: ["fixups"], tool: "list_fixups", usage: "[--repo R] [--limit N]", summary: "PRs whose review fixes the pipeline could not apply" },
+  { path: ["prompts"], tool: "list_prompts", usage: "", summary: "the model prompts, each with its active revision and whether an edit runs; the repos with guidance" },
+  { path: ["prompts", "show"], tool: "get_prompt", args: ["id"], usage: "<id> [--repo R] [--raw]", summary: "a prompt's text form with its locked blocks (--raw: only the text, to edit; repo.guidance --repo R: a repo's guidance)" },
+  { path: ["prompts", "history"], tool: "prompt_history", args: ["id"], usage: "<id> [--repo R]", summary: "its revisions: who, when, why" },
+  { path: ["prompts", "diff"], tool: "prompt_diff", args: ["id", "from", "to"], usage: "<id> <rev> [<rev>] [--repo R]", summary: "the changes between two revisions (a number, release or active; the second defaults to active)" },
+  { path: ["prompts", "edit"], tool: "edit_prompt", args: ["id"], files: { file: "body" }, usage: "<id> --file F --note T [--repo R] [--base-rev N]", summary: "save the text form in F as a new revision, checked as on the Prompts page", why: () => "only maintainers and operators change prompts" },
+  { path: ["prompts", "rollback"], tool: "rollback_prompt", args: ["id", "rev"], usage: "<id> <rev>|release --note T [--repo R]", summary: "run an earlier revision's text again, or the release default, as a new revision", why: () => "only maintainers and operators change prompts" },
 ];
 
 /**
@@ -5183,6 +5190,8 @@ export function parseToolArgs(tool, argv, cmd) {
   const shownAs = new Map(Object.entries(flags).map(([f, k]) => [k, f]));
   const byFlag = new Map(Object.keys(props).map((k) => [toolKey(k), k]));
   for (const [f, k] of Object.entries(flags)) byFlag.set(toolKey(f), k);
+  const fileFlags = new Map(Object.entries(cmd?.files ?? {}).map(([f, k]) => [toolKey(f), k]));
+  for (const [f, k] of fileFlags) { byFlag.set(f, k); shownAs.set(k, f); }
   const name = cmd ? cmd.path.join(" ") : tool.name;
   const flagOf = (/** @type {string} */ k) => `--${(shownAs.get(k) ?? k).replace(/_/g, "-")}`;
   const valid = () => Object.keys(props).filter((k) => !cmd?.args?.includes(k)).map(flagOf).join(", ") || "(none)";
@@ -5249,6 +5258,14 @@ export function parseToolArgs(tool, argv, cmd) {
       if (k && typeOf(props[k]) === "boolean") { args[k] = false; continue; }
     }
     if (!key) throw new UsageError(`unknown option ${a.slice(0, eq < 0 ? undefined : eq)} for ${name}; valid: ${valid()}`);
+    if (fileFlags.has(toolKey(flag))) {
+      if (inline === undefined) {
+        if (i + 1 >= argv.length) throw new UsageError(`--${flag} needs a file`);
+        inline = argv[++i];
+      }
+      try { args[key] = readFileSync(inline, "utf8"); } catch (e) { throw new UsageError(`--${flag}: cannot read ${inline}: ${msg(e)}`); }
+      continue;
+    }
     const t = typeOf(props[key]);
     if (t === "boolean") {
       if (inline === undefined && spare > 0 && /^(true|false|on|off)$/.test(argv[i + 1] ?? "")) { inline = argv[++i]; spare--; }
@@ -5408,7 +5425,7 @@ const TASK_HELP = [
   ["autocraft config reserve <5h> <weekly> | off", "runner reserve"],
 ];
 
-const GROUP_TITLES = /** @type {const} */ ({ queue: "Merge queue", calls: "Model calls", settings: "Settings" });
+const GROUP_TITLES = /** @type {const} */ ({ queue: "Merge queue", calls: "Model calls", settings: "Settings", prompts: "Prompts" });
 
 /** The workflow commands: send a command, read an item, list your items, list the commands. */
 const ITEM_GROUPS = ["do", "item", "items", "commands"];

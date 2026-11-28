@@ -5,14 +5,14 @@
 // (GET /api/prompts) shows these entries and a rendered example of each.
 //
 // No Node imports: the web mockup imports this file too.
-import type { PromptInfo, PromptsReport } from "../../web/src/api/types.ts";
+import type { PromptEditState, PromptInfo, PromptsReport } from "../../web/src/api/types.ts";
 import { BODY_LIMIT, itemInput, refOf, type Item } from "../classify/parse.ts";
 import { AREAS_MAX, AREAS_MIN, AREA_DESCRIPTION_MAX, AREA_NAME_MAX, AREA_PATHS_MAX, AREA_SUGGEST_BODY, AREA_SURE, NONE_OF_THESE, PROPOSE_TITLES, SAMPLE_AREAS, SAMPLE_AREA_ASK, SAMPLE_AREA_ITEM, SAMPLE_AREA_PROPOSE, SAMPLE_AREA_SUGGEST, SUGGEST_ITEMS, SUGGEST_MAX, type Area, type AreaAsk, type AreaItem, type AreaProposeInput, type AreaSuggestInput } from "../areas/types.ts";
 import { LABELS, LABEL_MEANING, RULES, UNTRUSTED_NOTE } from "../classify/rules.ts";
 import { CHECK_MAX_CALLS, CHECK_MAX_WALL_MS, CHECK_OUTPUT_LINES, LINT_MAX_ROUNDS } from "../core/rules.ts";
 import { ENTRY_LIMIT, REVIEW_BODY_LIMIT, TOTAL_LIMIT, VERDICTS } from "../review/parse.ts";
 import { markHarness, stripMarks } from "./harness.ts";
-import { mergeEdit, stripLocks } from "./locks.ts";
+import { mergeEdit, segments, stripLocks } from "./locks.ts";
 import { dataStart, lockTemplate, type LockSpec } from "./template-locks.ts";
 import { sha256Hex } from "./sha256.ts";
 import { WORKSPACE_BUILD_COMMANDS } from "../worker/rust-targets.ts";
@@ -1974,6 +1974,22 @@ export function jevRequestOf(id: JevPromptId): JevRequest {
   return { ...code, questions };
 }
 
+/**
+ * A Claude prompt's text form as it runs now: the active edit with the code's locked blocks, or the code's own when no
+ * edit is active or the edit no longer fits (resolvedTemplate's text with its lock markers). What an edit starts from.
+ */
+export function runningBody(id: ClaudePromptId): string {
+  const code = codeBody(id);
+  const row = source.base(SAME_TEMPLATE[id] ?? id);
+  return row && !row.follows ? mergeEdit(code, row.body) ?? code : code;
+}
+
+/** The edit state of a prompt that has no stored revision and that nobody may edit: the release default runs. */
+export const codeEditState = (id: string): PromptEditState => ({
+  rev: null, following: true, newerDefault: false, structureChanged: false, mayEdit: false,
+  guidanceSlot: (GUIDANCE_PROMPTS as readonly string[]).includes(id), sameAs: SAME_TEMPLATE[id as ClaudePromptId] ?? null,
+});
+
 /** Whether a prompt id is an interactive one that runs the stored revision of another prompt (its edits are saved on that one). */
 export const sameTemplateOf = (id: ClaudePromptId): ClaudePromptId | null => SAME_TEMPLATE[id] ?? null;
 
@@ -2396,11 +2412,11 @@ function settings(p: ClaudePrompt | JevPrompt): PromptInfo["settings"] {
   return s;
 }
 
-function info(p: ClaudePrompt | JevPrompt): PromptInfo {
+function info(p: ClaudePrompt | JevPrompt, edit: PromptEditState): PromptInfo {
   const base = {
     id: p.id, stage: p.stage, purpose: p.purpose, models: p.models, runner: p.runner,
     placeholders: Object.entries(p.placeholders).map(([name, meaning]) => ({ name, meaning })),
-    output: p.output, validation: p.validation, settings: settings(p), limits: p.limits,
+    output: p.output, validation: p.validation, settings: settings(p), limits: p.limits, edit,
   };
   if (p.runner === "claude") {
     const id = p.id as ClaudePromptId;
@@ -2409,7 +2425,8 @@ function info(p: ClaudePrompt | JevPrompt): PromptInfo {
     return {
       ...base,
       command: (p.sandbox ? sandboxPreview(claudeArgs(id, p.models[0]!, true, undefined, undefined, false, p.lint === true), p.sandbox.workspace === true, p.lint === true) : ["claude", ...claudeArgs(id, p.models[0]!, false, undefined, "<system prompt, shown above>")]).map(shellWord).join(" "),
-      template: stripLocks(p.template),
+      template: resolvedTemplate(id).text,
+      segments: segments(runningBody(id)) ?? [],
       system: parts.system,
       questions: [],
       example: parts.stdin,
@@ -2421,14 +2438,22 @@ function info(p: ClaudePrompt | JevPrompt): PromptInfo {
   return {
     ...base,
     command: ["jev", ...JEV_ARGS].join(" "),
-    template: JSON.stringify(p.request, null, 2),
+    template: JSON.stringify(jevRequestOf(p.id as JevPromptId), null, 2),
+    segments: [],
     system: null,
-    questions: Object.entries(p.request.questions).map(([id, q]) => ({ id, type: q.type, instructions: q.instructions, criteria: q.criteria ?? null })),
+    questions: Object.entries(jevRequestOf(p.id as JevPromptId).questions).map(([id, q]) => ({ id, type: q.type, instructions: q.instructions, criteria: q.criteria ?? null })),
     example: p.id === "areas.jev" ? renderAreaJev(SAMPLE_AREA_ITEM, SAMPLE_AREAS) : p.id === "lint.reference.jev" ? renderReferenceJev(SAMPLE_REFERENCE_LINT[0]!.text) : renderJev(p.id as JevPromptId, pair ? groupPairs(SAMPLE_DUPE_PAIRS)[0]! : item),
     exampleItems: pair ? [groupPairs(SAMPLE_DUPE_PAIRS)[0]!.ref] : p.id === "areas.jev" ? [refOf(SAMPLE_AREA_ITEM)] : p.id === "lint.reference.jev" ? [SAMPLE_REFERENCE_LINT[0]!.ref] : [`${item.repo}#${item.number}`],
   };
 }
 
-export function promptsReport(commit: string | null): PromptsReport {
-  return { commit, prompts: PROMPTS.map(info), comments: COMMENT_TEMPLATES };
+/** One prompt of the Prompts page, or null when `id` is not on it. `edit`: its edit state, which the server reads from the stored revisions. */
+export function promptInfo(id: string, edit: (id: string) => PromptEditState = codeEditState): PromptInfo | null {
+  const p = PROMPTS.find((x) => x.id === id);
+  return p ? info(p, edit(p.id)) : null;
+}
+
+/** The Prompts page. `edit`: each prompt's edit state, which the server reads from the stored revisions; without it, every prompt is its release default and read-only. */
+export function promptsReport(commit: string | null, edit: (id: string) => PromptEditState = codeEditState): PromptsReport {
+  return { commit, prompts: PROMPTS.map((p) => info(p, edit(p.id))), comments: COMMENT_TEMPLATES };
 }

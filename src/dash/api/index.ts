@@ -48,7 +48,7 @@ import * as securityPage from "./security-page.ts";
 import * as insight from "./insight.ts";
 import * as pipeline from "./pipeline.ts";
 import * as outside from "./outside.ts";
-import { prompts } from "./prompts.ts";
+import * as prompts from "./prompts.ts";
 import { next } from "./next.ts";
 import { health } from "./health.ts";
 import { queueSlots } from "../../rank/position.ts";
@@ -508,7 +508,19 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "GET", pattern: "/api/pipeline/outside/held", operator: true, handler: ok(outside.held) },
     { method: "POST", pattern: "/api/pipeline/outside/release", operator: true, handler: ok(outside.releaseAll) },
     { method: "POST", pattern: "/api/items/:repo/:n/release-outside", handler: ok(outside.release) },
-    get("/api/prompts", prompts),
+    get("/api/prompts", prompts.prompts),
+    get("/api/prompts/:id", prompts.prompt),
+    get("/api/prompts/:id/history", prompts.history),
+    get("/api/prompts/:id/diff", prompts.diff),
+    post("/api/prompts/:id/check", prompts.check),
+    post("/api/prompts/:id", prompts.save),
+    post("/api/prompts/:id/rollback", prompts.rollbackPrompt),
+    post("/api/prompts/:id/use-release", prompts.useReleasePrompt),
+    get("/api/prompt-guidance", prompts.guidanceList),
+    get("/api/repos/:repo/guidance", prompts.guidance),
+    post("/api/repos/:repo/guidance", prompts.saveGuidance),
+    post("/api/repos/:repo/guidance/check", prompts.checkGuidance),
+    post("/api/repos/:repo/guidance/rollback", prompts.rollbackGuidance),
     get("/api/agents", agents.list),
     get("/api/agents/refusals", agents.refusals),
     get("/api/agents/:id", agents.detail),
