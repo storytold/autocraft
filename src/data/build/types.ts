@@ -48,14 +48,17 @@ export const isSecurityWorkspace = (w: { owner: string | null }): boolean => w.o
 export const FIX_SESSION_WORKSPACE_OWNER = "fix session";
 /** A PR fix session's workspace: the work its steps keep is stored with them, so its volume is only a warm cache. */
 export const isPrFixSessionWorkspace = (w: { owner: string | null }): boolean => w.owner?.startsWith(`${FIX_SESSION_WORKSPACE_OWNER} `) === true;
-/** The owner prefix of a review's own workspace (`<prefix> <job id or -> <repo>#<n>`, src/fixsession/review.ts). */
+/** The owner prefix of a review's own workspace (`<prefix> <job id, or - and a nonce> <repo>#<n>`, src/fixsession/review.ts). */
 export const REVIEW_WORKSPACE_OWNER = "review";
-/** A review workspace's owner: the job that made it (`-` outside a job) and the PR it reviews. */
-export const reviewWorkspaceOwner = (jobId: number | null, ref: string): string => `${REVIEW_WORKSPACE_OWNER} ${jobId ?? "-"} ${ref}`;
+/**
+ * A review workspace's owner: the job that made it, or outside a job `-` and `nonce` (one per review, so two reviews of one PR
+ * from the command line each keep their own), and the PR it reviews.
+ */
+export const reviewWorkspaceOwner = (jobId: number | null, ref: string, nonce: string): string => `${REVIEW_WORKSPACE_OWNER} ${jobId ?? `-${nonce}`} ${ref}`;
 /** The job of a review's workspace: its id, null when made outside a job, undefined when the workspace is not a review's. */
 export function reviewWorkspaceJob(w: { owner: string | null }): number | null | undefined {
-  const m = /^review (\d+|-) \S+$/.exec(w.owner ?? "");
-  return m ? (m[1] === "-" ? null : Number(m[1])) : undefined;
+  const m = /^review (\d+|-[0-9a-f]*) \S+$/.exec(w.owner ?? "");
+  return m ? (m[1]!.startsWith("-") ? null : Number(m[1])) : undefined;
 }
 
 export type TaskState = "queued" | "claimed" | "running" | "done" | "failed" | "cancelled" | "lost";
