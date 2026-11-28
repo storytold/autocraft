@@ -402,11 +402,13 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     sameRepo(i.head_repo, repo) && d.authorWrites(repo, { author: i.author, author_type: i.author_type, author_id: i.author_id ?? null }, (t) => refresh.soon(ref, t)) !== "no");
   if (operator && state === "OPEN") {
     const legs = operator.legs;
+    const inCi = !!head && legs.some((l) => l.state === "ci" && l.head === head);
+    const ci = inCi ? ciOf(head) : null;
     // A request counts only while GitHub confirmed its maker's write permission within HOLD_MAX, which ends with the clock alone.
     for (const r of operator.requests) if (r.maker_checked_at) refresh.soon(ref, Date.parse(r.maker_checked_at) + HOLD_MAX);
     base.operator = {
       fix: !!head && operator.requests.some((r) => r.from_head === head) ? { attempts: operatorTriesIn(patch.fixups, wfFact?.since) } : null,
-      hold: legs.some((l) => l.state !== "queued"), premerge: !!head && legs.some((l) => l.state === "ci" && l.head === head),
+      hold: legs.some((l) => l.state !== "queued"), premerge: inCi, ...(ci === "unknown" || ci === "pending" ? { ciWait: true } : {}),
     };
   }
   // A fix-up request holds the PR's merge only while the planner can work it: same head, pushable, approved, not conflicting, not a draft, tries left.

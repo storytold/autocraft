@@ -595,29 +595,40 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       const queue = plans.prs.filter((p) => p.facts.ghState !== "CLOSED" && isQueueState(p.plan.state) && mergePermission(p.facts).ok)
         .map((p) => ({ repo: p.facts.repo, number: p.facts.number, state: p.plan.state, eligible: p.plan.eligible }));
       const due = new Set((await planned(db, "merge", { plans })).map((p) => p.facts.repo));
-      const batches = new Set(await batchesDue(db));
+      const batches = await batchesDue(db);
       // A repo whose last batches could not be published starts no batch until its backoff ends (single merges go on): the planner wakes then.
       for (const at of due.size ? (await publishBackoffs(db, new Date(), [...due])).values() : []) ctx.wake?.push(at);
       const out: Candidate[] = [];
+      // No other stage refreshes a PR that waits only for CI or for GitHub to compute its mergeable state: a queue entry waiting for CI, a PR
+      // whose approved merge waits in ci for CI the stored checks do not settle (src/preapproval), or a red head due for its comparison with a red main. A due merge job reads only the PRs it merges,
+      // so these are read whatever else the repo has going on; the members of a due batch are left to its merge job, which reads them with the batch PR.
+      const ciWaits = new Map<string, Set<string>>();
+      const waits = (repo: string, number: number): void => {
+        const ref = `${repo}#${number}`;
+        if (!batches.get(repo)?.has(ref)) ciWaits.set(repo, (ciWaits.get(repo) ?? new Set()).add(ref));
+      };
+      for (const e of queue) if (e.state === "waiting-ci") waits(e.repo, e.number);
+      for (const p of plans.prs) if (p.facts.ghState === "OPEN" && p.facts.operator?.ciWait) waits(p.facts.repo, p.facts.number);
+      // A red head due for its comparison with a red main (src/mainci/no-new.ts), in any queue state: the checks job makes it.
+      for (const p of plans.prs) if (p.facts.ghState === "OPEN" && p.facts.vsMain && "comparing" in p.facts.vsMain && p.facts.vsMain.at === null) waits(p.facts.repo, p.facts.number);
       // A merge job that advanced a batch runs again at once; one that only watched waits.
       const later = async (step: string, repo: string): Promise<boolean> => {
         const last = await lastJobEnd(db, step, repo);
         if (last && (step === "checks" || wasIdle(last)) && Date.now() - Date.parse(last.endedAt) < WAITING_CI_RECHECK_MS) {
           ctx.wake?.push(Date.parse(last.endedAt) + WAITING_CI_RECHECK_MS);
-          const n = queue.filter((e) => e.repo === repo && e.state === "waiting-ci").length;
+          const n = ciWaits.get(repo)?.size ?? 0;
           (ctx.notes ??= {})[step] = n ? `waiting for CI on ${n} PR${n === 1 ? "" : "s"} in ${repo}` : `waiting for the batch PR's CI in ${repo}`;
           return true;
         }
         return false;
       };
-      for (const repo of flightFirst(plans, [...new Set([...due, ...batches])].sort())) {
+      for (const repo of flightFirst(plans, [...new Set([...due, ...batches.keys()])].sort())) {
         const poll = batches.has(repo);
         if (poll && await later("merge", repo)) continue;
         // A batch its repo left behind is closed wherever the repo is tracked.
         out.push({ step: "merge", params: { repo }, ...(poll ? { poll, scope: "cleanup" as const } : {}) });
       }
-      // No other stage refreshes a PR that waits only for CI or for GitHub to compute its mergeable state.
-      const waiting = (await filterSeq([...new Set(queue.filter((e) => e.state === "waiting-ci").map((e) => e.repo))], async (repo) => !due.has(repo) && !batches.has(repo) && !await later("checks", repo))).sort();
+      const waiting = (await filterSeq([...ciWaits.keys()], async (repo) => !await later("checks", repo))).sort();
       for (const repo of waiting) out.push({ step: "checks", params: { repo }, poll: true, gate: { step: "merge", params: { repo }, poll: true } });
       // A push no running job is at any more: its PR's head, read with the checks, tells what became of it (src/prepush/settle.ts).
       const pushing = plans.prs.filter((p) => p.facts.pushing);
