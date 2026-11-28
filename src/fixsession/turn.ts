@@ -284,7 +284,7 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
   const pod = env.pod?.(ws.workspaceId) ?? workspacePod(db, ws.workspaceId, env.cancelled, env.api);
   const check = env.checks ?? runChecks;
   // The adopted turn goes on only on the tree it worked on; on a new or remade workspace the step starts over.
-  const kept = resume && (ws.how === "kept" || ws.how === "resumed");
+  const kept = resume && !ws.treeLost;
   if (!kept) {
     round = r = null;
     const docs = await putRepoDocs(env, ws.workspaceId, await (env.agents ?? ((repo) => defaultAgents(db, repo)))(s.repo));
