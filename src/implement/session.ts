@@ -11,6 +11,8 @@ import type { Db } from "../db/index.ts";
 import { loadEnvs } from "../data/build/index.ts";
 import { loadImplementationView } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
+import { loadWorkflowHistory } from "../data/workflow/rows.ts";
+import { droppedTitles } from "../workflow/work.ts";
 import { loadCallPrompt } from "../data/runners/index.ts";
 import { ensurePrompts } from "../data/prompts/index.ts";
 import { artifactDir } from "../build/artifacts.ts";
@@ -105,10 +107,13 @@ export async function sessionInput(db: Db, impl: Implementation, sha: string, ea
   const [items, view] = await db.together(() => Promise.all([loadItems(db, [impl], "text"), loadImplementationView(db, ref)]));
   const it = items.get(ref);
   const p = impl.plan;
+  // A part a maintainer dropped from the plan question (same title, as in a revision's fixes) is not part of the task.
+  const dropped = droppedTitles((await loadWorkflowHistory(db, [impl])).get(`${impl.repo}#${impl.number}`)?.at(-1)?.plan ?? []);
+  const parts = (p.workflow?.parts ?? []).flatMap((x, i) => (dropped.includes(x.title.toLowerCase()) ? [] : [{ n: i + 1, title: x.title, files: x.files }]));
   return {
     ref: `${impl.repo}#${impl.number}`, repo: impl.repo, sha,
     issue: { title: it?.title ?? "", body: (it?.body ?? "").slice(0, ISSUE_BODY_MAX), author: it?.author ?? null },
-    plan: { kind: p.kind, summary: p.summary, plan: impl.planMd ?? p.plan, acceptance: p.acceptance, tests: p.verification.tests, app: p.verification.app, risks: p.risks },
+    plan: { kind: p.kind, summary: p.summary, plan: impl.planMd ?? p.plan, acceptance: p.acceptance, tests: p.verification.tests, app: p.verification.app, risks: p.risks, ...(p.workflow?.parts.length ? { parts } : {}) },
     guidance: view?.impl.id === impl.id ? attemptGuidance(view.rounds).map((g) => g.text) : [],
     ...(earlier && { earlier }),
   };
