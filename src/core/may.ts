@@ -94,7 +94,7 @@ export function mayMerge(f: MergeInputs): MayResult {
   return refuse("not-handed-over", w.leg ? "The merge waits for the workflow's steps to hand it over." : "The workflow's merge is not under way; it merges once the workflow hands it over.");
 }
 
-/** Whose merge the pull request of an implementation is, once its issue's workflow is approved; null before. */
+/** Who approved the workflow's merge (an implementation's pull request merges for them); null before anyone has. */
 export const mergesFor = (w: Pick<ItemWorkflow, "approvedBy"> | null | undefined): string | null => w?.approvedBy ?? null;
 
 export function mayPush(f: {

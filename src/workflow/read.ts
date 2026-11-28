@@ -15,6 +15,7 @@
 // hash.
 import { createHash } from "node:crypto";
 import { runModelStep, type ClaudeStep, type JevStep } from "../agents/step.ts";
+import { mergesFor } from "../core/may.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { removeRunTexts } from "../data/inference/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
@@ -168,7 +169,7 @@ async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boo
     const live = isLive(wf);
     states.push({ kind: it.kind === "pr" ? "pr" : "issue", workflow: live ? wf : null, held: wf?.state === "stopped" ? wf : null });
     choice.push({
-      kind: it.kind === "pr" ? "pr" : "issue", live, held: wf?.state === "stopped", approved: !!wf?.approvedBy && live,
+      kind: it.kind === "pr" ? "pr" : "issue", live, held: wf?.state === "stopped", approved: live && mergesFor(wf) !== null,
       rec: rec ? { text: veiled ? null : recommendationText(rec), merges: rec.merges } : null,
       parts: rec && !veiled ? wf!.plan.filter((p) => p.state === "planned").map((p) => ({ n: p.n, title: p.title })) : [],
     });
