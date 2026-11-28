@@ -32,9 +32,13 @@ setPromptSource({
   guidance: (repo) => held?.guidance.get(repo)?.body ?? "",
 });
 
+/** The waits before the second and third try of a read. */
+const RETRY_MS = [100, 300];
+
 async function retried<T>(fn: () => Promise<T>): Promise<T> {
   let last: unknown;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i <= RETRY_MS.length; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, RETRY_MS[i - 1]));
     try {
       return await fn();
     } catch (e) { last = e; }
@@ -51,15 +55,35 @@ function hold(db: Db, rows: PromptRevision[], seq: number | null, at: number): v
   held = { db, base, guidance, seq, at };
 }
 
+/**
+ * A failed read keeps the rows held for `db` when nothing says they changed (a Postgres safety re-read without a notification,
+ * a SQLite counter that could not be read), and is tried again on the next ensure. It throws when there are no rows for `db`
+ * or a save is known to have changed them.
+ */
 async function refresh(db: Db): Promise<void> {
+  const keep = (e: unknown): void => {
+    console.log(`prompt revisions: ${(e as Error).message}; the rows read earlier stay in use`);
+  };
   if (db.dialect === "postgres") {
     const startedAt = Date.now(), inv = invalidations;
-    const rows = await retried(() => loadActive(db));
-    hold(db, rows, null, inv === invalidations ? startedAt : 0);
+    const kept = held?.db === db && held.at > 0;
+    try {
+      hold(db, await retried(() => loadActive(db)), null, inv === invalidations ? startedAt : 0);
+    } catch (e) {
+      if (!kept || held?.db !== db || held.at === 0) throw e;
+      keep(e);
+    }
     return;
   }
   // The counter is read before the rows, so a save between the two only makes the next ensure read again.
-  const seq = (await retried(() => db.seqs(["prompts"]))).prompts ?? 0;
+  let seq: number;
+  try {
+    seq = (await retried(() => db.seqs(["prompts"]))).prompts ?? 0;
+  } catch (e) {
+    if (held?.db !== db) throw e;
+    keep(e);
+    return;
+  }
   if (held?.db === db && held.seq === seq) return;
   hold(db, await retried(() => loadActive(db)), seq, 0);
 }

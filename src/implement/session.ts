@@ -102,6 +102,8 @@ export type TurnRequest = {
   /** A lint fix turn: the report its reply's fields go into, and the problems it was sent. */
   base?: SessionReport;
   problems?: LintProblem[];
+  /** A new session's system prompts and version, rendered with its stdin (sessionTask), so all three are one revision. */
+  prompt?: SessionPrompt;
 };
 
 // ---- the input ---------------------------------------------------------------------------------------------------
@@ -130,6 +132,16 @@ export const renderSession = (input: SessionInput): { system: string; stdin: str
 };
 /** The system prompt as it runs now, with fetch_dependencies (the workspace's environment has a crate mirror) or without, and its version. */
 const systemOf = (mirror: boolean): { system: string; version: string } => renderSession({ ...SAMPLE_SESSION[0]!, ...(mirror && { fetch_dependencies: true }) });
+
+/** The two system prompts of a new session (queueTurn picks one by the workspace's environment) and the version both record. */
+export type SessionPrompt = { version: string; mirror: string; none: string };
+
+/** A new session's task on stdin and its system prompts, from the prompt revisions as they are now. */
+export async function sessionTask(db: Db, input: SessionInput): Promise<{ stdin: string; prompt: SessionPrompt }> {
+  await ensurePrompts(db);
+  const task = renderSession(input), mirror = systemOf(true), none = systemOf(false);
+  return { stdin: task.stdin, prompt: { version: task.version, mirror: mirror.system, none: none.system } };
+}
 
 /** Whether environment `envId` has a crate mirror, so its session may fetch dependencies. */
 async function hasCrateMirror(db: Db, envId: string | undefined): Promise<boolean> {
@@ -245,12 +257,14 @@ export async function copyShots(pod: Pod, implementationId: number, report: Sess
 export async function queueTurn(db: Db, calls: CallDeps, t: TurnRequest): Promise<ImplementationRound> {
   const follow = t.parentId !== undefined;
   const limits = follow ? FOLLOW_UP_CALL : SESSION_CALL;
-  await ensurePrompts(db);
   // A follow-up keeps its session's system prompt and version, so a prompt saved meanwhile reaches only new sessions.
   const pinned = follow ? await loadCallPrompt(db, t.parentId!) : null;
+  if (!t.prompt && pinned?.system == null) await ensurePrompts(db);
   return await db.write(async () => {
     const w = await getWorkspace(db, t.workspaceId);
-    const { system, version } = pinned?.system != null ? { system: pinned.system, version: pinned.promptVersion } : systemOf(await hasCrateMirror(db, w?.env_id));
+    const mirror = await hasCrateMirror(db, w?.env_id);
+    const { system, version } = pinned?.system != null ? { system: pinned.system, version: pinned.promptVersion }
+      : t.prompt ? { system: mirror ? t.prompt.mirror : t.prompt.none, version: t.prompt.version } : systemOf(mirror);
     const callId = await calls.queue(db, {
       workspaceId: t.workspaceId, promptId: SESSION_PROMPT_ID, promptVersion: version, model: SESSION_MODEL, tier: promptTier(SESSION_PROMPT_ID), effort: PROMPT.effort,
       stdin: t.stdin, system, timeoutSeconds: limits.timeoutSeconds, maxTurns: limits.maxTurns, items: [{ repo: t.impl.repo, number: t.impl.number }],

@@ -195,7 +195,7 @@ async function call<I, V, C>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C
   // The request is rendered after the prompt cache is up to date, so its text and recorded version are the same revision.
   await ensurePrompts(db);
   const { item, body } = step.request(input, opts.ctx as C);
-  const p = await askJev(step.id, item as never, db, body ?? renderJev(step.id, item as Item | DupeAsk), opts.usage === undefined);
+  const p = await askJev(step.id, item as never, db, { body: body ?? renderJev(step.id, item as Item | DupeAsk), version: promptVersion(step.id) }, opts.usage === undefined);
   opts.onJevProc?.(p);
   type Json = { answers?: unknown; usage?: { input_tokens?: number; output_tokens?: number } };
   let parsed: unknown = null;

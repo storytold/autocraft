@@ -38,6 +38,7 @@ import { loadItems as loadMirrorItems, loadRepos } from "../data/mirror/index.ts
 import { keepEarlierUsage, loadRunsById, recordUsage, type UsageRow } from "../data/inference/index.ts";
 import { saveJevChunk, saveVerdicts as saveVerdictRows, type JevFailed, type VerdictInput } from "../data/triage/index.ts";
 import { ensurePrompts, guidanceOf } from "../data/prompts/index.ts";
+import { loadCallPrompt } from "../data/runners/index.ts";
 import { effect } from "../db/effects.ts";
 
 export function loadRefs(file: string): { repo: string; number: number }[] {
@@ -501,6 +502,8 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
   const resume = ses?.resume;
   const parent = resume ? remoteParent(resume.session) : null;
   if (resume && (!sandboxed || parent === null || resume.session.checkout !== opts.checkout)) return undefined;
+  // A resumed session goes on with the prompt it started with: its turns record that call's version.
+  const version = resume ? (await loadCallPrompt(db, parent!))?.promptVersion ?? parts.version : parts.version;
   const checkTool = sandboxed && opts.check !== undefined && p.sandbox?.check === true ? opts.check : undefined;
   try {
     const workspace = sandboxed && p.sandbox?.workspace === true;
@@ -519,9 +522,9 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
     const turn = async (stdin: string, after: number | null, lean = false, first = false): Promise<{ reply: Turned; callId: number } | "failed" | "unclaimed"> => {
       const maxWaitMs = first && opts.firstWaitMs !== undefined ? Math.min(opts.firstWaitMs, opts.maxWaitMs ?? Infinity) : opts.maxWaitMs;
       const callId = await enqueueCall(db, {
-        promptId: id, promptVersion: parts.version, tier, effort: p.effort, askedModel: model, items, level, maxAttempts: p.limits.attempts, ...(after !== null && { parentId: after }), ...(reference && { referenceRepo: basename(opts.reference!) }), ...(opts.forLogin !== undefined && { forLogin: opts.forLogin }),
+        promptId: id, promptVersion: version, tier, effort: p.effort, askedModel: model, items, level, maxAttempts: p.limits.attempts, ...(after !== null && { parentId: after }), ...(reference && { referenceRepo: basename(opts.reference!) }), ...(opts.forLogin !== undefined && { forLogin: opts.forLogin }),
         bundle: {
-          promptId: id, promptVersion: parts.version, tier, effort: p.effort, timeoutSeconds, maxTurns: sandboxed ? (lean ? FIX_TURN_MAX_TURNS : p.sandbox!.maxTurns) : null,
+          promptId: id, promptVersion: version, tier, effort: p.effort, timeoutSeconds, maxTurns: sandboxed ? (lean ? FIX_TURN_MAX_TURNS : p.sandbox!.maxTurns) : null,
           stdin: stdin === parts.stdin ? stdin : stripMarks(stdin), system: parts.system, mounts, mcpServers: servers, keepSession: persist, ...(after !== null && { resume: { parentCallId: after } }),
           // The task budget is added when a Task Runner takes the call, for a Claude Code that takes the flag (forHarness).
           hints: { claude: { args: withoutTaskBudget(lean ? noToolArgs(args) : args), ...(agents && { agents }) } },
@@ -581,12 +584,15 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
   }
 }
 
-/** Sends a registered Jev request (src/prompts) for one item to `jev ask`; the same rule as `askClaude`. Recorded as an agent run without an account. */
-export async function askJev(id: JevPromptId, item: Item | DupePair | DupeAsk | { ref: string }, db: Db, given?: string, perCallUsage = true): Promise<Proc> {
+/**
+ * Sends a registered Jev request (src/prompts) for one item to `jev ask`; the same rule as `askClaude`. Recorded as an agent run without an account.
+ * `given`: a body the caller rendered, with the prompt version it was rendered at; without, the request is rendered here.
+ */
+export async function askJev(id: JevPromptId, item: Item | DupePair | DupeAsk | { ref: string }, db: Db, given?: { body: string; version: string }, perCallUsage = true): Promise<Proc> {
   effect("model-call", id);
-  await ensurePrompts(db);
-  const body = given ?? renderJev(id, item as Item | DupeAsk);
-  const runId = await startJevRun(db, { promptId: id, promptVersion: promptVersion(id), provider: "jev", model: "jev", items: refsOf([item]), prompt: body });
+  if (!given) await ensurePrompts(db);
+  const body = given?.body ?? renderJev(id, item as Item | DupeAsk), version = given?.version ?? promptVersion(id);
+  const runId = await startJevRun(db, { promptId: id, promptVersion: version, provider: "jev", model: "jev", items: refsOf([item]), prompt: body });
   const start = now();
   try {
     const cf = jevCloudflareConfig();
