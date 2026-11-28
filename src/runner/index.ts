@@ -14,6 +14,7 @@ import { DEFAULT_PER_DAY, isDraining, isEnabled, LimitError, pipelineState, rese
 import { enqueue, JobError, listJobs, requestCancel } from "./jobs.ts";
 import { MIN_INTERVAL_KEY, reviewMinInterval, setReviewMinInterval } from "../review/gate.ts";
 import { PICK_MINUTES_KEY, pickMinutes, setPickMinutes } from "../remote/picks.ts";
+import { fixSessionsSetting, fixSessionsText, setFixSessions } from "../fixsession/switch.ts";
 import { ParallelError, setStepParallel, stepParallelSetting } from "./concurrency.ts";
 import { DEFAULT_MAX_JOBS, JOB_CAPACITY_MARK, Runner, runnerLockPath } from "./runner.ts";
 import { capacityOf, capacityText } from "./capacity.ts";
@@ -299,6 +300,7 @@ const PIPELINE_USAGE = `usage: autocraft-server pipeline on [--if-draining] | of
        autocraft-server pipeline parallel [<N|none>]
        autocraft-server pipeline review-interval [<minutes>]
        autocraft-server pipeline pick-minutes [<minutes>]
+       autocraft-server pipeline fix-sessions [<step,...>|none] [--repos <repo,...>|all]
        autocraft-server pipeline resume <fixup|cifix|implement|merge>[:<repo>] | outside-surge`;
 
 // Recorded as `cli`: only someone with a shell on the host can run this.
@@ -343,6 +345,23 @@ async function pipeline(args: string[]): Promise<void> {
       die((e as Error).message);
     }
     console.log(`${PICK_MINUTES_KEY} ${await pickMinutes(db)}`);
+    return;
+  } else if (sub === "fix-sessions") {
+    const at = rest.indexOf("--repos");
+    const stepsArg = at === 0 ? undefined : rest[0];
+    const reposArg = at >= 0 ? rest[at + 1] : undefined;
+    if (rest.length > (stepsArg === undefined ? 0 : 1) + (at >= 0 ? 2 : 0) || (at >= 0 && !reposArg)) die(PIPELINE_USAGE);
+    try {
+      let s = await fixSessionsSetting(db);
+      if (stepsArg !== undefined || reposArg !== undefined) {
+        const steps = stepsArg === undefined ? s.steps : stepsArg === "none" ? [] : stepsArg.split(",").map((x) => x.trim()).filter(Boolean);
+        const repos = reposArg === undefined ? s.repos : reposArg === "all" ? null : reposArg.split(",").map((x) => x.trim()).filter(Boolean);
+        s = await setFixSessions(db, { steps, repos }, "cli");
+      }
+      console.log(fixSessionsText(s));
+    } catch (e) {
+      die((e as Error).message);
+    }
     return;
   } else if (sub === "resume") {
     if (rest.length !== 1) die(PIPELINE_USAGE);

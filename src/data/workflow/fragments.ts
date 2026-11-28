@@ -189,7 +189,7 @@ const ENDED_BY_PERSON = ["stopped", "backlog", "closed"];
  * A person ended the item: its newest workflow, or the newest of the issue a PR was opened for (speaksFor), whichever is newer, is stopped,
  * closed or in the backlog (loadEndedWorkflows is the set form).
  */
-function endedByPerson(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Expression<SqlBool> {
+export function endedByPerson(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Expression<SqlBool> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
   const own = t.selectFrom("main.item_workflows as ew").select(["ew.id as id", "ew.state as state"]).where("ew.repo", "=", r).where("ew.number", "=", n);
   const ofPr = t.selectFrom("main.implementations as ei").innerJoin("main.item_workflows as ew", (j) => j.onRef("ew.repo", "=", "ei.repo").onRef("ew.number", "=", "ei.number"))

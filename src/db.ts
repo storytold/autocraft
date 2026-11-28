@@ -498,6 +498,11 @@ const STATE_COLUMNS: [table: string, column: string, type: string][] = [
   ["verifications", "errors", "INTEGER NOT NULL DEFAULT 0"],
   // The diff size cap a too-large review hold was made under: a higher cap reviews the head again.
   ["opus_reviews", "size_cap", "INTEGER"],
+  // The fix session turn (fix_session_turns.id) that wrote a step's stored patch: lint findings go back to that turn's session.
+  ["fixups", "session_turn", "INTEGER"],
+  ["ci_fixes", "session_turn", "INTEGER"],
+  ["conflict_merges", "session_turn", "INTEGER"],
+  ["security_fix_rounds", "session_turn", "INTEGER"],
 ];
 
 const STATE_INDEXES = [

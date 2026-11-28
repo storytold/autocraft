@@ -12,6 +12,7 @@ import { loadStageLimits } from "./limits.ts";
 import { loadTrackedRepos } from "./repos.ts";
 import { loadTrips } from "./trips.ts";
 import { DEFAULT_OPTIONAL_CHECKS } from "../../core/rules.ts";
+import { FIX_STEPS, type FixStep } from "../fixsession/types.ts";
 import type { Config, ControlSnapshot, LiveConfig, RepoConfig, SettingDef, SettingKey, SettingPatch, SettingRow, SettingType } from "./types.ts";
 
 // ---- the registry ------------------------------------------------------------------------------------------------------
@@ -36,7 +37,8 @@ const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is
 /** GitHub's login rules: letters, digits and single hyphens, not starting or ending with one, at most 39 characters. */
 const MENTION = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*$/;
 const REPO_LIST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
-const stepParallelText = (raw: string | undefined): string => {
+export type FixSessionsSetting = { steps: FixStep[]; repos: string[] | null };
+const stepParallelText =(raw: string | undefined): string => {
   if (raw === "none") return raw;
   const n = Number(raw);
   return Number.isInteger(n) && n >= 1 && n <= 1000 ? String(n) : "1";
@@ -97,6 +99,14 @@ export const SETTINGS = {
   planShadow: reg<"on" | "off">("plan_shadow", "text", "off", { owner: "planner" }, (r) => (r === "on" ? "on" : "off")),
   /** The tracked repo the hourly self-evaluation reads and files its issues on (src/eval); null: the evaluation is off. */
   evalRepo: reg<string | null>("eval_repo", "text", null, { owner: "eval" }, (r) => { const v = r?.trim(); return v && REPO_LIST_NAME.test(v) ? v : null; }),
+  /** The fix steps that work in fix sessions (src/fixsession), and the repos they do it in (null: every repo). */
+  fixSessions: reg<FixSessionsSetting>("fix_sessions", "json", { steps: [], repos: null }, { owner: "fixup" }, (r) => {
+    const v = jsonOf(r) as { steps?: unknown; repos?: unknown } | undefined;
+    if (!v || typeof v !== "object") return { steps: [], repos: null };
+    const steps = FIX_STEPS.filter((s) => strings(v.steps).includes(s));
+    const repos = Array.isArray(v.repos) ? [...new Set(strings(v.repos).filter((n) => REPO_LIST_NAME.test(n)))].sort() : null;
+    return { steps, repos };
+  }),
   /** The instance-wide build feature switch (`build_feature:scan-tests`). */
   scanTestsEnabled: reg("build_feature:scan-tests", "bool", false, { owner: "build", shown: false }, (r) => r === "on"),
 };

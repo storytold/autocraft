@@ -1239,7 +1239,7 @@ CREATE INDEX IF NOT EXISTS workspace_calls_ws ON workspace_calls(workspace_id, i
 -- `prompt` is operator text: it goes only into the session's model call, never into job params or logs.
 CREATE TABLE IF NOT EXISTS workspace_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT,                          -- what the session is for: try (an operator's test session)
+  kind TEXT,                          -- what the session is for: try (an operator's test session) | implement | fix | security-fix
   repo TEXT NOT NULL,
   base_sha TEXT NOT NULL,
   item INTEGER NOT NULL,              -- the issue or PR in repo the session works for
@@ -1511,6 +1511,48 @@ CREATE TABLE IF NOT EXISTS implementation_rounds (
 );
 CREATE INDEX IF NOT EXISTS implementation_rounds_of ON implementation_rounds(implementation_id, id);
 INSERT OR IGNORE INTO stage_limits (step, per_day) VALUES ('implement', NULL);
+
+-- Fix sessions (src/fixsession): one model session per PR (kind pr) or security finding (kind security), kept in the item's
+-- workspace and continued turn by turn by the fix-up, CI fix, conflict and security fix steps. One live session per item.
+CREATE TABLE IF NOT EXISTS fix_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,                 -- pr | security
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,            -- the PR, or the security finding
+  workspace_id INTEGER,
+  head TEXT,                          -- the commit the workspace's base holds: the PR head, a merge commit or a pinned sha
+  last_call_id INTEGER,               -- remote_calls.id of the turn the next follow-up continues
+  model TEXT,
+  turns INTEGER NOT NULL DEFAULT 0,   -- turns sent on the session
+  cost_usd REAL NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'live', -- live | ended
+  end_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  ended_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS fix_sessions_live ON fix_sessions(kind, repo, number) WHERE state = 'live';
+-- The turns of a fix session: one model call each, written in the transaction that queues the call.
+CREATE TABLE IF NOT EXISTS fix_session_turns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  step TEXT NOT NULL,                 -- fixup | cifix | conflict | security
+  purpose TEXT NOT NULL,              -- start | step | findings | lint | undo | report | fresh
+  head TEXT,                          -- the commit the turn's workspace base held
+  call_id INTEGER,                    -- remote_calls.id
+  parent_id INTEGER,                  -- the call a follow-up continues
+  outcome TEXT NOT NULL DEFAULT 'queued', -- queued | done | failed | unclaimed | withdrawn
+  report TEXT,                        -- JSON: the session's report
+  error TEXT,
+  turns INTEGER,                      -- the call's model turns
+  cost_usd REAL,
+  tool_calls INTEGER,
+  shell_ms INTEGER,
+  diff_hash TEXT,                     -- of the diff collected from the workspace after the turn
+  created_at TEXT NOT NULL,
+  settled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS fix_session_turns_of ON fix_session_turns(session_id, id);
 
 -- Work rank of an open item (src/rank): level, type, size and reach in one sortable integer, recomputed
 -- by the rank step from stored results, without a model. breakdown is JSON with each part.
