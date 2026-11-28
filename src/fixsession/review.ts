@@ -125,9 +125,10 @@ export async function inReviewWorkspace<T>(db: Db, deps: ReviewWorkspaceDeps | n
     }
     const reused = id !== null;
     if (id === null) {
-      const full = await noSpareSlot(db, envId);
-      if (full) return full;
-      id = await createWorkspace(db, { repo: item.repo, baseSha: at, envId, owner });
+      // Counted and taken in one write, so parallel reviews on the environment cannot both take the last spare slot.
+      const made = await db.write(async () => await noSpareSlot(db, envId) ?? await createWorkspace(db, { repo: item.repo, baseSha: at, envId, owner }));
+      if (typeof made === "string") return made;
+      id = made;
       log(`  ${ref}: review workspace ${id} requested on ${envId} at ${short(at)}`);
     }
     const row = await waitReady(env, id, until);
