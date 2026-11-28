@@ -41,7 +41,33 @@ export function cargoLockGitRepos(text: string): string[] {
 const REPOS_PER_QUERY = 30;
 
 /** One aliased field: its variables (renamed per alias), their declarations and the field, both naming the variables `$<name>`. */
-type Field = { vars: Record<string, string>; decl: string; body: string };
+export type Field = { vars: Record<string, string>; decl: string; body: string };
+
+/** The visibility of `owner/repo`. */
+export const visibilityField = (repo: string): Field => {
+  const [owner, name] = repo.split("/") as [string, string];
+  return { vars: { o: owner, n: name }, decl: "$o: String!, $n: String!", body: "repository(owner: $o, name: $n) { visibility }" };
+};
+
+/** The Cargo.lock blob of a repo at a commit. */
+export const lockField = (owner: string, name: string, sha: string): Field => ({
+  vars: { o: owner, n: name, e: `${sha}:Cargo.lock` },
+  decl: "$o: String!, $n: String!, $e: String!",
+  body: "repository(owner: $o, name: $n) { object(expression: $e) { __typename ... on Blob { text isTruncated } } }",
+});
+
+/** The query that asks each field under its own alias `a<j>`, with its variables renamed to match. */
+export function aliasedQuery(fs: Field[]): { query: string; vars: Record<string, string> } {
+  const vars: Record<string, string> = {};
+  const decl: string[] = [], parts: string[] = [];
+  fs.forEach((f, j) => {
+    const rename = (t: string) => t.replace(/\$([a-z]+)\b/g, (_m, v: string) => `$${v}${j}`);
+    for (const [k, v] of Object.entries(f.vars)) vars[`${k}${j}`] = v;
+    decl.push(rename(f.decl));
+    parts.push(`a${j}: ${rename(f.body)}`);
+  });
+  return { query: `query(${decl.join(", ")}) {\n  rateLimit { cost remaining resetAt }\n  ${parts.join("\n  ")}\n}`, vars };
+}
 type Answer = { node: Record<string, unknown> | null } | { error: string };
 
 const message = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, 200);
@@ -53,15 +79,8 @@ const message = (e: unknown): string => String((e as Error)?.message ?? e).slice
  */
 async function perAlias(client: Querier, fields: Field[]): Promise<Answer[]> {
   const ask = async (fs: Field[]): Promise<Answer[]> => {
-    const vars: Record<string, string> = {};
-    const decl: string[] = [], parts: string[] = [];
-    fs.forEach((f, j) => {
-      const rename = (t: string) => t.replace(/\$([a-z]+)\b/g, (_m, v: string) => `$${v}${j}`);
-      for (const [k, v] of Object.entries(f.vars)) vars[`${k}${j}`] = v;
-      decl.push(rename(f.decl));
-      parts.push(`a${j}: ${rename(f.body)}`);
-    });
-    const data = await client.query(`query(${decl.join(", ")}) {\n  rateLimit { cost remaining resetAt }\n  ${parts.join("\n  ")}\n}`, vars) as Record<string, Record<string, unknown> | null | undefined>;
+    const { query, vars } = aliasedQuery(fs);
+    const data = await client.query(query, vars) as Record<string, Record<string, unknown> | null | undefined>;
     return fs.map((_, j) => ({ node: data[`a${j}`] ?? null }));
   };
   try {
@@ -113,10 +132,7 @@ async function publicRepos(db: Db, client: Querier, repos: string[]): Promise<Se
   }
   for (let i = 0; i < ask.length; i += REPOS_PER_QUERY) {
     const chunk = ask.slice(i, i + REPOS_PER_QUERY);
-    const answers = await perAlias(client, chunk.map((r) => {
-      const [owner, name] = r.split("/") as [string, string];
-      return { vars: { o: owner, n: name }, decl: "$o: String!, $n: String!", body: "repository(owner: $o, name: $n) { visibility }" };
-    }));
+    const answers = await perAlias(client, chunk.map(visibilityField));
     chunk.forEach((r, j) => {
       const a = answers[j]!;
       if ("node" in a && a.node?.visibility === "PUBLIC") out.add(r);
@@ -132,11 +148,7 @@ export async function refreshMirrorSources(db: Db, client: Querier, heads: Head[
   const due = heads.filter((h) => stored.get(h.repo)?.sha !== h.sha);
   for (let i = 0; i < due.length; i += LOCKS_PER_QUERY) {
     const chunk = due.slice(i, i + LOCKS_PER_QUERY);
-    const answers = await perAlias(client, chunk.map((h) => ({
-      vars: { o: rows.get(h.repo)?.owner ?? DEFAULT_OWNER, n: h.repo, e: `${h.sha}:Cargo.lock` },
-      decl: "$o: String!, $n: String!, $e: String!",
-      body: "repository(owner: $o, name: $n) { object(expression: $e) { __typename ... on Blob { text isTruncated } } }",
-    })));
+    const answers = await perAlias(client, chunk.map((h) => lockField(rows.get(h.repo)?.owner ?? DEFAULT_OWNER, h.repo, h.sha)));
     const read = chunk.map((h, j) => ({ h, was: stored.get(h.repo), got: lockSources(answers[j]!) }));
     // A source already stored was public when it was first named; only new ones are checked.
     const fresh = [...new Set(read.flatMap(({ was, got }) => ("repos" in got ? got.repos.filter((r) => !was?.repos.includes(r)) : [])))];

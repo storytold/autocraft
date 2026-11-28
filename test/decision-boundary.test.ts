@@ -53,6 +53,7 @@ const SHOWS: Record<Kind, readonly string[]> = {
     "src/eval/detect.ts",
     "src/workflow/asked.ts",
     "src/workflow/cli.ts",
+    "src/workflow/read.ts",
     "src/workflow/recommend.ts",
     "src/workflow/status.ts",
   ],
