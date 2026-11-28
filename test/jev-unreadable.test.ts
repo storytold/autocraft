@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { JEV_RETRY_MS, JEV_UNREADABLE_LIMIT, jevAvailable, jevOutage } from "../src/agents/jev.ts";
-import { askJev, setRunner } from "../src/classify/run.ts";
+import { askJev, promptVersion, setRunner } from "../src/classify/run.ts";
 import { connectDb } from "../src/db/open.ts";
 import { SCRATCH } from "./scratch.ts";
 
@@ -12,7 +12,7 @@ test("repeated unreadable Jev answers mark Jev unavailable until a readable answ
   let body = "not json";
   const restore = setRunner(async () => ({ code: 0, stderr: "", stdout: body }));
   const item = { ref: "a#1" };
-  const ask = async () => { await askJev("classify.jev", item, db, "{}"); };
+  const ask = async () => { await askJev("classify.jev", item, db, { body: "{}", version: promptVersion("classify.jev") }); };
   try {
     for (let i = 0; i < JEV_UNREADABLE_LIMIT - 1; i++) await ask();
     assert.equal(await jevAvailable(db), true);

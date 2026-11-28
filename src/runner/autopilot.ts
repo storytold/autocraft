@@ -262,7 +262,7 @@ const cursorOf = async (db: Db, ctx: PlanCtx, name: "review" | "verify"): Promis
  * item-trace bookkeeping and the limits topic (its tables are already read through the jobs topic) do not. `plan-inputs` covers what
  * the plan facts read in tables of the other topics or of none; a table of theirs without a topic says why (noTopic in src/db/plan-inputs.ts).
  */
-export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "workspaces", "access", "github", "plans", "trace", "limits", "security", "discord", "discord-links", "discord-verify", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "remote-room", "remote-calls", "rank-inputs", "workflow-events", "job-ends", "task-ends", "auto-stops", "statement-sources", "chat"].includes(t));
+export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "workspaces", "access", "github", "plans", "trace", "limits", "security", "discord", "discord-links", "discord-verify", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "remote-room", "remote-calls", "rank-inputs", "workflow-events", "job-ends", "task-ends", "auto-stops", "statement-sources", "chat", "prompts"].includes(t));
 
 /**
  * Topics that make the planner due. Ended jobs and returned leases let held-back work start, but are no new input to a lane whose job

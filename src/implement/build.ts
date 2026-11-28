@@ -21,7 +21,7 @@ import { validateImplementation, workspaceDiff } from "./diff.ts";
 import { defaultPrDeps, openImplementationPr } from "./pr.ts";
 import { checkLines, roundDir, runChecks, workspacePod, type CheckRound, type Pod } from "./checks.ts";
 import {
-  awaitTurn, findingsMessage, lintedReport, LOST_REPLY_MESSAGE, needsDependency, queueTurn, realCalls, REPORT_MESSAGE, renderSession, retryStdin, SESSION_MODEL, sessionInput,
+  awaitTurn, findingsMessage, lintedReport, LOST_REPLY_MESSAGE, needsDependency, queueTurn, realCalls, REPORT_MESSAGE, retryStdin, SESSION_MODEL, sessionInput, sessionTask,
   settleOrphan, summaryFixTurn, type CallDeps, type TurnRequest, type TurnRound,
 } from "./session.ts";
 import { applyStuckAnswer, markStuck, opensAsDraft, stuckLine, type DiffCheck, type StuckCause } from "./stuck.ts";
@@ -203,9 +203,9 @@ type Next = { finish: { report: SessionReport; callId: number } } | { turn: Omit
 /** What follows the settled turns of the current workspace: the next turn, or the report the checks go on with. */
 async function nextTurn(run: BuildRun, impl: Implementation, ws: { base: string }, rounds: ImplementationRound[], turns: ImplementationRound[]): Promise<Next> {
   const db = run.db;
-  const input = async (earlier?: Parameters<typeof sessionInput>[3]) => renderSession(await sessionInput(db, impl, ws.base, earlier)).stdin;
+  const input = async (earlier?: Parameters<typeof sessionInput>[3]) => await sessionTask(db, await sessionInput(db, impl, ws.base, earlier));
   const last = turns.at(-1);
-  if (!last) return { turn: { purpose: "start", stdin: await input() } };
+  if (!last) return { turn: { purpose: "start", ...await input() } };
   const r = turnResult(last), checked = checkedAfter(rounds, last);
   if (r.purpose === "lint" && !checked) {
     // The summary's lint turn is settled: the report goes on with the summary it left, from the call that has the session.
@@ -216,13 +216,16 @@ async function nextTurn(run: BuildRun, impl: Implementation, ws: { base: string 
     const tail = turns.filter((x) => turnResult(x).purpose !== "lint").reverse();
     const streak = tail.findIndex((x) => turnResult(x).outcome !== "failed");
     if (r.outcome === "failed" && (streak < 0 ? tail.length : streak) >= 2) throw new Stuck("session-failed", r.error ?? "the call failed");
-    if (r.outcome === "failed" && last.kind === "session") return { turn: { purpose: "retry", stdin: await retryStdin(db, last.callId!, await input()) } };
+    if (r.outcome === "failed" && last.kind === "session") {
+      const t = await input();
+      return { turn: { purpose: "retry", stdin: await retryStdin(db, last.callId!, t.stdin), prompt: t.prompt } };
+    }
     // The follow-up's harness session is gone with its Task Runner, or the follow-up failed: a fresh session on the changes, with what the checks found.
     const lastChecks = rounds.map((x) => x.kind).lastIndexOf("checks");
     const fresh = turns.filter((x) => rounds.indexOf(x) > lastChecks && turnResult(x).purpose === "fresh").length;
     if (fresh >= FRESH_PER_CHECKS) throw new Stuck("session-lost", `the session started over ${fresh} times without reaching the checks; the last turn was ${r.outcome}`);
     const c = checksOf(rounds).at(-1);
-    return { turn: { purpose: "fresh", stdin: await input({ diff_stat: c?.diffStat ?? "", findings: c?.findings ?? [] }) } };
+    return { turn: { purpose: "fresh", ...await input({ diff_stat: c?.diffStat ?? "", findings: c?.findings ?? [] }) } };
   }
   if (!r.report) {
     if (r.purpose === "report" && !r.lost) throw new Stuck("no-report", r.parseError ?? "no report");

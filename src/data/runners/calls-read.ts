@@ -19,6 +19,15 @@ export async function loadCalls(db: Db, ids: number[]): Promise<Map<number, Call
     runId: r.run_id, since: Number(r.since), consumedAt: r.consumed_at, jobId: r.job_id }]));
 }
 
+/** The prompt version and system prompt a call was queued with, or null; `alone` because the bundle holds the whole stdin. */
+export async function loadCallPrompt(db: Db, id: number): Promise<{ promptVersion: string; system: string | null } | null> {
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom("main.remote_calls").select(["prompt_version", "bundle"]).where("id", "=", id), { alone: true, label: "runners.loadCallPrompt" });
+  if (!r) return null;
+  const system = (JSON.parse(r.bundle) as { system?: unknown }).system;
+  return { promptVersion: r.prompt_version, system: typeof system === "string" ? system : null };
+}
+
 /** The reply and its call; `alone` because the reply is up to 4 MB. */
 export async function loadCallReply(db: Db, id: number): Promise<{ promptId: string; items: { repo: string; number: number }[]; reply: string | null; state: string; runId: number | null } | null> {
   const q = queryDb(db);
