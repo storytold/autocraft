@@ -328,6 +328,8 @@ function waitOf(why: Refusal): Wait {
     case "duplicate": return person(why.code, "a maintainer to start it or the item it duplicates");
     case "request-unnamed": return person(why.code, "a maintainer to ask for the fix-up again");
     case "scope": return system(why.code, "not in scope");
+    case "untracked": return system(why.code, "the pipeline to track the item");
+    case "unplanned": return system(why.code, "the plan to have the action again");
     case "author-ask": return { code: why.code, who: "contributor", text: "the author's push" };
     case "pipeline-off": return person(why.code, "the pipeline to be on");
     case "other": return why;
@@ -532,14 +534,14 @@ export function conflictPath(f: PrFacts | null): ConflictPath | null {
   // A PR a person approved for merge is never left to its contributor: that person is asked (conflict-person).
   return path === "contributor" && mergeOwned(f) ? "person" : path;
 }
-/** Who settles the conflict of a PR that is wanted, whatever says so. */
-export function settlesConflict({ conflict: c, pushable }: Pick<PrFacts, "conflict" | "pushable">): ConflictPath {
 /**
  * The conflict path of a PR once a person's fix-up is queued at its head: that fix-up makes the PR wanted (conflictWanted), so the base branch
  * is merged in first also where the review holds it and nobody approved the merge.
  */
 export const fixupConflictPath = (f: PrFacts | null): ConflictPath | null =>
   conflictPath(f && !f.operator?.fix ? { ...f, operator: { hold: false, premerge: false, ...f.operator, fix: { attempts: 0 } } } : f);
+/** Who settles the conflict of a PR that is wanted, whatever says so. */
+export function settlesConflict({ conflict: c, pushable }: Pick<PrFacts, "conflict" | "pushable">): ConflictPath {
   if (!c?.baseOk) return "person";
   switch (c.bucket) {
     // The approval of the merge is the approval of this push as well; `done`: pushed, and the mirror does not show it yet.

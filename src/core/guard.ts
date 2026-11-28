@@ -143,7 +143,7 @@ export async function guardBatchMerge(db: Db, batch: Ref & { head: string }, mem
 export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, login?: string): Promise<GuardedItem | Refused> {
   const name = `${ref.repo}#${ref.number}`;
   const f = await loadItemFact(db, ref.repo, ref.number);
-  if (!f) return { refused: `${name}: not an open item the pipeline tracks` };
+  if (!f) return { refused: `${name}: not an open item the pipeline tracks`, code: "untracked" };
   const plan = decideItem(f);
   const due = plan.actions.find((x) => x.kind === action.kind
     && (action.bucket === undefined || x.params?.bucket === action.bucket)
@@ -151,7 +151,7 @@ export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, logi
     && (action.source === undefined || x.params?.source === action.source));
   const may = mayRun({ facts: f, action: due ?? asAction(action, null) }, by);
   if (!may.ok) return { refused: `${name}: ${may.why.text}`, code: may.why.code };
-  if (!due) return { refused: `${name}: the plan no longer has ${action.kind}${action.bucket ? `:${action.bucket}` : ""} (state ${plan.state}, ${actionsOf(plan)})` };
+  if (!due) return { refused: `${name}: the plan no longer has ${action.kind}${action.bucket ? `:${action.bucket}` : ""} (state ${plan.state}, ${actionsOf(plan)})`, code: "unplanned" };
   return { scope: "item", action, repo: ref.repo, number: ref.number, as: login ? `user:${login}` : "app" } as unknown as GuardedItem;
 }
 
@@ -181,7 +181,7 @@ export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, lo
 /** Lets a stage that starts work on a PR take it (the pipeline's account is assigned): the action the work ends in may run. */
 export async function guardClaim(db: Db, ref: Ref, action: Want, by: By): Promise<GuardedRepo | Refused> {
   const f = await loadPrFact(db, ref.repo, ref.number);
-  if (!f) return { refused: `${ref.repo}#${ref.number}: not an open PR the pipeline tracks` };
+  if (!f) return { refused: `${ref.repo}#${ref.number}: not an open PR the pipeline tracks`, code: "untracked" };
   const may = mayRun({ facts: f, action: asAction(action, f.head) }, by);
   return may.ok ? ({ scope: "repo", need: approvalOf(f, action), repo: ref.repo, as: "app" } as unknown as GuardedRepo) : { refused: `${ref.repo}#${ref.number}: ${may.why.text}` };
 }

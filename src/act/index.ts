@@ -242,8 +242,15 @@ async function closeOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (
   }
 }
 
-/** Gate refusals of an author ask that do not clear by themselves: a person answers again (their command is its own approval). */
-const UNSENT_STAYS: ReadonlySet<RefusalCode> = new Set(["box-identity", "actor-gone", "not-approved"]);
+/**
+ * Gate refusals of an author ask that do not clear by themselves: a person answers again (their command is its own approval). The ones whose
+ * gate text is internal come back with a plain reason.
+ */
+const UNSENT_STAYS: ReadonlySet<RefusalCode> = new Set(["box-identity", "actor-gone", "not-approved", "untracked", "unplanned"]);
+const UNSENT_SAID: Partial<Record<RefusalCode, string>> = {
+  untracked: "the pull request is no longer open in the pipeline",
+  unplanned: "AutoCraft no longer plans to ask the author at this commit",
+};
 
 /**
  * Posts the comment of a workflow's author ask (src/workflow/effects.ts queueAuthorAsk) as the app: only while the workflow still waits
@@ -283,7 +290,7 @@ async function askOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (li
     const g = await guardItem(db, pr, { kind: "act", bucket: "close", id: a.id }, o.by, a.by);
     if ("refused" in g) {
       const why = g.refused.startsWith(`${refOf(a)}: `) ? g.refused.slice(refOf(a).length + 2) : g.refused;
-      if (g.code && UNSENT_STAYS.has(g.code)) return await end(why, ask);
+      if (g.code && UNSENT_STAYS.has(g.code)) return await end(UNSENT_SAID[g.code] ?? why, ask);
       await saveActions(db, [{ id: a.id, state: "pending", reason: `not asked yet: ${why}`, at: at(), was }], { from: ["pending"] });
       await authorAskState(db, a.workflow_id, ask, { unsent: why }, at());
       await say(`author not asked yet: ${why}`);
@@ -292,8 +299,11 @@ async function askOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (li
     if (authorAsk((await listWorkflows(db, { ids: [a.workflow_id] }))[0] ?? null)?.at !== ask.at) return await end("the ask changed", null);
     const w: Writer = { db, login: ACTOR, ...d.app };
     const url = await commentOn(w, g, d.querier, "act-comment", { ...pr, id: live.id }, ask.auto ? { by: "fixed" } : { by: "fixed-operator" }, ask.text, { action: a.id, workflow: a.workflow_id, by: a.by, head: a.head });
-    await saveActions(db, [{ id: a.id, state: "done", reason: null, commentUrl: url, at: at(), was }], { from: ["pending"] });
-    await authorAskState(db, a.workflow_id, ask, "posted", at());
+    // One write: a crash between them would leave the workflow saying it is still asking after the comment is up.
+    await db.write(async () => {
+      await saveActions(db, [{ id: a.id, state: "done", reason: null, commentUrl: url, at: at(), was }], { from: ["pending"] });
+      await authorAskState(db, a.workflow_id, ask, "posted", at());
+    });
     await say("asked the author");
     return { kind: "done" };
   } catch (e) {

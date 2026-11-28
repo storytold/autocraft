@@ -6,7 +6,7 @@ export type Who = "person" | "contributor" | "system";
 /** Why an action that is due may not run. */
 export type RefusalCode =
   | "pipeline-off" | "scope" | "ended" | "duplicate" | "blocked" | "not-approved" | "unaccepted-head" | "not-handed-over"
-  | "actor-gone" | "actor-unknown" | "box-identity" | "request-unnamed" | "repo-approval" | "breaker" | "author-ask" | "other";
+  | "actor-gone" | "actor-unknown" | "box-identity" | "request-unnamed" | "repo-approval" | "breaker" | "author-ask" | "untracked" | "unplanned" | "other";
 
 /** What an item waits on when nothing of it is due. */
 export type WaitCode = RefusalCode
@@ -30,7 +30,8 @@ export type Refusal = Why<RefusalCode>;
 export type Stop = Why<StopCode>;
 
 /** Who settles a refusal of this code. */
-export const refusalWho = (code: RefusalCode): Who => (code === "not-handed-over" || code === "actor-unknown" || code === "scope" ? "system" : code === "author-ask" ? "contributor" : "person");
+export const refusalWho = (code: RefusalCode): Who =>
+  (code === "not-handed-over" || code === "actor-unknown" || code === "scope" || code === "untracked" || code === "unplanned" ? "system" : code === "author-ask" ? "contributor" : "person");
 
 /**
  * Person waits that ask nothing: a person set them on purpose, or their person acts on GitHub, on a switch or at the sign-in, or (the item that
