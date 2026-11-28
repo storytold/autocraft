@@ -10,6 +10,8 @@ import { wholeReplyJson } from "../core/reply-json.ts";
 import { rustTokens, rustTokenSpans } from "../cifix/guard.ts";
 
 export const MAX_CHANGED_LINES = 300;
+/** Characters of a PR's diff a fix-up shows the model (src/fixup/index.ts holds a PR over it without a checkout, and trims it with one); a fix session's task message is held to it too. */
+export const DIFF_CAP = 60_000;
 
 export type PatchCheck = { ok: true; patch: string; files: string[]; changed: number } | { ok: false; reason: string };
 
