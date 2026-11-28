@@ -6,7 +6,7 @@ import { queryDb } from "../../db/query-db.ts";
 import { itemNotMirrored, openItem } from "../mirror/fragments.ts";
 import { endedByPerson } from "../workflow/fragments.ts";
 import type {
-  EndedFixSession, FixSession, FixSessionEnd, FixSessionKind, FixSessionPatch, FixStep, FixTurn, FixTurnOutcome, FixTurnPurpose, FixTurnSettle, NewFixSession, NewFixTurn,
+  EndedFixSession, FixSession, FixSessionEnd, FixSessionKind, FixSessionPatch, FixTurn, FixTurnStep, FixTurnOutcome, FixTurnPurpose, FixTurnSettle, NewFixSession, NewFixTurn,
 } from "./types.ts";
 
 type Raw = Record<string, any>;
@@ -23,7 +23,7 @@ const sessionOf = (r: Raw): FixSession => ({
 });
 
 const turnOf = (r: Raw): FixTurn => ({
-  id: Number(r.id), sessionId: Number(r.session_id), step: r.step as FixStep, purpose: r.purpose as FixTurnPurpose, head: r.head ?? null,
+  id: Number(r.id), sessionId: Number(r.session_id), step: r.step as FixTurnStep, purpose: r.purpose as FixTurnPurpose, head: r.head ?? null,
   callId: num(r.call_id), parentId: num(r.parent_id), outcome: r.outcome as FixTurnOutcome, report: parse(r.report ?? null), error: r.error ?? null,
   turns: num(r.turns), costUsd: num(r.cost_usd), toolCalls: num(r.tool_calls), shellMs: num(r.shell_ms), diffHash: r.diff_hash ?? null,
   createdAt: r.created_at, settledAt: r.settled_at ?? null,

@@ -11,12 +11,15 @@ export type GateOk = { ok: true; patch: string; files: string[]; changed: number
 export type GateResult = GateOk | { ok: false; problems: string[] };
 
 type Common = { scripts: BuildScripts; /** A quiet pull request: the added lines may not name what the fix protects against. */ quiet?: boolean };
-/** Review or pre-merge fixes: the files the fixes name, and new .rs or .md files inside `newFilesIn` (the crates the PR changes). */
-export type FixupGate = Common & { step: "fixup"; allowed: string[]; newFilesIn: string[] };
+/**
+ * Review or pre-merge fixes: the files the fixes name, and new .rs or .md files whose package (the innermost of `packages`, the
+ * package directories at the head) is one of `newFilesIn` (the crates the PR changes).
+ */
+export type FixupGate = Common & { step: "fixup"; allowed: string[]; newFilesIn: string[]; packages: string[] };
 /** A maintainer's instructions: any file but the protected ones; new, deleted and renamed files allowed. */
 export type MaintainerGate = Common & { step: "maintainer" };
 /** A failing CI check: the files the log names and the PR's changed files, never a test; `guard` checks the applied change (cifix guardApplied). */
-export type CifixGate = Common & { step: "cifix"; allowed: string[]; guard?: (patch: string) => Promise<string | null> };
+export type CifixGate = Common & { step: "cifix"; allowed: string[]; guard: (patch: string) => Promise<string | null> };
 /**
  * A merge conflict: the changed paths are exactly the conflicted files, with no marker left. `read` gives a file of the tree as the
  * session left it. `answers` recovers each section's resolution from the file and refuses edits outside the sections.
@@ -43,13 +46,22 @@ export function diffFiles(diff: string): DiffFile[] {
 
 const inside = (path: string, dir: string): boolean => dir === "" || dir === "." || path.startsWith(`${dir.replace(/\/$/, "")}/`);
 
+/** The package directories of a tree: those of its Cargo.toml files (path to text) with a [package] table; "" for the root. */
+export function packageDirsOf(manifests: ReadonlyMap<string, string>): string[] {
+  return [...manifests].filter(([, toml]) => /^\s*\[package\]/m.test(toml)).map(([p]) => p.slice(0, -"Cargo.toml".length).replace(/\/$/, "")).sort();
+}
+
+/** The innermost of the package directories `dirs` that holds `path`, or null: a root package holds only paths outside the others. */
+export const packageOf = (path: string, dirs: readonly string[]): string | null =>
+  dirs.filter((d) => inside(path, d)).sort((a, b) => b.length - a.length)[0] ?? null;
+
 /** The crate directories (of Cargo.toml files with a package) that hold one of `changed`, the innermost per file. */
 export function crateDirsOf(changed: readonly string[], manifests: ReadonlyMap<string, string>): string[] {
-  const dirs = [...manifests].filter(([, toml]) => /^\s*\[package\]/m.test(toml)).map(([p]) => p.slice(0, -"Cargo.toml".length).replace(/\/$/, ""));
+  const dirs = packageDirsOf(manifests);
   const out = new Set<string>();
   for (const f of changed) {
-    const d = dirs.filter((x) => inside(f, x)).sort((a, b) => b.length - a.length)[0];
-    if (d !== undefined) out.add(d);
+    const d = packageOf(f, dirs);
+    if (d !== null) out.add(d);
   }
   return [...out].sort();
 }
@@ -69,7 +81,7 @@ export async function runGate(g: StepGate, diff: string, report: SecurityReport 
   const problems: string[] = [];
   switch (g.step) {
     case "fixup": {
-      const canAdd = (p: string) => fixupEditable(p, g.scripts) && g.newFilesIn.some((d) => inside(p, d));
+      const canAdd = (p: string) => { const pkg = packageOf(p, g.packages); return fixupEditable(p, g.scripts) && pkg !== null && g.newFilesIn.includes(pkg); };
       for (const f of files) {
         if (f.kind === "deleted") problems.push(`${f.path}: a fix-up may not delete or rename a file`);
         else if (f.kind === "new" && !canAdd(f.path)) problems.push(`${f.path}: a fix-up may add only .rs or .md files inside the crates this pull request changes`);
@@ -78,13 +90,13 @@ export async function runGate(g: StepGate, diff: string, report: SecurityReport 
       }
       const q = quietWord(diff, g.quiet);
       if (q) problems.push(q);
-      return checked(diff, problems, g.allowed, (p) => fixupEditable(p, g.scripts), { lineCap: null, newFile: canAdd });
+      return checked(diff, problems, g.allowed, (p) => fixupEditable(p, g.scripts), { lineCap: null, newFile: canAdd, exact: true });
     }
     case "maintainer": {
       for (const f of files) if (!operatorEditable(f.path, g.scripts)) problems.push(`${f.path} is a protected file`);
       const q = quietWord(diff, g.quiet);
       if (q) problems.push(q);
-      return checked(diff, problems, null, (p) => operatorEditable(p, g.scripts), { lineCap: null, newFile: (p) => operatorEditable(p, g.scripts), deletes: true });
+      return checked(diff, problems, null, (p) => operatorEditable(p, g.scripts), { lineCap: null, newFile: (p) => operatorEditable(p, g.scripts), deletes: true, exact: true });
     }
     case "cifix": {
       for (const f of files) {
@@ -95,8 +107,8 @@ export async function runGate(g: StepGate, diff: string, report: SecurityReport 
       }
       const q = quietWord(diff, g.quiet);
       if (q) problems.push(q);
-      const r = checked(diff, problems, g.allowed, (p) => editable(p, g.scripts), { lineCap: null });
-      if (!r.ok || !g.guard) return r;
+      const r = checked(diff, problems, g.allowed, (p) => editable(p, g.scripts), { lineCap: null, exact: true });
+      if (!r.ok) return r;
       const bad = await g.guard(r.patch);
       return bad ? { ok: false, problems: [bad] } : r;
     }
@@ -119,7 +131,7 @@ export async function runGate(g: StepGate, diff: string, report: SecurityReport 
       }
       const q = quietWord(diff, g.quiet);
       if (q) problems.push(q);
-      return checked(diff, problems, g.conflicted, (p) => resolvablePath(p, g.scripts), { lineCap: null });
+      return checked(diff, problems, g.conflicted, (p) => resolvablePath(p, g.scripts), { lineCap: null, exact: true });
     }
     case "security": {
       const quiet = quietProblem(report?.title ?? "", report?.summary ?? "");
@@ -131,6 +143,8 @@ export async function runGate(g: StepGate, diff: string, report: SecurityReport 
         else if (f.kind !== "edit") problems.push(`${f.path}: a security fix adds only ${g.testPath} and never deletes or renames a file`);
         else if (!g.allowed.includes(f.path)) problems.push(`${f.path} is not a .rs file of the crate`);
       }
+      // validateFixPatch reads model replies and makes CRLF into LF, so a file with CR line ends would not come back as written.
+      if (diff.includes("\r")) problems.push("the change has carriage returns (CRLF line ends); a security fix uses LF line ends only");
       if (problems.length) return { ok: false, problems };
       const v = validateFixPatch(diff, g.allowed, g.testPath, g.crateDir, g.testName, g.scripts);
       return v.ok ? { ok: true, patch: v.patch, files: v.files, changed: v.changed, testPatch: v.testPatch } : { ok: false, problems: [v.reason] };
