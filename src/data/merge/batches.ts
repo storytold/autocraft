@@ -143,7 +143,7 @@ export async function openBatch(db: Db, b: NewBatch): Promise<{ id: number; bran
     const branch = `${prefix}${Number(n) + 1}`;
     const row = (await q.get(q.k.insertInto("merge_batches").values({
       repo: b.repo, branch, state: "checking", base_sha: b.baseSha, commit_sha: b.commitSha, parent_id: b.parentId, task_id: b.taskId, created_at: b.at, updated_at: b.at,
-      build_state: b.build, build_tries: b.build === "pending" ? 1 : 0,
+      build_state: b.build, build_tries: b.build === "pending" ? 1 : 0, topped_up: b.toppedUp ? 1 : 0,
     }).returning("id")))!;
     const id = Number(row.id);
     for (const values of kx.batches(b.members.map((m, i) => ({ batch_id: id, repo: b.repo, number: m.number, head_oid: m.head_oid, position: i }))))
@@ -155,7 +155,7 @@ export async function openBatch(db: Db, b: NewBatch): Promise<{ id: number; bran
 
 const COLUMN_TYPE = {
   state: "text", commit_sha: "text", base_sha: "text", task_id: "bigint", retries: "bigint", pr_number: "bigint", pr_url: "text", summary: "text",
-  fork: "text", merge_sha: "text", build_state: "text", build_tries: "bigint", ci_reruns: "bigint", ci_rerun_at: "text",
+  fork: "text", merge_sha: "text", build_state: "text", build_tries: "bigint", ci_reruns: "bigint", ci_rerun_at: "text", opened_at: "text",
 } as const satisfies Record<string, kx.ElemType>;
 
 type Changed = { id: number; repo: string; branch: string };

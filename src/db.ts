@@ -168,6 +168,9 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["merge_batches", "build_tries", "INTEGER NOT NULL DEFAULT 0"],
   ["merge_batches", "ci_reruns", "INTEGER NOT NULL DEFAULT 0"],
   ["merge_batches", "ci_rerun_at", "TEXT"],
+  // When the batch PR opened (its upstream CI started), and 1 once a top-up rebuilt the batch, or the batch is a top-up's.
+  ["merge_batches", "opened_at", "TEXT"],
+  ["merge_batches", "topped_up", "INTEGER NOT NULL DEFAULT 0"],
   ["fixups", "source", "TEXT"],
   // A model patch waiting for its lint task: the patch, the task, the lint round and the lint state (pending, requeued).
   ["fixups", "patch", "TEXT"],
