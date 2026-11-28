@@ -4,7 +4,7 @@
 // lint follow-up needs again is the commit plus the stored patch (restorePatch). A session's workspace is parked as soon as its step
 // has nothing pending (parkSession) and ended with the session (endSessionWorkspaces, sweepFixSessions).
 import type { Db } from "../db/index.ts";
-import { addWorkspaceCalls, loadEnvs, markCalls } from "../data/build/index.ts";
+import { addWorkspaceCalls, loadEnvs, markCalls, patchWorkspaces } from "../data/build/index.ts";
 import type { WorkspaceRow } from "../data/build/index.ts";
 import { envSettings, listEnvs } from "../build/envs.ts";
 import type { KubeApi } from "../build/kube-api.ts";
@@ -29,10 +29,13 @@ const SRC = "/work/src";
 const RESTORE_FILE = "/work/.ws/restore.diff";
 /** Puts the tree back to the base commit in `$1` (target kept, unchanged files keep their mtimes) and applies the restore file. */
 const RESTORE_SH = `set -e
-git update-index -q --refresh >/dev/null 2>&1 || :
-git reset -q --hard "$1"
-git clean -ffdxq -e /target
-git apply --binary --whitespace=nowarn ${RESTORE_FILE}`;
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_ATTR_NOSYSTEM
+g() { git -c core.fsmonitor= -c core.hooksPath=/dev/null "$@"; }
+g update-index -q --refresh >/dev/null 2>&1 || :
+g reset -q --hard "$1"
+g clean -ffdxq -e /target
+g apply --binary --whitespace=nowarn ${RESTORE_FILE}`;
 const SHA = /^[0-9a-f]{40}$/;
 const short = (s: string) => s.slice(0, 8);
 
@@ -49,7 +52,8 @@ export type FixWorkspaceEnv = {
 export type WorkspaceWait = { kind: "wait"; wait: typeof FIX_WORKSPACE_WAIT; reason: string };
 /**
  * created: a new workspace; kept: the live one, already at the commit, tree as it was (keepTree); resumed: a parked one brought back
- * at the commit (keepTree); reseeded: a live one moved to the commit, or started anew at it; remade: a new one for one that was lost.
+ * at the commit with its tree (keepTree); reseeded: a live one moved to the commit, or started anew at it; remade: a new one for one
+ * that was lost, or (keepTree) one whose tree was rebuilt without the earlier turn's changes and was reseeded at the commit.
  */
 export type WorkspaceHow = "created" | "kept" | "resumed" | "reseeded" | "remade";
 /** The dependency fetch at seed: none needed, needed but no crate mirror (the session is told), or its outcome. */
@@ -63,6 +67,8 @@ export type WorkspaceReady = {
   dependencies: DependencyFetch;
   /** A workspace ended because it was replaced. */
   ended: number | null;
+  /** With keepTree: the tree does not hold the earlier turn's changes (a new or rebuilt workspace), so the caller restores the stored patch. */
+  treeLost: boolean;
 };
 
 /** The environment a session's workspace runs in: implementations' for a PR, a confidential one for a security fix (none: a wait). */
@@ -75,34 +81,42 @@ export async function fixSessionEnv(db: Db, kind: FixSessionKind): Promise<strin
 /**
  * The session's workspace, ready at `at` (a PR head, a merge commit or a pinned sha), recorded on the session as its workspace and
  * head. The live one is resumed when parked, and reseeded at `at` when it holds another commit or, unless `keepTree`, holds changes
- * of an earlier turn: a new step always starts from a clean tree. A lost one (gone, failed, out of resumes, not ready in time, or
- * with a helper too old to reseed) is ended and made again from the warm copy, once per call. When the tree changed and its
- * Cargo.lock files differ from the warm version's, the dependencies are fetched through the environment's crate mirror. Throws
- * WorkspaceUnavailable when the workspace does not get ready.
+ * of an earlier turn: a new step always starts from a clean tree. With `keepTree` a tree that came back without its changes (rebuilt
+ * from no volume) is reseeded too and reported as `treeLost`. A lost one (gone, failed, out of resumes, or whose reseed failed, as in
+ * a pod with a helper too old to reseed) is ended and made again from the warm copy, once per call; one still waiting for a slot or
+ * starting past the ready limit is a wait. When the tree changed and its Cargo.lock files differ from the warm version's, the
+ * dependencies are fetched through the environment's crate mirror. Throws WorkspaceUnavailable when the workspace does not get
+ * ready, or when the session ended meanwhile.
  */
 export async function ensureWorkspace(session: FixSession, at: string, env: FixWorkspaceEnv, o: { keepTree?: boolean } = {}): Promise<WorkspaceReady | WorkspaceWait> {
   if (!SHA.test(at)) throw new Error(`not a commit: ${at}`);
   const db = env.db;
   const now = env.now ?? Date.now;
   const moved = session.head && session.head !== at ? { from: session.head, to: at } : null;
+  const gone = () => new WorkspaceUnavailable(`fix session ${session.id} ended meanwhile`, false);
   let id = session.workspaceId;
-  let how: WorkspaceHow, why: string | null = null, ended: number | null = null, made = false;
+  let how: WorkspaceHow = "created", why: string | null = null, ended: number | null = null, made = false, treeLost = false;
 
   const make = async (reason: string | null): Promise<WorkspaceWait | null> => {
     const envId = await fixSessionEnv(db, session.kind);
     if (typeof envId !== "string") return envId;
     if (id !== null && await endWorkspace(db, id, now())) ended = id;
-    id = await db.write(async () => {
+    const nid = await db.write(async () => {
       const w = await createWorkspace(db, { repo: session.repo, baseSha: at, envId, limits: { deadlineSec: FIX_WORKSPACE_DEADLINE_SEC }, owner: `fix session ${session.id}` }, now());
-      await updateSession(db, session.id, { workspaceId: w, head: at }, now());
-      return w;
+      if (await updateSession(db, session.id, { workspaceId: w, head: at }, now())) return w;
+      await endWorkspace(db, w, now());
+      return null;
     });
+    if (nid === null) throw gone();
+    id = nid;
     made = true;
+    treeLost = !!o.keepTree;
     how = reason === null ? "created" : "remade";
     why = reason;
     env.log(`fix session ${session.id}: workspace ${id} requested on ${envId} at ${short(at)}${reason ? ` (${reason})` : ""}${ended !== null ? `; workspace ${ended} ended` : ""}`);
     return null;
   };
+  const pending = (reason: string): WorkspaceWait => ({ kind: "wait", wait: FIX_WORKSPACE_WAIT, reason });
 
   const w = id !== null ? await getWorkspace(db, id) : undefined;
   if (!w || !LIVE_STATES.includes(w.state as WorkspaceStateName) || w.repo !== session.repo || (w.state === "parked" && w.resume_tries >= RESUME_TRIES)) {
@@ -113,46 +127,62 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
   let row: WorkspaceRow;
   for (;;) {
     const ready = await readyRow(env, id!);
-    if (typeof ready !== "string") {
-      row = ready;
-      if (made || (o.keepTree && row.base_sha === at)) break;
-      // Reseeded at `at`, also at the same commit: the new step starts from a clean tree.
-      const src = await sourceArchive(session.repo, at);
-      const r = await reseedWorkspace(db, env.api, id!, at, src, SEED_LIMIT_MS, now);
-      if (r.ok) {
-        row = { ...row, base_sha: at, base_commit: r.baseCommit };
-        how = "reseeded";
-        await updateSession(db, session.id, { workspaceId: id, head: at }, now());
-        env.log(`fix session ${session.id}: workspace ${id} reseeded at ${short(at)}${moved ? ` (was ${short(moved.from)})` : ""}`);
-        break;
-      }
-      if (made) throw new WorkspaceUnavailable(`workspace ${id}: ${r.reason}`);
-      const wait = await make(r.outdated ? `workspace ${id}'s helper cannot reseed (an older image)` : r.reason);
+    if ("pending" in ready) return pending(ready.pending);
+    if ("lost" in ready) {
+      if (made) throw new WorkspaceUnavailable(ready.lost);
+      const wait = await make(ready.lost);
       if (wait) return wait;
       continue;
     }
-    if (made) throw new WorkspaceUnavailable(ready);
-    const wait = await make(ready);
+    row = ready;
+    if (made) break;
+    // A tree rebuilt from the base (no volume to resume on) lacks the earlier turn's changes.
+    const rebuilt = row.restored === "empty" || !!row.restored?.startsWith("checkpoint ");
+    if (o.keepTree && row.base_sha === at && !rebuilt) break;
+    // Reseeded at `at`, also at the same commit: the new step starts from a clean tree.
+    const src = await sourceArchive(session.repo, at);
+    let r: Awaited<ReturnType<typeof reseedWorkspace>>;
+    try {
+      r = await reseedWorkspace(db, env.api, id!, at, src, SEED_LIMIT_MS, now);
+    } catch (e) {
+      r = { ok: false, outdated: false, reason: `ws reseed: ${(e as Error).message}` };
+    }
+    if (r.ok) {
+      row = { ...row, base_sha: at, base_commit: r.baseCommit };
+      if (o.keepTree && rebuilt) {
+        how = "remade";
+        why = `workspace ${id} was rebuilt without its changes`;
+        treeLost = true;
+      } else how = "reseeded";
+      if (!await updateSession(db, session.id, { workspaceId: id, head: at }, now())) throw gone();
+      env.log(`fix session ${session.id}: workspace ${id} reseeded at ${short(at)}${moved ? ` (was ${short(moved.from)})` : ""}`);
+      break;
+    }
+    if (made) throw new WorkspaceUnavailable(`workspace ${id}: ${r.reason}`);
+    const wait = await make(r.outdated ? `workspace ${id}'s helper cannot reseed (an older image)` : r.reason);
     if (wait) return wait;
   }
-  if (row.base_sha === at && session.workspaceId === id && session.head !== at) await updateSession(db, session.id, { head: at }, now());
+  if (!made && session.head !== at && !await updateSession(db, session.id, { head: at }, now())) throw gone();
   const baseCommit = row.base_commit && SHA.test(row.base_commit) ? row.base_commit : at;
-  const changed = how! !== "kept" && how! !== "resumed";
+  const changed = how !== "kept" && how !== "resumed";
   const dependencies = changed ? await fetchIfNeeded(env, row, at) : { state: "unchanged" as const };
-  return { kind: "ready", workspaceId: id!, baseCommit, how: how!, why, moved, dependencies, ended };
+  return { kind: "ready", workspaceId: id!, baseCommit, how, why, moved, dependencies, ended, treeLost };
 }
 
-/** The ready row of workspace `id`, resuming it when parked; a string says why it will not be ready (an external wait, Workspace start). */
-async function readyRow(env: FixWorkspaceEnv, id: number): Promise<WorkspaceRow | string> {
+/**
+ * The ready row of workspace `id`, resuming it when parked. `lost`: it will not be ready (gone, failed or ended, or parked and out of
+ * resumes); `pending`: it is still waiting for a slot or starting after READY_LIMIT_MS (an external wait, Workspace start).
+ */
+async function readyRow(env: FixWorkspaceEnv, id: number): Promise<WorkspaceRow | { lost: string } | { pending: string }> {
   const now = env.now ?? Date.now;
   const from = now();
   for (let last = "";;) {
     const w = await getWorkspace(env.db, id);
-    if (!w) return `workspace ${id} is gone`;
+    if (!w) return { lost: `workspace ${id} is gone` };
     if (w.state === "ready") return w;
-    if (w.state === "parked" && !await resumeWorkspace(env.db, id, now())) return `workspace ${id} is parked and could not be resumed${w.error ? `: ${w.error}` : ""}`;
-    if (!LIVE_STATES.includes(w.state as WorkspaceStateName)) return `workspace ${id} is ${w.state}${w.error ? `: ${w.error}` : ""}`;
-    if (now() - from > READY_LIMIT_MS) return `workspace ${id} was not ready within ${Math.round(READY_LIMIT_MS / 60_000)} min (still ${w.state})`;
+    if (w.state === "parked" && !await resumeWorkspace(env.db, id, now())) return { lost: `workspace ${id} is parked and could not be resumed${w.error ? `: ${w.error}` : ""}` };
+    if (!LIVE_STATES.includes(w.state as WorkspaceStateName)) return { lost: `workspace ${id} is ${w.state}${w.error ? `: ${w.error}` : ""}` };
+    if (now() - from > READY_LIMIT_MS) return { pending: `workspace ${id} is still ${w.state} after ${Math.round(READY_LIMIT_MS / 60_000)} min` };
     if (await env.cancelled?.()) throw new WorkspaceUnavailable("cancelled while the workspace started", false);
     if (w.state !== last) {
       last = w.state;
@@ -188,8 +218,9 @@ async function fetchIfNeeded(env: FixWorkspaceEnv, w: WorkspaceRow, at: string):
 export type RestoreResult = { ok: true } | { ok: false; reason: string; stale: boolean };
 
 /**
- * Makes a ready workspace's tree its base commit plus a stored patch (a lint follow-up after the pod was lost): the tree is put back
- * to the base, then the patch applied. A patch made on another head than the workspace's (`stale`) is not applied: the branch moved.
+ * Makes a ready workspace's tree its base commit plus a stored patch (a lint follow-up after the pod was lost): the calls and apps
+ * still running are stopped, the tree is put back to the base, then the patch applied. A patch made on another head than the
+ * workspace's (`stale`) is not applied: the branch moved.
  */
 export async function restorePatch(env: FixWorkspaceEnv, workspaceId: number, patch: { diff: Uint8Array | string; head: string }): Promise<RestoreResult> {
   const db = env.db;
@@ -197,12 +228,19 @@ export async function restorePatch(env: FixWorkspaceEnv, workspaceId: number, pa
   if (w?.state !== "ready" || !w.base_commit || !SHA.test(w.base_commit)) return { ok: false, stale: false, reason: `workspace ${workspaceId} is ${w?.state ?? "gone"}` };
   if (w.base_sha !== patch.head) return { ok: false, stale: true, reason: `the patch was made on ${short(patch.head)}; the workspace is at ${short(w.base_sha)}` };
   const diff = typeof patch.diff === "string" ? Buffer.from(patch.diff) : Buffer.from(patch.diff);
-  const put = await execWs(db, env.api, workspaceId, ["put", RESTORE_FILE], { tool: "checkpoint", args: { restore: "patch", bytes: diff.length }, stdin: diff, timeoutMs: 120_000, touch: true }, env.now);
+  // The calls and apps still running work on the tree that is about to be put back. A helper without `stop` (an older image) has
+  // nothing of an earlier turn running: such a pod is never reseeded, so it holds no session of a fix step.
+  const stop = await execWs(db, env.api, workspaceId, ["stop"], { tool: "seed", args: { restore: "stop" }, timeoutMs: 120_000, touch: true }, env.now);
+  if (stop.header?.kind !== "ok" && !(stop.header?.kind === "error" && stop.header.code === "usage")) return { ok: false, stale: false, reason: `the running calls could not be stopped: ${stop.error ?? describeHeader(stop.header)}` };
+  const put = await execWs(db, env.api, workspaceId, ["put", RESTORE_FILE], { tool: "seed", args: { restore: "patch", bytes: diff.length }, stdin: diff, timeoutMs: 120_000, touch: true }, env.now);
   if (put.header?.kind !== "ok") return { ok: false, stale: false, reason: `the patch could not be copied in: ${put.error ?? describeHeader(put.header)}` };
-  const r = await execWs(db, env.api, workspaceId, ["run", "300", "--", "sh", "-c", RESTORE_SH, "restore", w.base_commit], { tool: "checkpoint", args: { restore: "apply" }, timeoutMs: 310_000, touch: true }, env.now);
+  const r = await execWs(db, env.api, workspaceId, ["run", "300", "--", "sh", "-c", RESTORE_SH, "restore", w.base_commit], { tool: "seed", args: { restore: "apply" }, timeoutMs: 310_000, touch: true }, env.now);
   if (r.header?.kind !== "status" || r.header.state !== "exited" || r.header.exit !== 0) {
     return { ok: false, stale: false, reason: `the patch does not apply (${r.error ?? describeHeader(r.header)})${r.output.trim() ? `: ${r.output.trim().split("\n").pop()!.slice(0, 300)}` : ""}` };
   }
+  // A checkpoint read before the restore does not hold (its compare-and-set), and a keepTree step sees the tree as whole.
+  const at = new Date((env.now ?? Date.now)()).toISOString();
+  await patchWorkspaces(db, [{ id: workspaceId, whereState: ["ready"], set: { restored: "patch", restored_at: at, checkpoint: null, checkpoint_at: null, checkpoint_error: null, updated_at: at } }]);
   return { ok: true };
 }
 

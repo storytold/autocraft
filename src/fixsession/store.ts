@@ -5,7 +5,7 @@ import type { Db } from "../db/index.ts";
 import {
   addFixTurn, endFixSessions, ensureFixSession, loadFixSessionGate, loadFixSessions, loadFixTurns, loadFixTurnsById, loadLastFixTurn, loadLiveFixSessions,
   settleFixTurn, updateFixSession,
-  type EndedFixSession, type FixSession, type FixSessionEnd, type FixSessionKind, type FixSessionPatch, type FixTurn, type FixTurnOutcome, type FixTurnSettle, type NewFixTurn,
+  type EndedFixSession, type EndGuard, type FixSession, type FixSessionEnd, type FixSessionKind, type FixSessionPatch, type FixTurn, type FixTurnOutcome, type FixTurnSettle, type NewFixTurn,
 } from "../data/fixsession/index.ts";
 
 export type { EndedFixSession, FixSession, FixSessionEnd, FixSessionKind, FixSessionPatch, FixStep, FixTurn, FixTurnOutcome, FixTurnPurpose, FixTurnSettle, NewFixTurn } from "../data/fixsession/index.ts";
@@ -15,7 +15,17 @@ export const SESSION_IDLE_MS = 24 * 3600_000;
 /** A session with more turns than this ends, so its context stays small; the next step starts a fresh one. */
 export const SESSION_MAX_TURNS = 8;
 
+/**
+ * A queued turn keeps its session from the idle and turn ends for this long after it was queued: a fix session call's time limit
+ * (90 min, the fix.session prompt) plus its wait in the call queue (30 min). An older one is a leftover no job settles.
+ */
+export const QUEUED_TURN_MS = (90 + 30) * 60_000;
+
 const iso = (ms: number): string => new Date(ms).toISOString();
+/** The guard an idle or turns end re-checks when it writes, so a session touched or queued meanwhile stays live. */
+const expiryGuard = (why: "idle" | "turns", nowMs: number): EndGuard => ({
+  queuedSince: iso(nowMs - QUEUED_TURN_MS), ...(why === "idle" ? { idleBefore: iso(nowMs - SESSION_IDLE_MS) } : { maxTurns: SESSION_MAX_TURNS }),
+});
 
 /** Why a live session is past its use on its own counts (idle, turns), or null. */
 export function expiredReason(s: FixSession, nowMs: number): "idle" | "turns" | null {
@@ -38,10 +48,10 @@ export async function ensureSession(db: Db, kind: FixSessionKind, repo: string, 
   Promise<{ session: FixSession; created: boolean; ended: EndedFixSession | null } | SessionRefused> {
   const nowMs = o.nowMs ?? Date.now(), at = iso(nowMs);
   return await db.write(async () => {
-    const g = await loadFixSessionGate(db, kind, repo, number);
+    const g = await loadFixSessionGate(db, kind, repo, number, iso(nowMs - QUEUED_TURN_MS));
     if (g.stopped) return { refused: "stopped" as const, ended: g.live ? (await endFixSessions(db, [g.live.id], "stopped", at))[0] ?? null : null };
     const why = g.live && !g.queuedTurn ? expiredReason(g.live, nowMs) : null;
-    const ended = g.live && why ? (await endFixSessions(db, [g.live.id], why, at))[0] ?? null : null;
+    const ended = g.live && why ? (await endFixSessions(db, [g.live.id], why, at, expiryGuard(why, nowMs)))[0] ?? null : null;
     const r = await ensureFixSession(db, { kind, repo, number, model: o.model, head: o.head, workspaceId: o.workspaceId }, at);
     return { ...r, ended };
   });
@@ -58,7 +68,7 @@ export async function endSession(db: Db, id: number, reason: FixSessionEnd, nowM
  * SESSION_MAX_TURNS turns. Returns the ended sessions, whose workspaces the caller ends.
  */
 export async function endIdle(db: Db, nowMs: number = Date.now()): Promise<EndedFixSession[]> {
-  const live = await loadLiveFixSessions(db);
+  const live = await loadLiveFixSessions(db, iso(nowMs - QUEUED_TURN_MS));
   const byReason = new Map<FixSessionEnd, number[]>();
   for (const l of live) {
     const why = l.closed ? "closed" : l.stopped ? "stopped" : l.queuedTurn ? null : expiredReason(l.session, nowMs);
@@ -68,7 +78,7 @@ export async function endIdle(db: Db, nowMs: number = Date.now()): Promise<Ended
   const at = iso(nowMs);
   return await db.write(async () => {
     const out: EndedFixSession[] = [];
-    for (const [why, ids] of byReason) out.push(...await endFixSessions(db, ids, why, at));
+    for (const [why, ids] of byReason) out.push(...await endFixSessions(db, ids, why, at, why === "idle" || why === "turns" ? expiryGuard(why as "idle" | "turns", nowMs) : {}));
     return out.sort((a, b) => a.id - b.id);
   });
 }

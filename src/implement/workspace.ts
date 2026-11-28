@@ -48,9 +48,12 @@ export async function mainHeadOf(db: Db, repo: string): Promise<string | null> {
   }
 }
 
-/** The kubernetes environment implementations run in: the one enabled kubernetes environment that is no warm producer. */
+/**
+ * The kubernetes environment implementations and PR fix sessions run in: the one enabled kubernetes environment that is neither a
+ * warm producer nor confidential (contributor code never runs where private security fixes do).
+ */
 export async function implementEnv(db: Db): Promise<string> {
-  const k = (await listEnvs(db)).filter((e) => e.kind === "kubernetes" && e.enabled && !e.settings?.warmWriter);
+  const k = (await listEnvs(db)).filter((e) => e.kind === "kubernetes" && e.enabled && !e.confidential && !e.settings?.warmWriter);
   if (k.length !== 1) throw new WorkspaceUnavailable(k.length ? `${k.length} kubernetes environments are enabled; implementations need exactly one` : "no kubernetes environment is enabled");
   return k[0]!.id;
 }
