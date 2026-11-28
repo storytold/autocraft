@@ -96,9 +96,9 @@ function PrRow({ r, next }: { r: Row; next: Next }) {
         ...checkCells(r),
         size: <Size size={r.size} />,
         author: (
-          <span className="block truncate text-xs text-ink/70" title={TIER[r.tier]}>
+          <span className="block truncate text-xs text-ink/70">
             {r.author ? <AuthorName login={r.author} /> : "unknown"}
-            {r.tier === "whitelisted" && <span className="ml-1 text-2xs text-ok">●</span>}
+            {r.tier === "whitelisted" && <span role="img" aria-label={TIER[r.tier]} title={TIER[r.tier]} className="ml-1 text-2xs text-ok">●</span>}
           </span>
         ),
         added: <Added r={r} />,

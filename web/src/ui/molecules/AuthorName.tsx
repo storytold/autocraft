@@ -1,6 +1,6 @@
 // An author's name as a link to their page, with a hover card of their item counts. The card opens on hover and on keyboard focus,
 // closes on Escape and when the pointer or focus leaves, and never takes focus; on touch screens a tap follows the link. The counts
-// are read when a card first opens (api.authorStats) and shared by every name of that author.
+// are read when a card first opens (api.authorStats) and shared by every name of that author; a change to the items refetches them.
 import { useId, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { HoverCard } from "radix-ui";
@@ -14,7 +14,7 @@ import { Avatar } from "../atoms/Avatar";
 import { cn } from "../cn";
 
 /** GitHub logins, with an app's `[bot]` suffix; other names are shown as plain text. */
-const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
+export const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
 
 /** The counts of an author's pull requests and issues, as their page and the hover card show them. */
 export function authorCountLines(s: AuthorStats): { label: string; text: string }[] {
@@ -24,8 +24,12 @@ export function authorCountLines(s: AuthorStats): { label: string; text: string 
   ];
 }
 
+/** Hovering many names reads each author once; the live topics refetch the counts when items change. */
+const STATS_STALE_MS = 30 * 60_000;
+
 /** The author's counts; `project: null` keeps one cache entry per author on every page. */
-export const useAuthorStats = (login: string, enabled = true) => useQuery(`author-stats:${login.toLowerCase()}`, (a) => a.authorStats(login), { project: null, enabled });
+export const useAuthorStats = (login: string, enabled = true) =>
+  useQuery(`author-stats:${login.toLowerCase()}`, (a) => a.authorStats(login), { project: null, enabled, staleTime: STATS_STALE_MS });
 
 function CardBody({ login }: { login: string }) {
   const { data, error } = useAuthorStats(login);
@@ -52,9 +56,6 @@ function CardBody({ login }: { login: string }) {
       ) : (
         <span className="text-ink/60">{error ? t("Could not read the counts.") : t("Reading…")}</span>
       )}
-      <Link to={authorPath(login)} className="text-accent-ink hover:underline">
-        {t("All items by {login}", { login: data?.login ?? login })}
-      </Link>
     </div>
   );
 }
@@ -63,7 +64,7 @@ function CardBody({ login }: { login: string }) {
 export function AuthorName({ login, children, className }: { login: string; children?: ReactNode; className?: string }) {
   const [open, setOpen] = useState(false);
   const id = useId();
-  if (!LOGIN.test(login)) return <span className={className}>{children ?? login}</span>;
+  if (!GITHUB_LOGIN.test(login)) return <span className={className}>{children ?? login}</span>;
   return (
     <HoverCard.Root open={open} onOpenChange={setOpen} openDelay={300} closeDelay={150}>
       <HoverCard.Trigger asChild>

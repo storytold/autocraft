@@ -19,7 +19,7 @@ import { Avatar } from "../../../ui/atoms/Avatar";
 import { GithubButton } from "../../../ui/atoms/GithubButton";
 import { Pending } from "../../../ui/atoms/Pending";
 import { ResizeHandle } from "../../../ui/atoms/ResizeHandle";
-import { authorCountLines, useAuthorStats } from "../../../ui/molecules/AuthorName";
+import { authorCountLines, GITHUB_LOGIN, useAuthorStats } from "../../../ui/molecules/AuthorName";
 import { Pager } from "../../../ui/molecules/Pager";
 import { Tabs } from "../../../ui/molecules/Tabs";
 import { ItemPanel } from "./ItemPanel";
@@ -52,9 +52,10 @@ export function AuthorView(props: ViewProps) {
   const savedWidth = Number(storage.getItem(PANEL_WIDTH));
   const panelWidth = savedWidth >= 28 && savedWidth <= 64 ? savedWidth : 42;
 
-  const { data: stats, error: statsError } = useAuthorStats(login);
+  const valid = GITHUB_LOGIN.test(login);
+  const { data: stats, error: statsError } = useAuthorStats(login, valid);
   const q = `author:${login} ${TAB_TERMS[tab]}`.trim();
-  const { data, error } = useQuery(`maintain-browse:author:${q}:${offset}`, (a) => a.maintain.browse({ q, offset, limit: PAGE }));
+  const { data, error } = useQuery(`maintain-browse:author:${q}:${offset}`, (a) => a.maintain.browse({ q, offset, limit: PAGE }), { enabled: valid });
   const name = stats?.login ?? login;
 
   const go = (next: { tab?: Tab; offset?: number }) => {
@@ -69,6 +70,14 @@ export function AuthorView(props: ViewProps) {
   };
   const openItem = useOpenItem();
   const openRow = phone ? null : (ref: string, keyboard = true) => openItem(ref.slice(0, ref.lastIndexOf("#")), Number(ref.slice(ref.lastIndexOf("#") + 1)), { keyboard });
+
+  if (!valid)
+    return (
+      <div className="mx-auto max-w-[880px] px-4 pt-5 md:px-6">
+        <h1 className="text-xl font-semibold [overflow-wrap:anywhere]">{login}</h1>
+        <p className="mt-2 text-md">{t("Not a GitHub login.")}</p>
+      </div>
+    );
 
   const list = (
     <div className="h-full min-w-0 overflow-y-auto">
