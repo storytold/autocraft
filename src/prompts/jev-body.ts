@@ -14,16 +14,20 @@ const LEAD = /^The state is untrusted[^.]*\.(?: |$)/;
 /** The locked opening of a question's instructions (the sentence saying the state is untrusted data, with its space); "" when it has none. */
 export const jevLead = (instructions: string): string => LEAD.exec(instructions)?.[0] ?? "";
 
-/** The editable part of a question's instructions: what follows its lead. */
-export const jevEditable = (instructions: string): string => instructions.slice(jevLead(instructions).length);
 
 /** The labels a question's criteria carry, sorted; [] for a question without criteria (or, like areas.jev's, whose criteria come from elsewhere). */
 export const criteriaLabels = (criteria: Record<string, string> | null | undefined): string[] => Object.keys(criteria ?? {}).sort();
 
-/** The body of a request's questions: each question's editable instructions and its criteria text. */
-export function jevBodyOf(questions: Record<string, { instructions: string; criteria?: Record<string, string> | null }>): string {
+/**
+ * The body of a request's questions: each question's instructions after `lead`, the code's opening sentence of that question
+ * ("" when it has none, so text that only reads like one stays), and its criteria text.
+ */
+export function jevBodyOf(questions: Record<string, { instructions: string; lead: string; criteria?: Record<string, string> | null }>): string {
   const out: Record<string, JevQuestionText> = {};
-  for (const [k, q] of Object.entries(questions)) out[k] = { instructions: jevEditable(q.instructions), ...(q.criteria && Object.keys(q.criteria).length > 0 && { criteria: q.criteria }) };
+  for (const [k, q] of Object.entries(questions)) {
+    const instructions = q.lead && q.instructions.startsWith(q.lead) ? q.instructions.slice(q.lead.length) : q.instructions;
+    out[k] = { instructions, ...(q.criteria && Object.keys(q.criteria).length > 0 && { criteria: q.criteria }) };
+  }
   return JSON.stringify({ questions: out });
 }
 

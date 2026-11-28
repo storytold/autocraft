@@ -1997,8 +1997,8 @@ export const sameTemplateOf = (id: ClaudePromptId): ClaudePromptId | null => SAM
 /** The version a Claude prompt records when `body` (its text form) runs: a hash of the text without the guidance slot. */
 export const bodyVersion = (body: string): string => sha256Hex(withoutSlot(stripLocks(body))).slice(0, 10);
 
-/** The text form of a Jev prompt's editable text: each question's instructions after its opening sentence, and its criteria. */
-export const jevBody = (req: JevRequest): string => jevBodyOf(req.questions);
+/** The text form of a Jev prompt's code request: each question's instructions after its opening sentence, and its criteria. */
+const jevBody = (req: JevRequest): string => jevBodyOf(Object.fromEntries(Object.entries(req.questions).map(([k, q]) => [k, { ...q, lead: jevLead(q.instructions) }])));
 
 /** A prompt's code default as a revision holds it: its body and the version it runs at. */
 export function codeDefault(id: ClaudePromptId | JevPromptId): { body: string; version: string } {

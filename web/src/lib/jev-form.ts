@@ -19,7 +19,7 @@ export function jevEditedBody(questions: readonly JevFormQuestion[], drafts: Jev
   return jevBodyOf(Object.fromEntries(questions.map((q) => {
     const d = drafts[q.id];
     const criteria = q.criteria && Object.fromEntries(Object.keys(q.criteria).map((l) => [l, d?.criteria[l] ?? q.criteria![l]!]));
-    return [q.id, { instructions: q.lead + (d?.instructions ?? editableOf(q)), criteria }];
+    return [q.id, { instructions: q.lead + (d?.instructions ?? editableOf(q)), lead: q.lead, criteria }];
   })));
 }
 
