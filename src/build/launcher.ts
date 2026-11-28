@@ -26,6 +26,7 @@ import { STATUS_NAMESPACE, WarmStatus } from "./warm-status.ts";
 import { takeLog, type LogPos } from "./pod-log.ts";
 import { WarmPlacer } from "./warm-place.ts";
 import { CacheReporter } from "./caches.ts";
+import { MirrorAllowlistWriter } from "./mirror-sources.ts";
 import {
   ARCH_LABEL, DISK_CONTAINER, MIRROR_WAIT_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
   ciCheckout, PULL_REASONS, pvcSpec, stepMemory, warmEnvHash, quantity, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskLimits, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
@@ -70,7 +71,7 @@ export type LauncherDeps = {
   api: KubeApi | null;
   /** Reads the nodes' warm status (src/build/warm-status.ts); null or left out: no warm status is shown. */
   configMaps?: Pick<ConfigMapApi, "listConfigMaps"> | null;
-  /** Writes the warm placement (src/build/warm-place.ts); null or left out: none is written. */
+  /** Writes the warm placement (src/build/warm-place.ts) and the crate mirror's derived git allowlist (src/build/mirror-sources.ts); null or left out: neither is written. */
   placement?: Pick<ConfigMapApi, "getConfigMap" | "patchConfigMap"> | null;
   /** Reads the crate mirror's allowlist for the caches report (src/build/caches.ts); null or left out: none is read. */
   caches?: Pick<ConfigMapApi, "getConfigMap"> | null;
@@ -109,6 +110,7 @@ export class LauncherState {
   warm: WarmStatus | null = null;
   placer: WarmPlacer | null = null;
   caches: CacheReporter | null = null;
+  mirrorList: MirrorAllowlistWriter | null = null;
   reads = new PassReads();
   access = new Map<string, { at: number; missing: string[] }>();
   /** `capacity`: the quota refused a first pod, a capacity wait rather than a fault. */
@@ -137,13 +139,18 @@ export async function launcherPass(d: LauncherDeps, state: LauncherState): Promi
   if (envs.length && d.configMaps) {
     state.warm ??= new WarmStatus(d.configMaps, { namespace: envVar("WARM_STATUS_NAMESPACE"), now: d.now, log: d.log });
     await state.warm.refresh();
+    const mirrorUsed = envs.some((e) => e.enabled && envSettings(e).crateMirror);
     if (d.placement) {
       state.placer ??= new WarmPlacer(d.placement, { namespace: envVar("WARM_STATUS_NAMESPACE") ?? STATUS_NAMESPACE, now: d.now ?? Date.now, log: d.log });
       await state.placer.pass(d.db, state.warm);
+      if (mirrorUsed) {
+        state.mirrorList ??= new MirrorAllowlistWriter(d.placement, { namespace: envVar("WARM_STATUS_NAMESPACE") ?? STATUS_NAMESPACE, now: d.now ?? Date.now, log: d.log });
+        await state.mirrorList.pass(d.db);
+      }
     }
     state.caches ??= new CacheReporter(d.caches ?? null, d.now);
     try {
-      await state.caches.pass(d.db, state.warm, state.placer, envs.some((e) => e.enabled && envSettings(e).crateMirror));
+      await state.caches.pass(d.db, state.warm, state.placer, mirrorUsed);
     } catch (e) {
       d.log(`caches report: ${(e as Error).message}`);
     }

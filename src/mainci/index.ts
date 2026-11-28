@@ -17,6 +17,7 @@ import { loadDecidingHeads, loadRepos, loadSyncState, saveMainHeads, saveSyncSta
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { warmPass } from "../build/warm-queue.ts";
+import { refreshMirrorSources } from "../build/mirror-sources.ts";
 import type { RedMain } from "./no-new.ts";
 
 /** Branch prefix of the PRs AutoCraft opens to fix a red main. */
@@ -120,6 +121,12 @@ export async function pollMainCi(db: Db, client: Querier, only?: string, log: (l
     const parsed = parseHeads(chunk, data as Record<string, RepoNode>);
     await saveHeads(db, parsed, at);
     heads += parsed.length;
+    // A moved head may name new git dependencies the crate mirror has to serve; a failed read is retried on the next poll.
+    try {
+      await refreshMirrorSources(db, client, parsed, log);
+    } catch (e) {
+      log(`crate mirror: git sources: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    }
   }
   // A red head whose culprit is a PR we merged stops the merge path.
   const rows = await mainCiRepos(db);

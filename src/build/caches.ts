@@ -1,5 +1,5 @@
 // The warm caches report: what each node's warm-sync agent holds, where the runner placed each key, the warm producer's
-// state per repository and the crate mirror's git allowlist (GET /api/envs/caches, `autocraft-server envs caches`).
+// state per repository and the crate mirror's git allowlist (hand-kept and derived) (GET /api/envs/caches, `autocraft-server envs caches`).
 // Only the runner reads the Kubernetes API, so its pod launcher stores what it read in the settings row CACHE_REPORT_KEY
 // (CacheReporter); the dashboard and the CLI combine that with the warm tasks and settings in the database (cacheReport).
 // The row is bookkeeping for the planner and bumps only the `envs` topic (src/live.ts).
@@ -24,6 +24,8 @@ import { STATUS_NAMESPACE, STATUS_STALE_MS, type WarmStatus } from "./warm-statu
 /** The crate mirror's git allowlist (one `owner/repo` per line, `#` comments), in the warm status namespace. */
 export const MIRROR_ALLOWLIST_CONFIGMAP = "crate-mirror-git-allowlist";
 export const MIRROR_ALLOWLIST_DATA_KEY = "allowlist.txt";
+/** The list AutoCraft derives from the tracked repos' Cargo.lock files (src/build/mirror-sources.ts), with the same data key. */
+export const MIRROR_DERIVED_CONFIGMAP = "crate-mirror-git-derived";
 /** The row is rewritten at least this often while only report times move, and the allowlist is read this often. */
 const REFRESH_MS = 5 * 60_000;
 
@@ -64,7 +66,9 @@ export class CacheReporter {
       const cm = await this.api!.getConfigMap(ns, name);
       const text = cm?.data?.[MIRROR_ALLOWLIST_DATA_KEY];
       if (text === undefined) return { allowlist: null, error: cm ? `ConfigMap ${name} in ${ns} has no ${MIRROR_ALLOWLIST_DATA_KEY}` : `ConfigMap ${name} is missing in ${ns}`, readAt };
-      return { allowlist: parseAllowlist(text), error: null, readAt };
+      // The mirror also serves the derived list (src/build/mirror-sources.ts); without that ConfigMap it serves the hand-kept one alone.
+      const derived = (await this.api!.getConfigMap(ns, MIRROR_DERIVED_CONFIGMAP))?.data?.[MIRROR_ALLOWLIST_DATA_KEY] ?? "";
+      return { allowlist: parseAllowlist(`${text}\n${derived}`), error: null, readAt };
     } catch (e) {
       return { allowlist: null, error: (e as Error).message.slice(0, 300), readAt };
     }

@@ -3,7 +3,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import type { EndpointStatus, StoredCaches, UpdateSpec, WorkerUpdate } from "./types.ts";
-import { ENDPOINT_KEY, PENDING_UPDATE_KEY, UPDATE_FAILURES_KEY, WARM_GC_KEY, WARM_REPORT_KEY, WARM_TRIMMED_KEY, warmBytesKey } from "./warm-key.ts";
+import { ENDPOINT_KEY, PENDING_UPDATE_KEY, UPDATE_FAILURES_KEY, WARM_GC_KEY, WARM_REPORT_KEY, WARM_TRIMMED_KEY, mirrorSourcesKey, warmBytesKey } from "./warm-key.ts";
 
 /** The warm gc runs in one producer pod at most this often, and a failed one is due again after `WARM_GC_RETRY_MS`. */
 export const WARM_GC_EVERY_MS = 24 * 3600_000;
@@ -147,4 +147,23 @@ export async function loadEndpointStatus(db: Db): Promise<EndpointStatus | null>
 /** Stores the runner's EndpointSlice record. 1 statement. */
 export async function saveEndpointStatus(db: Db, status: EndpointStatus): Promise<void> {
   await put(db, [{ key: ENDPOINT_KEY, value: JSON.stringify(status) }], iso(Date.now()));
+}
+
+/** The git sources a repo's default-branch Cargo.lock names, as read at `sha`; `note` says why `repos` were kept from an older read. */
+export type MirrorSources = { sha: string; repos: string[]; note: string | null };
+
+/** The stored git sources of `repos`; a repo without a valid row is absent. 1 statement. */
+export async function loadMirrorSources(db: Db, repos: string[]): Promise<Map<string, MirrorSources>> {
+  const out = new Map<string, MirrorSources>();
+  const byKey = new Map(repos.map((r) => [mirrorSourcesKey(r), r]));
+  for (const [key, v] of await values(db, [...byKey.keys()])) {
+    const s = parse<MirrorSources>(v);
+    if (s && typeof s.sha === "string" && Array.isArray(s.repos) && s.repos.every((r) => typeof r === "string")) out.set(byKey.get(key)!, { sha: s.sha, repos: s.repos, note: typeof s.note === "string" ? s.note : null });
+  }
+  return out;
+}
+
+/** Stores repos' git sources. 1 statement. */
+export async function saveMirrorSources(db: Db, rows: { repo: string; sources: MirrorSources }[]): Promise<void> {
+  await put(db, rows.map((r) => ({ key: mirrorSourcesKey(r.repo), value: JSON.stringify(r.sources) })), iso(Date.now()));
 }

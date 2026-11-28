@@ -24,8 +24,12 @@ export function normalizeRepo(entry: string): string | undefined {
   return `${owner}/${repo}`.toLowerCase();
 }
 
-/** Repos from a list file (one per line, `#` comments) and an inline list (comma or whitespace separated); undefined when the file cannot be read. */
-export function readAllowlist(file: string | undefined, inline: string | undefined, log: Log): Set<string> | undefined {
+/**
+ * Repos from a list file (one per line, `#` comments), the derived list file AutoCraft writes in the same form
+ * (src/build/mirror-sources.ts) and an inline list (comma or whitespace separated); undefined when a file cannot be read.
+ * A derived file that does not exist counts as empty: its ConfigMap is optional.
+ */
+export function readAllowlist(file: string | undefined, inline: string | undefined, log: Log, derived?: string): Set<string> | undefined {
   const out = new Set<string>();
   const add = (text: string, from: string): void => {
     for (const raw of text.split(/[\s,]+/)) {
@@ -36,11 +40,13 @@ export function readAllowlist(file: string | undefined, inline: string | undefin
     }
   };
   if (inline) add(inline, "env");
-  if (file) {
+  for (const [path, from] of [[file, "file"], [derived, "derived"]] as const) {
+    if (!path) continue;
     try {
-      add(readFileSync(file, "utf8").split("\n").map((l) => l.replace(/#.*/, "")).join("\n"), "file");
+      add(readFileSync(path, "utf8").split("\n").map((l) => l.replace(/#.*/, "")).join("\n"), from);
     } catch (e) {
-      log("git-allowlist-error", { error: (e as Error).message });
+      if (from === "derived" && (e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      log("git-allowlist-error", { from, error: (e as Error).message });
       return undefined;
     }
   }
