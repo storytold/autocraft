@@ -529,10 +529,10 @@ test("a quiet pull request whose fixes nobody can make or be asked for comes bac
   const f = { ...(await w.plan()).prs.find((p) => p.facts.number === 1)!.facts, quiet: true };
   assert.equal(f.fixup?.fixes, 1);
   const q = questionFor(f, decidePr(f), { approved: false, review: { verdict: "take-fix", sure: true, rec: null }, parts: [{ n: 1, title: "rename a", source: "review", state: "planned" }], conflict: null });
-  assert.deepEqual([q?.rec.parts, q?.rec.merges], [{ fix: [], drop: [1] }, true]);
+  assert.deepEqual([q?.rec.parts, q?.rec.author, q?.rec.goes], [{ fix: [], drop: [] }, undefined, "look"], "nobody can be asked on it: a person makes the fix on its branch");
 });
 
-test("fixes nobody can make are asked about once: a yes or the word merge drops them, names them and merges, approved before or not", async () => {
+test("fixes nobody can make that block the merge are never dropped: the author is asked, after a yes where the merge is approved, at once where it is not", async () => {
   const cases: Record<string, (w: World) => Promise<unknown>> = {
     protected: (w) => w.review(1, { verdict: "take-fix", fixes: [{ file: ".git/config", change: "drop the hook path" }, { file: "../deny.toml", change: "allow the licence" }] }),
     "cannot run": async (w) => {
@@ -541,7 +541,7 @@ test("fixes nobody can make are asked about once: a yes or the word merge drops 
       await w.review(1, { verdict: "take-fix", fixes: [{ file: "src/a.rs", change: "rename a" }, { file: "src/b.rs", change: "rename b" }] });
     },
   };
-  for (const [name, set] of Object.entries(cases)) for (const start of ["review and merge", "review"]) for (const answer of ["yes", "merge"]) {
+  for (const [name, set] of Object.entries(cases)) for (const start of ["review and merge", "review"]) {
     const w = current = await (await (await world()).repo(["merge", "push"])).acting(MAINT, ANN);
     await w.pr(1, { label: "feature" });
     await (await w.verified(1)).premerge(1, "clean");
@@ -549,13 +549,17 @@ test("fixes nobody can make are asked about once: a yes or the word merge drops 
     await set(w);
     await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date().toISOString() }));
     await settle(w);
-    const x = await wf(w), at = `${name}, ${start}, ${answer}: ${x.rec?.text}`;
-    assert.deepEqual([x.state, x.rec?.parts, x.rec?.merges, x.rec?.again], [start === "review" ? "recommending" : "blocked", { fix: [], drop: [1, 2] }, true, undefined], at);
-    assert.match(x.rec!.text, /1 and 2/);
-    assert.match(await say(w, answer, ANN), /dropping 1 and 2, then merging/i);
+    const x = await wf(w), at = `${name}, ${start}: ${x.rec?.text}`;
+    if (start === "review") {
+      assert.deepEqual([x.state, !!x.blockerParams?.author], ["waiting", true], at);
+      w.close();
+      continue;
+    }
+    assert.deepEqual([x.state, x.rec?.parts, x.rec?.author], ["blocked", { fix: [], drop: [] }, "ask"], at);
+    assert.match(x.rec!.text, /could not make fix 1 .*fix 2.*Ask the author/, at);
+    await say(w, "yes", ANN);
     await settle(w);
-    assert.deepEqual([(await wf(w)).state, await leg(w)], ["running", "queued"], at);
-    assert.ok((await actions(w)).includes("merge"), at);
+    assert.deepEqual([(await wf(w)).state, (await wf(w)).approvedBy !== null], ["waiting", true], at);
     w.close();
   }
 });

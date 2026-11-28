@@ -67,14 +67,41 @@ export function textFor(r: TextOf): string {
   return r.fix.length ? fixText(r.fix, r.merges) : t("Merge it.");
 }
 
-/** The planned parts of the review's fixes that nobody makes, dropped: the merge goes on without them. */
-export function without(parts: readonly number[], protectedFiles: boolean): Recommendation {
-  const vars = { parts: listText(parts) };
-  return {
-    text: protectedFiles ? t("The review asks for changes to files AutoCraft may not touch. Drop {parts}, then merge.", vars)
-      : t("The review asks for fixes that AutoCraft's fix-up cannot make and nobody else is asked for. Drop {parts}, then merge.", vars),
-    parts: { fix: [], drop: [...parts] }, merges: true,
-  };
+/** Characters of a part's title a sentence names. */
+const TITLE_CHARS = 100;
+
+/** "fix 1 (the alt text box regression) and fix 2 (...)": the parts with their titles. */
+const namedFixes = (plan: readonly PlanPart[], parts: readonly number[]): string =>
+  listText(parts.map((n) => { const title = plan.find((p) => p.n === n)?.title; return title ? t("fix {n} ({title})", { n, title: clipText(title, TITLE_CHARS) }) : t("fix {n}", { n }); }));
+
+/**
+ * Why AutoCraft's fix-up made none of the review's fixes at the head, as a clause ("the pull request's diff is over AutoCraft's size limit for
+ * a fix-up"). `author`: only the author can make them (they change files AutoCraft may not edit, or AutoCraft cannot push to the branch).
+ */
+export type Unmade = { why: string; author: boolean; /** Nobody can be asked on the PR (AutoCraft's own, or quiet): a person makes the fix on its branch. */ byHand?: boolean };
+
+/**
+ * The recommendation where AutoCraft's fix-up could not make planned fixes of the review. A fix that stops the merge (`blocking`: major, or a
+ * regression, a break of the build or tests, security, data loss, the PR not doing what it says) is never dropped to merge: on a PR approved for
+ * merge a yes makes it again, unless only the author can make it; otherwise the author is asked, or, where nobody can be asked on the PR, a
+ * person makes it on its branch. Fixes that stop nothing (`minor`) go to a follow-up issue once the merge is approved, and the merge goes on.
+ * `cause`: the hold that stopped the fix-up, which may lift by itself.
+ */
+export function unmade(plan: readonly PlanPart[], fixes: { blocking: readonly number[]; minor: readonly number[] }, u: Unmade, approved: boolean, cause?: Recommendation["cause"]): Recommendation {
+  const { blocking, minor } = fixes, drop = droppedOf(plan), on = cause ? { cause } : {};
+  const said = t("AutoCraft could not make {fixes}: {why}.", { fixes: namedFixes(plan, blocking.length ? blocking : minor), why: u.why });
+  if (!blocking.length) {
+    const then = minor.length > 1 ? t("They do not block the merge, so they go to a follow-up issue. Merge it.") : t("It does not block the merge, so it goes to a follow-up issue. Merge it.");
+    return { text: `${said} ${then}`, parts: { fix: [], drop }, merges: true, ...on };
+  }
+  if (u.byHand && (u.author || !approved)) {
+    const made = blocking.length > 1 ? t("Make them on the pull request's branch and reply once they are there.") : t("Make it on the pull request's branch and reply once it is there.");
+    const then = approved ? `${made} ${t("The merge stays approved, and AutoCraft reviews the new commits before it merges.")}` : made;
+    return { text: `${said} ${then}`, parts: { fix: [], drop }, merges: approved, goes: "look", ...on };
+  }
+  if (u.author || !approved) return { text: `${said} ${textFor({ author: true })}`, parts: { fix: [], drop }, merges: approved, author: "ask", ...on };
+  const then = blocking.length > 1 ? t("Make them again, then merge.") : t("Make it again, then merge.");
+  return { text: `${said} ${then}`, parts: { fix: [...blocking], drop }, merges: true, ...on };
 }
 
 const STOPS = {
