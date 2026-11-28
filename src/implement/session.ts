@@ -11,7 +11,7 @@ import type { Db } from "../db/index.ts";
 import { loadEnvs } from "../data/build/index.ts";
 import { loadImplementationView } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
-import { loadWorkflowHistory } from "../data/workflow/rows.ts";
+import { loadWorkflowHistory } from "../data/workflow/index.ts";
 import { droppedTitles } from "../workflow/work.ts";
 import { loadCallPrompt } from "../data/runners/index.ts";
 import { ensurePrompts } from "../data/prompts/index.ts";
