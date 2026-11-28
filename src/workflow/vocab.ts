@@ -53,8 +53,8 @@ export const COMMANDS: readonly CommandDef[] = [
   },
   {
     word: "merge", usage: "merge", aliases: ["merge queue", "merge-queue", "mergequeue", "land", "ship"], entry: "merge",
-    short: tk("Get it merged: fixes, checks, then the merge; on a pull request nobody started, the merge queue."),
-    does: tk("Asks AutoCraft to get the item merged: it makes every fix the merge needs, runs the checks and merges on green CI, with no full review (review and merge keeps it). On a started item the steps stay the same and end in a merge; on an open recommendation, it runs the recommendation, then merges. A pull request nobody started goes straight to the merge queue, with no review."),
+    short: tk("Approve the merge once the fixes are done; on a pull request nobody started, the merge queue."),
+    does: tk("Approves the merge once any outstanding fixes or implementation are done, with no full review; review and merge approves it if the full review finds no blocker, once its recommended fixes are done. AutoCraft makes the fixes and merges on green CI. On a started item the steps stay the same and end in a merge; on an open recommendation, it runs the recommendation, then merges. A pull request nobody started goes straight to the merge queue, with no review."),
     back: tk("Only at a blocker."),
     example: "merge",
   },
