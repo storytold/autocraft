@@ -14,6 +14,7 @@ import { loadSessions } from "../src/fixsession/store.ts";
 import { setFixSessions } from "../src/fixsession/switch.ts";
 import { ensureWorkspace, fixWorkspaceReading, WorkspaceUnavailable } from "../src/fixsession/workspace.ts";
 import { runFixup } from "../src/fixup/index.ts";
+import { CHECK_PATCH_CAP } from "../src/patchcheck/types.ts";
 import { CLIPPY_ARTIFACT } from "../src/prepush/index.ts";
 import { carriedReviews } from "../src/review/carry.ts";
 import { callId, fixPod } from "./helpers/fix-pod.ts";
@@ -76,6 +77,19 @@ test("a fix session's fix-up push is recorded as our checked fix-up, so the revi
   const carried = (await carriedReviews(s.db, [{ repo: "app", number: 7, head_oid: row!.to_head! }])).get("app#7");
   assert.equal(carried?.review.verdict, "take");
   assert.equal(carried?.from, s.w.head);
+});
+
+test("a session's change over the inline check's limit is checked in the session's workspace, whole, and pushed", async () => {
+  const s = await sessionWorld(README);
+  const long = `# App\n${Array.from({ length: 6000 }, (_, i) => `- line ${i} of the notes\n`).join("")}`;
+  s.pod.model(() => ({ [README]: long }));
+  await s.run();
+  const [checked] = s.w.checked;
+  assert.equal(checked?.workspaceId, s.session.workspaceId, "the check works in the session's workspace");
+  assert.ok(checked!.input.change!.chars > CHECK_PATCH_CAP && checked!.input.change!.chars > 120_000);
+  assert.deepEqual(checked!.input.change!.files, [{ path: README, kind: "edit" }]);
+  assert.equal((await s.rows())[0]?.state, "pushed", s.out.join("\n"));
+  assert.equal(pushes(s.w.log).length, 1);
 });
 
 test("lint findings on a stored change go back to the session that wrote it, and to a fresh session on the restored change when its runner does not take them", async () => {

@@ -9,6 +9,7 @@ import { setPushApproval } from "../../src/fixup/approval.ts";
 import { exec, type Exec, type ExecResult } from "../../src/fixup/git.ts";
 import type { FixupDeps } from "../../src/fixup/index.ts";
 import type { FixupPr } from "../../src/fixup/patch.ts";
+import type { FixupCheckInput } from "../../src/patchcheck/types.ts";
 import { insertWorkflow } from "../../src/workflow/store.ts";
 import { acting, appLane } from "../acting.ts";
 import { reportingTaskRunner } from "../fake-runner.ts";
@@ -47,7 +48,7 @@ export async function fresh(head: string, o: Opts = {}): Promise<Db> {
 
 // ---- the whole step against real git, with the network replaced ------------
 
-export type World = { asked: FixupPr[]; assigned: string[]; fork: string; base: string; head: string; log: string[]; deps: FixupDeps; movedBeforePush?: boolean };
+export type World = { asked: FixupPr[]; /** The patch checks asked: the input, and the workspace a check in a fix session's workspace works in. */ checked: { input: FixupCheckInput; workspaceId: number | null }[]; assigned: string[]; fork: string; base: string; head: string; log: string[]; deps: FixupDeps; movedBeforePush?: boolean };
 
 /** A fork repository with branch `fix` at `head`, standing in for both the base repo's pull ref and the contributor's fork. */
 export const APPROVE = JSON.stringify({ verdict: "approve", reasons: "matches the listed fix", problems: [] });
@@ -66,7 +67,7 @@ export function world(opts: { check?: string | null; reply?: string | null; move
   git(root, "clone", "-q", "--bare", work, fork);
   git(fork, "update-ref", "refs/pull/7/head", head);
   const log: string[] = [];
-  const w: World = { asked: [], assigned: [...(opts.assignees ?? [])], fork, base: root, head, log, deps: undefined as never };
+  const w: World = { asked: [], checked: [], assigned: [...(opts.assignees ?? [])], fork, base: root, head, log, deps: undefined as never };
   const good = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n-fn a() {}\n-fn main() { a(); }\n+fn b() {}\n+fn main() { b(); }\n";
   const querier: Querier = validating({
     spent: 0, remaining: 5000,
@@ -106,7 +107,14 @@ export function world(opts: { check?: string | null; reply?: string | null; move
     querier, lane: appLane(querier), exec: run, now: () => new Date(T1), root: join(root, "cache"),
     fetchDiff: async () => ({ ok: true, text: opts.diff ?? "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+fn a() {}\n" }),
     ask: async (_db, input) => { log.push("model"); w.asked.push(...input); return opts.reply === undefined ? good : opts.reply; },
-    check: async (_db, input) => { log.push("check"); assert.match(input[0]!.patch, /^diff --git/); return opts.check === undefined ? APPROVE : opts.check; },
+    check: async (_db, input, _checkout, ws) => {
+      log.push("check");
+      w.checked.push({ input: input[0]!, workspaceId: ws?.workspaceId ?? null });
+      // A check in a fix session's workspace reads the change there; any other gets it inline.
+      if (ws) assert.equal(input[0]!.patch, "");
+      else assert.match(input[0]!.patch, /^diff --git/);
+      return opts.check === undefined ? APPROVE : opts.check;
+    },
   };
   return w;
 }
