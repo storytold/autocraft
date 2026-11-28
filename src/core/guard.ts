@@ -14,6 +14,7 @@ import { ownImplementation } from "./implementation.ts";
 import { loadItemFact } from "./issue-facts.ts";
 import type { Action, ActionKind, Permission, Plan, PrFacts } from "./plan.ts";
 import type { Identity } from "../github/identity.ts";
+import type { RefusalCode } from "./codes.ts";
 import { botRepo } from "../discord/filing-repos.ts";
 import type { Db } from "../db/index.ts";
 
@@ -29,7 +30,8 @@ export type GuardedRepo = { readonly [guarded]: true; readonly scope: "repo"; re
 export type GuardedFiling = { readonly [guarded]: true; readonly scope: "filing"; readonly owner: string; readonly repo: string; readonly as: "app" };
 /** What an item or repo write accepts. A PR grant is left out: no caller writes with one, and a merge or CI grant must not type-check there. */
 export type Grant = GuardedItem | GuardedRepo;
-export type Refused = { refused: string };
+/** `code`: the gate rule that refused it, where one did (src/core/codes.ts). */
+export type Refused = { refused: string; code?: RefusalCode };
 /** An item action to guard: the Plan must hold the kind with the bucket, person action and source given. */
 export type ItemWant = Want & { id?: number; source?: string };
 /** The action to guard: `head` is the head the caller reviewed or worked on. `batch`: a member of a merge batch, which is in its batch state, not ready. */
@@ -148,7 +150,7 @@ export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, logi
     && (action.id === undefined || x.params?.id === action.id)
     && (action.source === undefined || x.params?.source === action.source));
   const may = mayRun({ facts: f, action: due ?? asAction(action, null) }, by);
-  if (!may.ok) return { refused: `${name}: ${may.why.text}` };
+  if (!may.ok) return { refused: `${name}: ${may.why.text}`, code: may.why.code };
   if (!due) return { refused: `${name}: the plan no longer has ${action.kind}${action.bucket ? `:${action.bucket}` : ""} (state ${plan.state}, ${actionsOf(plan)})` };
   return { scope: "item", action, repo: ref.repo, number: ref.number, as: login ? `user:${login}` : "app" } as unknown as GuardedItem;
 }

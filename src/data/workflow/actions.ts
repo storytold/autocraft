@@ -60,21 +60,23 @@ export async function loadActionsDue(db: Db, f?: { repos?: string[]; kinds?: Act
 
 /**
  * Batched update that writes only when the state or, when given, the reason, the comment or the tries differ from the stored row, so a
- * repeated waiting state wakes nothing. `done` also sets `done_at`. `from`: only rows still in one of these states.
+ * repeated waiting state wakes nothing. `done` also sets `done_at`. `from`: only rows still in one of these states. `was`: only a row still
+ * at the head and update time the caller read, so a request queued again meanwhile (queueActions) is not taken for the one it worked on.
  */
-export async function saveActions(db: Db, rows: { id: number; state: ActionState; reason?: string | null; commentUrl?: string | null; attempts?: number; at: string }[], o: { from?: readonly ActionState[] } = {}): Promise<void> {
+export async function saveActions(db: Db, rows: { id: number; state: ActionState; reason?: string | null; commentUrl?: string | null; attempts?: number; at: string; was?: { head: string | null; updatedAt: string } }[], o: { from?: readonly ActionState[] } = {}): Promise<void> {
   const last = [...new Map(rows.map((r) => [r.id, r])).values()];
   if (!last.length) return;
-  const shape = (r: (typeof rows)[number]) => [r.reason !== undefined, r.commentUrl !== undefined, r.attempts !== undefined, r.state === "done"] as const;
+  const shape = (r: (typeof rows)[number]) => [r.reason !== undefined, r.commentUrl !== undefined, r.attempts !== undefined, r.state === "done", r.was !== undefined] as const;
   await db.write(async () => {
     for (const group of groupBy(last, (r) => shape(r).join())) {
-      const [reason, url, attempts, done] = shape(group[0]);
+      const [reason, url, attempts, done, was] = shape(group[0]);
       const set: Record<string, kx.ElemType> = { state: "text", updated_at: "text", ...(reason ? { reason: "text" } : {}), ...(url ? { comment_url: "text" } : {}), ...(attempts ? { attempts: "bigint" } : {}), ...(done ? { done_at: "text" } : {}) };
       const values = group.map((r): Record<string, Param> => ({
         id: r.id, state: r.state, updated_at: r.at, ...(reason ? { reason: r.reason ?? null } : {}), ...(url ? { comment_url: r.commentUrl ?? null } : {}),
-        ...(attempts ? { attempts: r.attempts! } : {}), ...(done ? { done_at: r.at } : {}),
+        ...(attempts ? { attempts: r.attempts! } : {}), ...(done ? { done_at: r.at } : {}), ...(was ? { was_head: r.was!.head, was_at: r.was!.updatedAt } : {}),
       }));
       await patchRows(db, T, { id: "bigint" }, set, values, {
+        ...(was ? { guard: { was_head: "text", was_at: "text" } } : {}),
         when: (eb) => eb.and([
           eb.or([
             eb(`${T}.state`, "is distinct from", eb.ref("v.state")),
@@ -83,6 +85,7 @@ export async function saveActions(db: Db, rows: { id: number; state: ActionState
             ...(attempts ? [eb(`${T}.attempts`, "is distinct from", eb.ref("v.attempts"))] : []),
           ]),
           ...(o.from ? [eb(`${T}.state`, "in", [...o.from])] : []),
+          ...(was ? [eb(`${T}.head`, "is not distinct from", eb.ref("v.was_head")), eb(`${T}.updated_at`, "=", eb.ref("v.was_at"))] : []),
         ]),
       });
     }

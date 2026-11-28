@@ -21,7 +21,8 @@ import { addStageEvents } from "../data/planner/index.ts";
 import { listWorkflows, loadActions, loadActionsDue, saveActions, type ActionState, type DueAction } from "../data/workflow/index.ts";
 import { authorAsk, type AuthorAsk } from "../workflow/types.ts";
 import { authorUnaskableOf } from "../workflow/effects.ts";
-import { authorNotAsked } from "../workflow/advance.ts";
+import { authorAskState, authorNotAsked } from "../workflow/advance.ts";
+import type { RefusalCode } from "../core/codes.ts";
 import { chainsOwn } from "../core/evidence.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import type { Db } from "../db/index.ts";
@@ -56,7 +57,8 @@ export type ActParams = {
 
 export type ActSummary = {
   repo: string; dryRun: boolean;
-  done: string[]; skipped: { ref: string; reason: string }[]; failed: { ref: string; reason: string }[];
+  /** Items closed (`done`) and PR authors asked (`asked`, src/workflow/effects.ts queueAuthorAsk). */
+  done: string[]; asked: string[]; skipped: { ref: string; reason: string }[]; failed: { ref: string; reason: string }[];
   /** Queued card presses carried out by this run. */
   cards?: number;
   /** Follow-up issues held until the merge that this run filed or dropped (src/conversations/held.ts). */
@@ -98,7 +100,7 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const d = deps ?? defaultDeps();
   const now = () => d.now();
-  const summary: ActSummary = { repo, dryRun, done: [], skipped: [], failed: [], note: null };
+  const summary: ActSummary = { repo, dryRun, done: [], asked: [], skipped: [], failed: [], note: null };
   let cardWrites = 0;
   if (!dryRun) {
     // Queued card presses run first, from the same shared daily count: they were pressed before this run, and each is held to the presser's current access.
@@ -124,7 +126,8 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
   if (dryRun) {
     for (const a of todo) log(a.kind === "ask-author" ? `  would ask the author of ${refOf(a)}` : `  would close ${refOf(a)}${a.close_as ? ` (${a.close_as})` : ""} as ${a.by}`);
     log(`act ${repo}: dry run, nothing called or written`);
-    summary.done = todo.map(refOf);
+    summary.done = todo.filter((a) => a.kind !== "ask-author").map(refOf);
+    summary.asked = todo.filter((a) => a.kind === "ask-author").map(refOf);
     return summary;
   }
 
@@ -134,13 +137,13 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
     if (!await actRoom(db, 1, now().getTime())) { summary.note = "the daily limit is reached"; break; }
     const o = { deps: d, by: params.by ?? CLI_BY, log, started: () => { handled++; params.onHandled?.(handled); } };
     const r = a.kind === "ask-author" ? await askOne(db, a, o) : await closeOne(db, a, o);
-    if (r.kind === "done") summary.done.push(refOf(a));
+    if (r.kind === "done") (a.kind === "ask-author" ? summary.asked : summary.done).push(refOf(a));
     else if (r.kind === "skipped") summary.skipped.push({ ref: refOf(a), reason: r.reason });
     else if (r.kind === "failed") summary.failed.push({ ref: refOf(a), reason: r.reason });
     else if (r.kind === "stop") { summary.failed.push({ ref: refOf(a), reason: r.reason }); break; }
     else if (r.kind === "paced") { summary.paced = r.reason; break; }
   }
-  log(`act ${repo}: ${summary.done.length} closed, ${summary.skipped.length} skipped, ${summary.failed.length} failed`);
+  log(`act ${repo}: ${summary.done.length} closed, ${summary.asked.length} authors asked, ${summary.skipped.length} skipped, ${summary.failed.length} failed`);
   return summary;
 }
 
@@ -239,21 +242,27 @@ async function closeOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (
   }
 }
 
+/** Gate refusals of an author ask that do not clear by themselves: a person answers again (their command is its own approval). */
+const UNSENT_STAYS: ReadonlySet<RefusalCode> = new Set(["box-identity", "actor-gone", "not-approved"]);
+
 /**
  * Posts the comment of a workflow's author ask (src/workflow/effects.ts queueAuthorAsk) as the app: only while the workflow still waits
  * for the author at the head it was asked at (or our own pushes on top of it), and the PR is open there. A person's command is its
  * approval; an ask the review made acts for the person who started the work (core/gates.ts). An ask that ends without its comment, while
  * the workflow still waits with it, brings the workflow back to the person with the reason (authorNotAsked): it never waits for a
- * comment nobody got. A bot, AutoCraft itself or a quiet PR's author is never asked.
+ * comment nobody got. So does a gate refusal that does not clear by itself (UNSENT_STAYS); one that does (the pipeline is off) leaves
+ * the ask pending and the workflow's status names it (authorAskState). A bot, AutoCraft itself or a quiet PR's author is never asked.
+ * Every write of the row holds only while it is the request read (`was`): a new ask queued meanwhile is posted by itself.
  */
 async function askOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (line: string) => void; started: () => void }): Promise<Ended> {
   const { deps: d, log } = o;
   const at = () => d.now().toISOString();
   const say = (text: string) => jobItem(db, a.repo, a.number, text, log);
   const pr = { repo: a.repo, number: a.number };
+  const was = { head: a.head, updatedAt: a.updated_at };
   /** `back`: the ask the workflow still waits with, which comes back to the person; `again`: their yes asks the author again. */
   const end = async (reason: string, back: AuthorAsk | null, again = true): Promise<Ended> => {
-    await saveActions(db, [{ id: a.id, state: "skipped", reason, at: at() }], { from: ["pending"] });
+    await saveActions(db, [{ id: a.id, state: "skipped", reason, at: at(), was }], { from: ["pending"] });
     await say(`author not asked: ${reason}`);
     if (back && await authorNotAsked(db, a.workflow_id, back, reason, again, at())) await say("the question comes back to the person");
     return { kind: "skipped", reason };
@@ -272,11 +281,19 @@ async function askOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (li
       return await end(`the pull request changed after the ask (${short(a.head)} → ${short(live.head)})`, ask);
     }
     const g = await guardItem(db, pr, { kind: "act", bucket: "close", id: a.id }, o.by, a.by);
-    if ("refused" in g) { await say(`author not asked yet: ${g.refused}`); return { kind: "left" }; }
+    if ("refused" in g) {
+      const why = g.refused.startsWith(`${refOf(a)}: `) ? g.refused.slice(refOf(a).length + 2) : g.refused;
+      if (g.code && UNSENT_STAYS.has(g.code)) return await end(why, ask);
+      await saveActions(db, [{ id: a.id, state: "pending", reason: `not asked yet: ${why}`, at: at(), was }], { from: ["pending"] });
+      await authorAskState(db, a.workflow_id, ask, { unsent: why }, at());
+      await say(`author not asked yet: ${why}`);
+      return { kind: "left" };
+    }
     if (authorAsk((await listWorkflows(db, { ids: [a.workflow_id] }))[0] ?? null)?.at !== ask.at) return await end("the ask changed", null);
     const w: Writer = { db, login: ACTOR, ...d.app };
     const url = await commentOn(w, g, d.querier, "act-comment", { ...pr, id: live.id }, ask.auto ? { by: "fixed" } : { by: "fixed-operator" }, ask.text, { action: a.id, workflow: a.workflow_id, by: a.by, head: a.head });
-    await saveActions(db, [{ id: a.id, state: "done", reason: null, commentUrl: url, at: at() }], { from: ["pending"] });
+    await saveActions(db, [{ id: a.id, state: "done", reason: null, commentUrl: url, at: at(), was }], { from: ["pending"] });
+    await authorAskState(db, a.workflow_id, ask, "posted", at());
     await say("asked the author");
     return { kind: "done" };
   } catch (e) {
@@ -285,7 +302,7 @@ async function askOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (li
     if (githubWide(e)) { await say(`GitHub is failing, stopping: ${why}`); return { kind: "stop", reason: why }; }
     const attempts = a.attempts + 1, last = attempts >= ACT_MAX_ATTEMPTS;
     const shown = last ? `stopped after ${attempts} failed tries: ${why}` : why;
-    await saveActions(db, [{ id: a.id, state: last ? "failed" : "pending", reason: shown, attempts, at: at() }], { from: ["pending"] });
+    await saveActions(db, [{ id: a.id, state: last ? "failed" : "pending", reason: shown, attempts, at: at(), was }], { from: ["pending"] });
     await say(`author not asked: ${shown}`);
     if (last && await authorNotAsked(db, a.workflow_id, ask, shown, true, at())) await say("the question comes back to the person");
     return { kind: "failed", reason: shown };

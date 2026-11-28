@@ -42,12 +42,14 @@ import { t, tk } from "../i18n/index.ts";
 import { ROUND_DELTA_LARGE, ROUND_UNSEPARATED, roundsToday } from "../core/author-round.ts";
 import { partsToMake } from "../core/review-blocking.ts";
 import { verificationOf } from "../data/merge/index.ts";
+import { authorUnaskable } from "./unaskable.ts";
+import { actBlocked } from "../core/repo-approvals.ts";
 import { causeWent, fixable, itemQuestion, legStop, questionFor, type Question } from "./ask.ts";
 import { asksNobody } from "./asked.ts";
 import { headKey, premergeOf, recheckRuleRow, startAutoStops } from "./auto-stop.ts";
 import { blockWorkflow } from "./block.ts";
 import { checkedOtherHead, codeOf, detectBlocker, fixesFirst, fixUnmade, LANE_STEPS, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
-import { again as fixAgain, authorAskFor, authorUnaskable, EffectError, queueAuthorAsk, type Instruction } from "./effects.ts";
+import { again as fixAgain, authorAskFor, EffectError, queueAuthorAsk, type Instruction } from "./effects.ts";
 import { premergeParts } from "./premerge.ts";
 import { afterPush, atBlocker, conflictOf, droppedOf, onConflict, planOf, textFor, withoutAuthor, type ReviewView } from "./recommend.ts";
 import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
@@ -421,6 +423,23 @@ export async function authorNotAsked(db: Db, workflowId: number, ask: AuthorAsk,
 }
 
 /**
+ * Records on the workflow that waits for its author with `ask` that its comment is posted, or why it is not yet (`unsent`), so its status
+ * says which. Written only while the workflow still waits with that ask and it changed; true when written.
+ */
+export async function authorAskState(db: Db, workflowId: number, ask: AuthorAsk, to: "posted" | { unsent: string }, at: string): Promise<boolean> {
+  return await db.write(async () => {
+    const w = (await listWorkflows(db, { ids: [workflowId], live: true }))[0];
+    const now = w ? authorAsk(w) : null;
+    if (!w || !now || now.at !== ask.at) return false;
+    const { unsent: _, posted: __, ...rest } = now;
+    const next: AuthorAsk = to === "posted" ? { ...rest, posted: true } : { ...rest, unsent: to.unsent };
+    if (sameJson(next, now)) return false;
+    await saveWorkflows(db, [{ id: w.id, at, patch: { blockerParams: { ...w.blockerParams, author: next } } }]);
+    return true;
+  });
+}
+
+/**
  * A person's fix-up of a PR that no merge leg works (not approved for merge), queued at the head our own push moved on from (the base
  * merge that comes first on a PR that conflicts): it is made at the new head. An approved PR's merge leg moves its own.
  */
@@ -505,6 +524,8 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   };
   const self = pass.items.get(key(w.repo, w.number));
   const base: WorkflowPatch = {};
+  /** When the question the workflow stood at on this pass was made: a review older than it was read for that question. */
+  const leftQuestionAt = w0.state === "blocked" || w0.state === "recommending" ? w0.recAt : null;
   // A recommendation that stands for an implementation's question goes once the question is answered or set aside elsewhere (a
   // comment on the issue, an edited issue, a later round): the workflow runs on.
   const asks = askedBy(w.rec);
@@ -827,13 +848,15 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       const unaskable = rec.author && w.kind === "pr" ? authorUnaskable({ login: pr.author, type: pr.author_type, quiet: !!f?.quiet, own: pass.own }) : null;
       if (unaskable) rec = withoutAuthor(rec, unaskable, says?.public_summary ?? null);
       // The review finds the PR incomplete or wrong and recommends asking its author: AutoCraft does that at once, and the item waits for
-      // their push. Only a review made since the person last started or answered (or one that asks in its own words) asks by itself: an
-      // older review of the same head, read again after a resume or a closed question, comes back as the question.
-      const fresh = says?.workflow?.recommendation?.author === true || (says !== null && says.at > since);
+      // their push. Only a review made since the person last started or answered (or one that asks in its own words) asks by itself, and
+      // never one made before a question this workflow left (it closed by itself, or a push went past it) or before the last resume: that
+      // review, read again, comes back as the question, and the person who resumed can still say ask author.
+      const fresh = says !== null && (says.workflow?.recommendation?.author === true || says.at > since)
+        && (leftQuestionAt === null || says.at > leftQuestionAt) && (resumed === null || says.at > resumed);
       if (rec.author === "ask" && w.kind === "pr" && says && says.head === head && w.startedBy !== RULE_STARTER && fresh) {
         const login = pr.author ?? null;
         const conflict = pr.mergeable === "CONFLICTING" ? pr.base_ref ?? null : null;
-        const asked = authorAskFor({ login, head, review: says, plan, words: null, by: w.takenBy ?? w.startedBy, at: pass.at, conflict, auto: true });
+        const asked = authorAskFor({ login, head, review: says, plan, words: null, by: w.takenBy ?? w.startedBy, at: pass.at, conflict, auto: true, unsent: await actBlocked(db, w.repo) });
         writes.asks.push({ w, pr: { repo: w.repo, number: target }, ask: asked });
         return write({ ...patch, state: "waiting", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: { author: asked } });
       }

@@ -138,7 +138,11 @@ export const openRecommendation = (wf: Pick<ItemWorkflow, "state" | "rec"> | nul
  * head it was asked at. Their push ends the wait; nothing else of AutoCraft's runs on the item meanwhile. `by`: who asked; `auto`: the
  * review's recommendation asked, with nobody's question first.
  */
-export type AuthorAsk = { login: string | null; head: string; text: string; line: string; by: string; at: string; auto?: true };
+/**
+ * `posted`: the comment is on GitHub. `unsent`: why AutoCraft has not posted it yet, while that clears by itself (the pipeline is off,
+ * GitHub has not answered on access); it posts once it does.
+ */
+export type AuthorAsk = { login: string | null; head: string; text: string; line: string; by: string; at: string; auto?: true; posted?: true; unsent?: string };
 
 /** The author ask of a workflow that waits for its PR's author; null for any other. */
 export const authorAsk = (wf: Pick<ItemWorkflow, "kind" | "state" | "blockerParams"> | null): AuthorAsk | null => {

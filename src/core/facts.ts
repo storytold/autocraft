@@ -34,6 +34,7 @@ import { standingFor } from "./standing.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
 import type { WorkflowFact } from "../data/workflow/types.ts";
 import { settlerOf } from "../workflow/work.ts";
+import { authorUnaskable } from "../workflow/unaskable.ts";
 import { fixesToMake, followUpClaims, reviewFollowUps, verdictToAct } from "./review-blocking.ts";
 import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData, type SharedDupes } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
@@ -464,7 +465,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
    */
   const conflictFacts = (): void => {
     if (base.mergeable !== "CONFLICTING" || !i.base_ref) return;
-    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff, uncapped: owned !== null }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved && !base.quiet }, now);
+    // The comment asks the author to resolve it: never a bot, AutoCraft itself, or a quiet PR's author. Our own merge of the base still goes.
+    const askless = authorUnaskable({ login: i.author, type: i.author_type, quiet: !!base.quiet, own: d.ownLogins }) !== null;
+    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff, uncapped: owned !== null }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved && !askless }, now);
     const until = bucket === "capped" ? nextUtcMidnight(now) : bucket === "ask-retry" ? conflictAskRetryAtOf(patch.conflicts, qh, now) : undefined;
     base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
   };

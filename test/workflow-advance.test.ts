@@ -418,7 +418,7 @@ test("a started review whose hold finds the PR incomplete asks its author at onc
   assert.ok(decidePr((await loadPrFact(db, "app", 2))!).actions.some((a) => a.kind === "review" && a.head === "sha9"), "the author's push is reviewed");
 });
 
-test("a hold review never asks the author by itself when it has no blocking class, was read again after the person went on, or the author is a bot: the person gets the question", async () => {
+test("a hold review never asks the author by itself when it has no blocking class, was read again after a question closed by itself or the person went on, or the author is a bot: the person gets the question", async () => {
   const w = await approvedReview();
   const db = w.db;
   const send = async (text: string, n: number) => { const r = (await runCommand(db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: n }] })).items[0]!; assert.equal(r.outcome, "run", JSON.stringify(r)); };
@@ -438,6 +438,16 @@ test("a hold review never asks the author by itself when it has no blocking clas
   const states = async () => await Promise.all([2, 3, 4].map(async (n) => { const wf = (await liveWorkflow(db, "app", n))!; return [wf.state, wf.rec?.author ?? (wf.rec?.backlog ? "backlog" : null)]; }));
   assert.deepEqual(await states(), [["recommending", "scope"], ["waiting", null], ["recommending", "backlog"]]);
   assert.deepEqual(await asks(), [3]);
+  // A question made after that review closes by itself (its cause went: GitHub says whether it can be merged): the review, read again, comes back as the
+  // question instead of asking the author.
+  await db.run(db.k.deleteFrom("main.workflow_actions"));
+  const asked3 = (await liveWorkflow(db, "app", 3))!;
+  const shownAt = new Date(Date.now() + 500).toISOString();
+  const stuck = { text: "GitHub does not say whether it can be merged.", parts: { fix: [], drop: [] }, merges: false, cause: { code: "mergeable-stuck" as const } };
+  await saveWorkflows(db, [{ id: asked3.id, patch: { state: "recommending", rec: stuck, recAt: shownAt, recHead: "sha3", blocker: null, blockerParams: null }, at: shownAt }]);
+  await advanceWorkflows(db);
+  assert.deepEqual((await states())[1], ["recommending", "ask"]);
+  assert.deepEqual(await asks(), []);
   // The person went on after that review (an answer, as when a question's cause went): the same review, read again, comes back as the
   // question instead of asking again.
   await db.run(db.k.deleteFrom("main.workflow_actions"));

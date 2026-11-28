@@ -144,6 +144,8 @@ export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcCl
       const ask = authorAsk(wf);
       if (ask) {
         const who = ask.login ?? t("the author");
+        if (ask.unsent) return t("Waiting to ask {author}: {reason}", { author: who, reason: ask.unsent });
+        if (!ask.posted) return t("Asking {author}: {line}", { author: who, line: ask.line });
         return ask.auto ? t("Waiting for {author}, asked after the review: {line}", { author: who, line: ask.line }) : t("Waiting for {author}: {line}", { author: who, line: ask.line });
       }
       return current ? t("Waiting: {step}", { step: stepLabel(current) }) : t("Waiting");

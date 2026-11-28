@@ -184,7 +184,8 @@ function factsOf(r: BrowseRow, compact = false) {
   const size = r.size ? t("Size {s}", { s: r.size }) : "";
   return {
     asks: r.asksYou && <Badge tone="accent">{t("Asks you")}</Badge>,
-    state: (short: boolean) => r.step ? <StepBadge r={r} step={r.step} short={short} className={pad} /> : word && (
+    // A workflow that waits for its author's push says so, whatever step it stands at.
+    state: (short: boolean) => r.step && r.autocraft !== "author" ? <StepBadge r={r} step={r.step} short={short} className={pad} /> : word && (
       <span title={t(AUTOCRAFT_TITLE[r.autocraft])} className="relative z-10">
         <Badge tone={word.tone} className={pad}>
           {short && r.autocraft === "stopped" ? (

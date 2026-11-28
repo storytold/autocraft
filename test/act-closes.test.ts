@@ -18,6 +18,7 @@ import { scopeRepos } from "../src/runner/scope.ts";
 import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
+import { stateLine } from "../src/workflow/status.ts";
 import { legWait } from "../src/workflow/waits.ts";
 import { OPERATOR, T0, T1, world, type World } from "./world-db.ts";
 
@@ -250,17 +251,27 @@ describe("a close that is not made", () => {
   });
 });
 
-test("an ask of the author is posted once at its head; one the author's push overtook brings the workflow back as a question", async () => {
+test("an ask of the author is posted once at its head, its status names what holds it back until then; one the author's push overtook brings the workflow back as a question", async () => {
   const w = await fresh();
   await w.pr(8, { author: "octo-dev" });
+  const line = async () => stateLine((await liveWorkflow(w.db, "app", 8))!);
+  // While the pipeline is off the ask is not posted, and the status says so rather than that the author was asked.
+  await w.pipeline(false);
   assert.equal((await send(w, "ask author to wire the group editor", 8)).outcome, "run");
+  assert.match(await line(), /^Waiting to ask octo-dev: the pipeline is off/i);
   // The ask reads the PR through the step's own querier: its comment is the app's, with no person's lane.
   const reading = <G extends { deps: never }>(g: G): G => { (g.deps as { querier: unknown }).querier = { ...w.gh.querier, query: async (q: string, v?: object) => await readItem(w, q, (v ?? {}) as Record<string, unknown>) }; return g; };
+  const g0 = reading(github(w));
+  await runAct(w.db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, g0.deps);
+  assert.deepEqual([(await actionOf(w, 8)).state, g0.sent.length], ["pending", 0]);
+  assert.match(await line(), /^Waiting to ask octo-dev: the pipeline is off/i);
+  await w.pipeline(true);
   const g = reading(github(w));
-  assert.deepEqual((await run(w, g)).done, ["app#8"]);
+  assert.deepEqual((await run(w, g)).asked, ["app#8"]);
   assert.deepEqual([(await actionOf(w, 8)).state, g.what()], ["done", ["app:comment"]]);
   assert.match(String(g.sent[0]!.vars.body), /@octo-dev[\s\S]*wire the group editor/);
   assert.equal((await liveWorkflow(w.db, "app", 8))!.state, "waiting");
+  assert.match(await line(), /^Waiting for octo-dev: /);
   // A new ask, and a push of the author's before it is posted: nothing is posted, and the person gets the question again.
   assert.equal((await send(w, "ask author to cover split panes", 8)).outcome, "run");
   w.gh.live(8, { head: "moved" });

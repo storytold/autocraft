@@ -362,8 +362,8 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const { runAct } = await import("../act/index.ts");
       const r = await runAct(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.done.length + r.skipped.length + r.failed.length + (r.cards ?? 0) + (r.held ?? 0));
-      const line = `${r.repo}: ${r.done.length} closed, ${r.skipped.length} skipped, ${r.failed.length} failed${r.cards ? `, ${r.cards} queued presses carried out` : ""}${r.held ? `, ${r.held} held follow-up issues filed or dropped` : ""}`;
+      ctx.acted(r.done.length + r.asked.length + r.skipped.length + r.failed.length + (r.cards ?? 0) + (r.held ?? 0));
+      const line = `${r.repo}: ${r.done.length} closed, ${r.asked.length} authors asked, ${r.skipped.length} skipped, ${r.failed.length} failed${r.cards ? `, ${r.cards} queued presses carried out` : ""}${r.held ? `, ${r.held} held follow-up issues filed or dropped` : ""}`;
       // A failed close ends the job as failed, so the registered failure backoff spaces its next tries (a close stops after ACT_MAX_ATTEMPTS).
       if (r.failed.length) throw new Error(`${line}; ${r.failed[0]!.ref}: ${r.failed[0]!.reason}`);
       // Starts with the pacing message, so the failure backoff skips it like any paced job and the next pass runs it again.
