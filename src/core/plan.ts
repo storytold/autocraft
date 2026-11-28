@@ -274,7 +274,7 @@ export type PrFacts = {
   runsApprovedAfterMerge: boolean;
   /** The merge was approved after the failed or errored verification of the head: that approval stands over it. */
   verifyOverride: boolean;
-  /** `retryAt`: an errored verification that AutoCraft runs again then (ms; src/core/rules.ts verifyRetryAt); absent once a person settles the error. */
+  /** `retryAt`: an errored verification that AutoCraft runs again then (ms; src/core/rules.ts verifyRetryAt); absent once its runs again are used up, and when a person's approval went past the error (verifyOverride). */
   verification: { state: string; kind: string | null; summary: string | null; note: string | null; retryAt?: number } | null;
   /** Why Verify cannot build the repo (private, not Rust without CI), or null. */
   verifyUnavailable: string | null;

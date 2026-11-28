@@ -183,14 +183,33 @@ export async function restartVerifications(db: Db, rows: { key: HeadRef; headTas
   });
 }
 
-/** Marks verifications stale. Returns the rows changed. */
-export async function markVerificationsStale(db: Db, keys: HeadRef[], _by?: string): Promise<number> {
+/**
+ * Stamps each errored verification among `keys` as run again at `at` (`errors` + 1, `finished_at`): a retry of the error that wrote no row
+ * of its own (no plan, no diff), so its backoff (src/core/rules.ts verifyRetryAt) starts again. Rows in another state are left alone.
+ */
+export async function restampVerifyErrors(db: Db, keys: HeadRef[], at: string): Promise<void> {
+  if (keys.length === 0) return;
+  const q = queryDb(db);
+  await db.write(async () => {
+    for (const chunk of kx.chunks(keys)) {
+      const rows = chunk.map(splitHead);
+      await q.run(q.k.updateTable("verifications").set((eb) => ({ finished_at: at, errors: eb("errors", "+", 1) })).where("state", "=", "error")
+        .where((eb) => kx.tupleIn(db, [eb.ref("repo"), eb.ref("number"), eb.ref("head_sha")], rows.map((r) => [r.repo, r.number, r.head]), ["text", "bigint", "text"])));
+    }
+  });
+}
+
+/**
+ * Marks verifications stale. Returns the rows changed. Marked by AutoCraft itself (no `by`: the diff's base changed), a head's count of
+ * runs again over errors starts over; a person's Verify again (`by`) keeps it, so it gives one more run.
+ */
+export async function markVerificationsStale(db: Db, keys: HeadRef[], by?: string): Promise<number> {
   if (keys.length === 0) return 0;
   const q = queryDb(db);
   let n = 0;
   for (const chunk of kx.chunks(keys)) {
     const rows = chunk.map(splitHead);
-    n += Number((await q.run(q.k.updateTable("verifications").set({ state: "stale" })
+    n += Number((await q.run(q.k.updateTable("verifications").set(by === undefined ? { state: "stale", errors: 0 } : { state: "stale" })
       .where((eb) => kx.tupleIn(db, [eb.ref("repo"), eb.ref("number"), eb.ref("head_sha")], rows.map((r) => [r.repo, r.number, r.head]), ["text", "bigint", "text"])))).changes);
   }
   return n;

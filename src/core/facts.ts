@@ -500,10 +500,11 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.runsApprovedAfterMerge = !!wait?.approvedAt && wait.approvedAt > last.at;
   }
   const v = d.merge.verifications.get(`${ref}@${qh}`);
-  const verifyAgainAt = v ? verifyRetryAt(v) : null;
-  base.verification = v ? { state: v.state, kind: v.kind, summary: v.summary, note: v.note, ...(verifyAgainAt !== null ? { retryAt: verifyAgainAt } : {}) } : null;
   // The leg went to the queue over this result: the person had seen it when they answered (src/preapproval handOver).
   base.verifyOverride = !!handed && !!v?.finishedAt && (v.state === "failed" || v.state === "error") && v.finishedAt <= handed.updated_at;
+  // An error the person's approval went past is not run again: the approval merges it.
+  const verifyAgainAt = v && !base.verifyOverride ? verifyRetryAt(v) : null;
+  base.verification = v ? { state: v.state, kind: v.kind, summary: v.summary, note: v.note, ...(verifyAgainAt !== null ? { retryAt: verifyAgainAt } : {}) } : null;
   const shots = state === "OPEN" ? d.merge.regressions.get(`${ref}@${qh}`) : undefined;
   if (shots && (!wfFact || shots.at > wfFact.since)) base.screenshots = { summary: shots.summary };
   if (!base.verification || base.verification.state === "stale") {

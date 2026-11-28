@@ -150,12 +150,16 @@ test("review calls and failed tries count: runs fill the day's cap, failures bac
   const at = async (h: number) => (await planOf(w, 1, Date.now() + h * 3600_000)).actions.filter((a) => a.kind === "review").length;
   assert.equal(await at(0.2), 1);
   // Calls that ended without a reply back off apart, by their own count, and leave the model's count as it was.
-  for (let i = 0; i < 9; i++) await recordReviewFailure(w.db, "app", 1, "h2", Date.now(), true);
+  for (let i = 0; i < 4; i++) await recordReviewFailure(w.db, "app", 1, "h2", Date.now(), true);
   assert.equal(await at(5), 0);
   assert.equal(await at(7), 1);
   assert.equal((await planOf(w, 1)).waitKind, "system");
+  // The next one counts as the model's second failure: its 30-minute wait, not a lost call's first 10 minutes.
+  await recordReviewFailure(w.db, "app", 1, "h2", Date.now(), true);
+  assert.equal(await at(0.25), 0);
+  assert.equal(await at(0.6), 1);
   // The model's failures: after the quick waits, every 6 hours for about a day.
-  for (let i = 0; i < 6; i++) await recordReviewFailure(w.db, "app", 1, "h2");
+  for (let i = 0; i < 5; i++) await recordReviewFailure(w.db, "app", 1, "h2");
   assert.equal(await at(5), 0);
   assert.equal(await at(7), 1);
   await recordReviewFailure(w.db, "app", 1, "h2");

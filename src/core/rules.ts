@@ -72,6 +72,10 @@ export const RETRY_AFTER_MS = 3600_000;
 const SLOW_RETRY_MS = 6 * RETRY_AFTER_MS;
 /** Waits after pre-merge calls in a row that ended without a reply (a lost Task Runner, an outage), then every 6 hours: they use no try. */
 const PREMERGE_LOST_MS = [10 * 60_000, 30 * 60_000, 2 * RETRY_AFTER_MS, SLOW_RETRY_MS];
+/** Lost review calls at one head after which the next one counts as a model failure (src/review/gate.ts LOST_BACKOFF_MS has one wait each). */
+export const REVIEW_LOST_LIMIT = 4;
+/** Lost pre-merge calls in a row at one head after which the next one uses a try, so lost calls too end with a person. */
+export const PREMERGE_LOST_LIMIT = PREMERGE_LOST_MS.length;
 
 /**
  * Waits before AutoCraft runs an errored verification of a head again (an error is its own: the build, the plan, a lost task), after the

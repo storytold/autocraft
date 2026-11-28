@@ -8,7 +8,7 @@ import { addStageEvents } from "../planner/index.ts";
 import { headTuples, refKey } from "./rows.ts";
 import type { Finding, FollowupClaim, FollowupRow, PostSave, PostmergeSave, PremergeSave, RefKey, SaveReviewInput, SaveReviewResult } from "./types.ts";
 
-import { PREMERGE_MAX_TRIES, PREMERGE_QUICK_TRIES } from "../../core/rules.ts";
+import { PREMERGE_LOST_LIMIT, PREMERGE_MAX_TRIES, PREMERGE_QUICK_TRIES, REVIEW_LOST_LIMIT } from "../../core/rules.ts";
 export { PREMERGE_MAX_TRIES };
 /** A post-merge review that fails with a `retry:` error is stored as held at this try. */
 const MAX_RETRIES = 3;
@@ -117,9 +117,10 @@ export async function markStale(db: Db, items: { repo: string; number: number }[
 
 /**
  * One upsert: a failure at the head already counted adds to its count, a failure at another head sets both counts again. A `lost` call
- * (it ended without a reply, lostCallError) counts in lost_count and leaves the model's fail_count as it was.
+ * (it ended without a reply, lostCallError) counts in lost_count and leaves the model's fail_count as it was, until `lostLimit` of them
+ * stand at the head: the next one counts as one model failure and lost_count starts over, so lost calls too end with a person.
  */
-export async function recordReviewFailures(db: Db, items: { repo: string; number: number; head: string; at: string; lost?: boolean }[]): Promise<void> {
+export async function recordReviewFailures(db: Db, items: { repo: string; number: number; head: string; at: string; lost?: boolean }[], lostLimit = REVIEW_LOST_LIMIT): Promise<void> {
   type R = { repo: string; number: number; fail_head: string; fail_count: number; fail_at: string | null; lost_count: number; lost_at: string | null };
   const rows = new Map<RefKey, R>();
   for (const i of items) {
@@ -133,12 +134,38 @@ export async function recordReviewFailures(db: Db, items: { repo: string; number
   for (const part of kx.batches([...rows.values()])) {
     await q.run(q.k.insertInto("main.review_state").values(part).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => {
       const same = eb("main.review_state.fail_head", "=", eb.ref("excluded.fail_head"));
+      // A lost call past the limit at the same head: one model failure.
+      const over = eb.and([same, eb("excluded.lost_count", ">", 0), eb("main.review_state.lost_count", ">=", lostLimit)]);
       const sum = (c: "fail_count" | "lost_count") => eb.case().when(same).then(eb(`main.review_state.${c}`, "+", eb.ref(`excluded.${c}`))).else(eb.ref(`excluded.${c}`)).end();
       // A time this upsert does not set keeps the stored one at the same head.
       const time = (c: "fail_at" | "lost_at") => eb.case().when(same).then(eb.fn.coalesce(eb.ref(`excluded.${c}`), eb.ref(`main.review_state.${c}`))).else(eb.ref(`excluded.${c}`)).end();
-      return { fail_count: sum("fail_count"), lost_count: sum("lost_count"), fail_at: time("fail_at"), lost_at: time("lost_at"), fail_head: eb.ref("excluded.fail_head") };
+      return {
+        fail_count: eb.case().when(over).then(eb(eb("main.review_state.fail_count", "+", eb.ref("excluded.fail_count")), "+", 1)).else(sum("fail_count")).end(),
+        lost_count: eb.case().when(over).then(eb.lit(0)).else(sum("lost_count")).end(),
+        fail_at: eb.case().when(over).then(eb.ref("excluded.lost_at")).else(time("fail_at")).end(),
+        lost_at: time("lost_at"), fail_head: eb.ref("excluded.fail_head"),
+      };
     })));
   }
+}
+
+/**
+ * Deletes the too-large holds at `heads` that are still holds made without a model call under a diff size cap below `cap` (a hold without
+ * its cap counts as `unstamped`), and audits each as `review-again` by `by`. A review a model wrote there meanwhile stays. Returns what it removed.
+ */
+export async function dropTooLargeHolds(db: Db, heads: { repo: string; number: number; head: string }[], cap: number, unstamped: number, by: string): Promise<{ repo: string; number: number }[]> {
+  if (!heads.length) return [];
+  const q = queryDb(db);
+  return await db.write(async () => {
+    const gone: { repo: string; number: number; head_oid: string; reason: string | null; size_cap: number | null }[] = [];
+    for (const part of kx.chunks(heads)) {
+      gone.push(...await q.all(q.k.deleteFrom("main.opus_reviews").where(kx.tupleIn(db, ["repo", "number", "head_oid"], headTuples(part), TUPLE))
+        .where("verdict", "=", "hold").where("model", "is", null).where((eb) => eb(eb.fn.coalesce("size_cap", eb.lit(unstamped)), "<", cap))
+        .returning(["repo", "number", "head_oid", "reason", "size_cap"])));
+    }
+    if (gone.length) await addAudit(db, gone.map((g) => ({ login: by, action: "review-again", target: refKey(g.repo, g.number), details: { head: g.head_oid, reason: g.reason, cap: g.size_cap ?? unstamped, now: cap } })));
+    return gone.map((g) => ({ repo: g.repo, number: Number(g.number) }));
+  });
 }
 
 /** The operator "Review again" on a hold: deletes the hold review at each head and audits it. Returns what it removed. */
@@ -186,9 +213,16 @@ export async function savePremerge(db: Db, saves: PremergeSave[]): Promise<void>
         .doUpdateSet((eb) => ({ ...kx.excluded(["at", "run_id", "model", "error", "lost"])(eb), tries: eb("main.premerge_reviews.tries", "+", eb.ref("excluded.tries")) }))));
     }
     for (const part of kx.batches([...lost.values()])) {
-      // A stored review stays as it is: a lost call says nothing about it.
+      // A stored review stays as it is: a lost call says nothing about it. Past PREMERGE_LOST_LIMIT lost calls in a row the next one uses a try.
       await q.run(q.k.insertInto("main.premerge_reviews").values(part).onConflict((oc) => oc.columns(["repo", "number", "head_oid"])
-        .doUpdateSet((eb) => ({ ...kx.excluded(["at", "run_id", "model", "error"])(eb), lost: eb("main.premerge_reviews.lost", "+", eb.ref("excluded.lost")) }))
+        .doUpdateSet((eb) => {
+          const over = eb("main.premerge_reviews.lost", ">=", PREMERGE_LOST_LIMIT);
+          return {
+            ...kx.excluded(["at", "run_id", "model", "error"])(eb),
+            tries: eb.case().when(over).then(eb("main.premerge_reviews.tries", "+", 1)).else(eb.ref("main.premerge_reviews.tries")).end(),
+            lost: eb.case().when(over).then(eb.lit(0)).else(eb("main.premerge_reviews.lost", "+", eb.ref("excluded.lost"))).end(),
+          };
+        })
         .where("main.premerge_reviews.findings", "is", null)));
     }
     for (const part of kx.batches([...final.values()])) {

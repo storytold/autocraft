@@ -30,7 +30,7 @@ import { maybeScreenshot, type ScreenshotDeps } from "./screenshots.ts";
 import { regressionName, type Crate, type VerifyPlanInput } from "./types.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { slugOf } from "../owners.ts";
-import { saveVerifications as saveMerged, type SavedVerification, type VerificationState } from "../data/merge/index.ts";
+import { restampVerifyErrors, saveVerifications as saveMerged, type SavedVerification, type VerificationState } from "../data/merge/index.ts";
 import { loadRepos } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -222,6 +222,10 @@ export async function runVerify(db: Db, params: VerifyParams, log: (line: string
       }
     } finally { await release(); }
   }), poolRoom(db, () => [repo], (i) => [{ repo, number: cands[i]!.number }]), { max: POOL_MAX.verify });
+  // A run again of an errored verification that wrote no row (no crate list, no diff, no base, no planner answer) counts as one, so the
+  // error's backoff holds instead of the planner asking for it on every pass.
+  const skipped = new Set(summary.skipped);
+  await restampVerifyErrors(db, cands.filter((c) => skipped.has(refOf(c))).map((c) => `${c.repo}#${c.number}@${c.head_oid}` as const), now());
 
   if (queued) {
     const main = await deps.mainHead(repo, branch);

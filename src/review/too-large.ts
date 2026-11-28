@@ -4,7 +4,7 @@
 // for the current cap as well is made again, with that cap. Runs next to resumeRetiredStops (src/runner/index.ts); with no raise since,
 // it finds nothing.
 import type { Db } from "../db/index.ts";
-import { dropHoldReviews, loadTooLargeHolds } from "../data/review/index.ts";
+import { dropTooLargeHolds, loadTooLargeHolds } from "../data/review/index.ts";
 import { MAX_DIFF_CHARS } from "./diff.ts";
 
 /** The cap of the holds stored before each hold recorded its own. */
@@ -14,6 +14,6 @@ const CAP_BEFORE_STAMPS = 120_000;
 export async function reviewTooLargeAgain(db: Db, cap: number = MAX_DIFF_CHARS): Promise<string[]> {
   const holds = await loadTooLargeHolds(db, cap, CAP_BEFORE_STAMPS);
   if (!holds.length) return [];
-  const gone = await dropHoldReviews(db, holds, "pipeline");
+  const gone = await dropTooLargeHolds(db, holds, cap, CAP_BEFORE_STAMPS, "pipeline");
   return gone.map((g) => `${g.repo}#${g.number}`);
 }

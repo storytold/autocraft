@@ -31,7 +31,10 @@ const HOUR = 3600_000;
  * last wait holds the head for a person: a new commit, a Review again press or a maintainer's comment.
  */
 export const FAILURE_BACKOFF_MS = [10 * 60_000, 30 * 60_000, 2 * HOUR, 6 * HOUR, 6 * HOUR, 6 * HOUR, 6 * HOUR];
-/** Waits after review calls in a row at one head that ended without a reply (a lost Task Runner, an outage), then every 6 hours: they never hold the head for a person. */
+/**
+ * Waits after review calls in a row at one head that ended without a reply (a lost Task Runner, an outage). The call after the last wait
+ * counts as one model failure (recordReviewFailures), and the count of lost calls starts over.
+ */
 export const LOST_BACKOFF_MS = [10 * 60_000, 30 * 60_000, 2 * HOUR, 6 * HOUR];
 
 /** When the review may run again after the `n`th failure counted by `delays`, made at `at`; past the last delay null, or with `repeat` that delay again. */
@@ -141,7 +144,8 @@ export function holdsFrom(d: HoldInputs, nowMs: number): HoldCheck {
     }
     const lost = mark && mark.failHead === head && mark.lostCount > 0 ? mark : undefined;
     const lostUntil = lost ? retryAt(LOST_BACKOFF_MS, lost.lostCount, lost.lostAt, true)! : 0;
-    if (lost && lostUntil > nowMs) {
+    // A person's request since the last lost call goes ahead of its wait.
+    if (lost && lostUntil > nowMs && !(staleSince(repo, number, lost.lostAt ?? "") || await maintainerSince(states.get(ref), lost.lostAt ?? "", null))) {
       return { kind: "failed", wait: `the review after ${lost.lostCount} ${lost.lostCount === 1 ? "call" : "calls"} at this commit that ended without a reply, from ${new Date(lostUntil).toISOString().slice(11, 16)}`, until: lostUntil };
     }
     // A person's pre-approved merge waits for the review of the head the pipeline pushed for it: that is their request for it, as a review-again press would be.
