@@ -20,7 +20,7 @@ export type ChoiceItem = {
   live: boolean;
   held: boolean;
   approved: boolean;
-  rec: { text: string | null; merges: boolean } | null;
+  rec: { text: string | null; merges: boolean; fix: number[] } | null;
   /** The planned parts of the open question's plan; none on a quiet item. */
   parts: { n: number; title: string }[];
 };
@@ -44,13 +44,18 @@ export function candidatesFor(items: readonly ChoiceItem[], message: string, o: 
   const one = items.length === 1 ? items[0]! : null;
   const said = message.replace(/\s+/g, " ").trim();
 
+  // A choice that runs what the recommendation runs is left out: Jev would split the probability between two names for one command.
+  const fixesAll = !!one?.rec && one.parts.every((p) => one.rec!.fix.includes(p.n));
+  const sameAsYes = (o: { fix?: number[]; fixAll?: true; merge: boolean }): boolean =>
+    !!one?.rec?.merges && o.merge && (o.fixAll ? fixesAll : o.fix ? o.fix.length === one.rec.fix.length && o.fix.every((n) => one.rec!.fix.includes(n)) : true);
   if (one?.rec) {
-    add("yes", one.rec.text ? `Do what AutoCraft recommends, as it stands: ${quote(one.rec.text, REC_CHARS)}` : "Do what AutoCraft recommends, as it stands.", { kind: "yes" });
+    const same = "Words that ask for the same thing in other terms (fix what it names, then merge, land or ship it) mean this choice.";
+    add("yes", one.rec.text ? `Do what AutoCraft recommends, as it stands: ${quote(one.rec.text, REC_CHARS)} ${same}` : `Do what AutoCraft recommends, as it stands. ${same}`, { kind: "yes" });
     for (const p of one.parts.slice(0, CHOICE_PARTS_MAX)) {
       const title = quote(p.title, TITLE_CHARS);
       if (one.parts.length > 1 || one.rec.merges) add(`drop ${p.n}`, `Leave part ${p.n} (${title}) out, and do the rest of what AutoCraft recommends.`, commands([{ word: "drop", part: p.n }]));
       if (one.parts.length > 1) add(`fix ${p.n}`, `Fix only part ${p.n} (${title}), then review again; no merge yet.`, commands([{ word: "fix", part: p.n }]));
-      add(`fix ${p.n} and merge`, `Fix part ${p.n} (${title}), then merge.`, commands([{ word: "fix", part: p.n }, { word: "merge" }]));
+      if (!sameAsYes({ fix: [p.n], merge: true })) add(`fix ${p.n} and merge`, `Fix only part ${p.n} (${title}), then merge.`, commands([{ word: "fix", part: p.n }, { word: "merge" }]));
     }
   }
   const prs = all((i) => i.kind === "pr"), issues = all((i) => i.kind === "issue");
@@ -59,12 +64,12 @@ export function candidatesFor(items: readonly ChoiceItem[], message: string, o: 
     add("fix as written", "Make the change the message describes, in its own words (a fix the plan does not list, or a part of it named in other words), then review again; no merge yet.", commands(fix(false)), describe(fix(false)));
     add("fix as written and merge", "Make the change the message describes, in its own words, then merge.", commands(fix(true)), describe(fix(true)));
   }
-  if (!all((i) => i.live && i.approved && !i.rec) && !issues) add("merge", one?.rec ? "Approve the merge: do what AutoCraft recommends, then merge, with no further question." : "Approve the merge, with no full review: AutoCraft makes any outstanding fixes and merges on green CI.", commands([{ word: "merge" }]));
+  if (!all((i) => i.live && i.approved && !i.rec) && !issues && !sameAsYes({ merge: true })) add("merge", one?.rec ? "Approve the merge: do what AutoCraft recommends, then merge, with no further question." : "Approve the merge, with no full review: AutoCraft makes any outstanding fixes and merges on green CI.", commands([{ word: "merge" }]));
   add("review", "Review it (again), and come back with one recommendation; no merge yet.", commands([{ word: "review" }]));
   if (prs) {
     add("review and merge", "Review it, and merge if the review finds no blocker, once its recommended fixes are made.", commands([{ word: "review" }, { word: "merge" }]), "review, merge");
     add("fix-up", "Review it, fix what the review finds, and review the fixes; no merge yet.", commands([{ word: "fix-up" }]));
-    add("fix-up and merge", "Review it, fix what the review finds, then merge.", commands([{ word: "fix-up" }, { word: "merge" }]), "fix-up, merge");
+    if (!sameAsYes({ fixAll: true, merge: true })) add("fix-up and merge", "Review it, fix what the review finds, then merge.", commands([{ word: "fix-up" }, { word: "merge" }]), "fix-up, merge");
     add("ask author", "Ask the pull request's author to finish or fix it, and wait for their push.", commands([{ word: "ask-author" }]));
   }
   if (issues && all((i) => !i.live)) {

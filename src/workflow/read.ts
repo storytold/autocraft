@@ -167,7 +167,7 @@ async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boo
     const live = isLive(wf);
     choice.push({
       kind: it.kind === "pr" ? "pr" : "issue", live, held: wf?.state === "stopped", approved: !!wf?.approvedBy && live,
-      rec: rec ? { text: veiled ? null : recommendationText(rec), merges: rec.merges } : null,
+      rec: rec ? { text: veiled ? null : recommendationText(rec), merges: rec.merges, fix: rec.parts.fix } : null,
       parts: rec && !veiled ? wf!.plan.filter((p) => p.state === "planned").map((p) => ({ n: p.n, title: p.title })) : [],
     });
     out.push({
