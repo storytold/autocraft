@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { absolute } from "../build/artifacts.ts";
 import { createTask, warmKeyOf } from "../build/tasks.ts";
-import { askClaude, POOL_MAX, pool } from "../classify/run.ts";
+import { askClaude, POOL_MAX, pool, type WorkspaceAsk } from "../classify/run.ts";
 import { isHalt, poolRoom, takersCut } from "../agents/call.ts";
 import { pushesAreUnsettled } from "../fixup/unsettled.ts";
 import { audit } from "../dash/audit.ts";
@@ -73,6 +73,7 @@ import { CIFIX_SESSION_RULES, type CifixGate } from "../fixsession/gates.ts";
 import type { CifixTurn, FixStep as TurnStep } from "../fixsession/messages.ts";
 import { fixSessionsOn } from "../fixsession/switch.ts";
 import { lintParent, prStep, runStep, type StepEnv, type StepOutcome } from "../fixsession/turn.ts";
+import { inCheckWorkspace, workspacePatch, type CheckInWorkspace } from "../fixsession/check.ts";
 import { endStepPod } from "../fixsession/park.ts";
 import { openSession, WorkspaceUnavailable } from "../fixsession/workspace.ts";
 
@@ -130,7 +131,7 @@ export type CifixDeps = {
   /** The model's reply to the cifix.patch prompt, or null when it gave none. */
   ask: (db: Db, input: CifixPr[], checkout?: string, tool?: CheckTool, session?: SessionAsk) => Promise<string | null>;
   /** The model's reply to the fixup.check prompt (Opus), or null when it gave none. */
-  check: (db: Db, input: FixupCheckInput[], checkout?: string) => Promise<string | null>;
+  check: (db: Db, input: FixupCheckInput[], checkout?: string, ws?: WorkspaceAsk) => Promise<string | null>;
   /** Host directory with a read-only checkout of the PR head for the sandboxed model calls, or null to ask without tools. */
   checkout?: (repo: string, number: number, head: string) => Promise<string | null>;
   now: () => Date;
@@ -149,7 +150,7 @@ export function defaultDeps(): CifixDeps {
   return {
     querier: new Client(1000), exec, fetchDiff: ghDiff, gh: ghExec, now: () => new Date(), root: fixupDir(),
     ask: async (db, input, checkout, tool, session) => (await askClaude("cifix.patch", PROMPT.models[0]!, input, db, { checkout, check: tool, session }))?.text ?? null,
-    check: async (db, input, checkout) => (await askClaude("fixup.check", CHECK.models[0]!, input, db, { checkout }))?.text ?? null,
+    check: async (db, input, checkout, workspace) => (await askClaude("fixup.check", CHECK.models[0]!, input, db, { checkout, ...(workspace && { workspace }) }))?.text ?? null,
     checkout: (r, n, h) => checkoutForPr(r, n, h, console.log),
     session: (db, log) => {
       const cluster = inClusterApi();
@@ -368,15 +369,15 @@ export async function patchFromFailure(db: Db, d: Pick<CifixDeps, "ask" | "check
  * The Opus check of a CI fix's patch, reading `diffText` and, with a checkout, the files: null when it approves, else the refusal
  * (`rejected: ...` when Opus said no).
  */
-async function opusCheck(db: Db, d: Pick<CifixDeps, "check">, r: Pick<PatchRequest, "ref" | "title" | "repo" | "number" | "head" | "round" | "failure" | "reviewReason" | "runId" | "actor" | "at">, diffText: string, checkout: string | undefined, patch: string): Promise<string | null> {
+async function opusCheck(db: Db, d: Pick<CifixDeps, "check">, r: Pick<PatchRequest, "ref" | "title" | "repo" | "number" | "head" | "round" | "failure" | "reviewReason" | "runId" | "actor" | "at">, diffText: string, checkout: string | undefined, patch: string, place?: CheckInWorkspace): Promise<string | null> {
   const { ref, title, repo, head, failure } = r;
   const names = failure.checks.map((x) => x.name);
   const input: FixupCheckInput = {
-    ref, title, fixes: [], diff: diffText.slice(0, CHECK_DIFF_CAP), patch, ...(checkout ? { repo_dir: REPO_PATH } : {}),
+    ref, title, fixes: [], diff: diffText.slice(0, CHECK_DIFF_CAP), ...(place ? workspacePatch(place) : { patch }), ...(checkout && !place ? { repo_dir: REPO_PATH } : {}),
     review_reason: r.reviewReason ?? `The check ${names.join(", ")} fails at this head. The patch must make it pass without changing what the pull request does.`,
     ci_failure: { checks: names, log: JSON.stringify(logText(failure)).slice(0, CHECK_LOG_CAP) },
   };
-  const reply2 = await d.check(db, [input], checkout);
+  const reply2 = place ? await d.check(db, [input], undefined, place.ws) : await d.check(db, [input], checkout);
   if (reply2 === null) return "the patch check gave no answer";
   const verdict = parseCheck(reply2);
   if (!verdict.ok) return `the patch check gave no valid answer: ${verdict.error}`;
@@ -459,7 +460,10 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   };
 
   const isQuiet = async (number: number): Promise<boolean> => (await loadQuiet(db, [`${repo}#${number}`])).size > 0;
-  /** Applies a validated patch to the PR head: pushed to the branch, or posted as a comment where the branch is closed to us. */
+  /**
+   * Applies a validated patch to the PR head: pushed to the branch, or posted as a comment where the branch is closed to us. `check`
+   * returns null to go on, or the reason recorded: `rejected: ...` as rejected, `refused: ...` as refused, any other as failed.
+   */
   const deliver = async (c: CifixCandidate, kind: "format" | "code", pr: PrNode, v: Fix, checkName: string, check?: (patch: string) => Promise<string | null>, shown: CifixPr["files"] = [], folded: string | null = null, ses: SessionAsk = {}, sessionTurn: number | null = null): Promise<"stored" | "done"> => {
     const ref = refOf(c);
     const fail = async (state: "failed" | "refused" | "rejected" | "superseded", raw: string) => {
@@ -504,7 +508,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     }
     if (check) {
       const refusal = await check(v.patch);
-      if (refusal !== null) { await fail(refusal.startsWith("rejected:") ? "rejected" : "failed", refusal.replace(/^rejected: /, "")); return "done"; }
+      if (refusal !== null) { await fail(refusal.startsWith("rejected:") ? "rejected" : refusal.startsWith("refused:") ? "refused" : "failed", refusal.replace(/^(rejected|refused): /, "")); return "done"; }
     }
     // The model calls took minutes: read the PR again before writing.
     const now = await readPr(c);
@@ -700,7 +704,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     const turn: CifixTurn = { ref, title: titleOf(c), head, ...(quiet && { quiet }), step: "cifix", failure: logText(failure), allowed, diff: diff.text, ...(ourPush && { ourPush }) };
     const gate: CifixGate = {
       step: "cifix", allowed, scripts, quiet,
-      guard: async (patch) => (await guardApplied(git, d.root, head, patch, [])) ?? (patch.length > CHECK_PATCH_CAP ? `the change is over the ${CHECK_PATCH_CAP} character limit for the check` : null),
+      guard: async (patch) => await guardApplied(git, d.root, head, patch, []),
     };
     const opened = await openSession(db, "pr", repo, c.number, { head });
     // Nothing recorded: the item is planned again once a person goes on with its workflow.
@@ -728,12 +732,17 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
         // once the workspace moves (fixWorkspaceReading lists a session workspace off its session's head).
         if (out.baseSha !== head) return wait(`the fix session's tree is at ${short(out.baseSha) || "no commit"}, not the head ${short(head)}`);
         const v: Fix = { patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed };
-        const check = async (patch: string): Promise<string | null> => {
+        // The change is checked in the session's workspace, whole; inline, with the cap, when the workspace cannot be had.
+        const check = async (patch: string): Promise<string | null> => await inCheckWorkspace(env, { repo, number: c.number }, { head, diff: out.diff }, async (place) => {
+          const request = { ref, title: titleOf(c), repo, number: c.number, head, round: c.attempt, failure, runId, actor: ACTOR, at };
+          // Without a checkout or the workspace the check reads the diff alone: cut to its limit, with the files left out listed.
+          const shownDiff = (tree: boolean) => checkoutDiff(diff.text, new Set([...errorFiles(failureText(failure)), ...v.files]), tree ? Math.min(DIFF_CAP, CHECK_DIFF_CAP) : CHECK_DIFF_CAP);
+          if (!("why" in place)) return await opusCheck(db, d, request, shownDiff(true), undefined, patch, place);
+          if (patch.length > CHECK_PATCH_CAP) return `refused: the change is over the ${CHECK_PATCH_CAP} character limit for the check, which runs inline because ${place.why}`;
+          log(`  ${ref}: inline patch check: ${place.why}`);
           const checkout = (await d.checkout?.(repo, c.number, head)) ?? undefined;
-          // Without a checkout the check reads the diff alone: cut to its limit, with the files left out listed.
-          const shownDiff = checkoutDiff(diff.text, new Set([...errorFiles(failureText(failure)), ...v.files]), checkout ? Math.min(DIFF_CAP, CHECK_DIFF_CAP) : CHECK_DIFF_CAP);
-          return await opusCheck(db, d, { ref, title: titleOf(c), repo, number: c.number, head, round: c.attempt, failure, runId, actor: ACTOR, at }, shownDiff, checkout, patch);
-        };
+          return await opusCheck(db, d, request, shownDiff(checkout !== undefined), checkout, patch);
+        });
         return await deliver(c, "code", pr, v, failure.checks[0]?.name ?? "CI", check, [], null, {}, out.turnId);
       }
     }

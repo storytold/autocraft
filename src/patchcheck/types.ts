@@ -1,6 +1,6 @@
 // Shared by the patch-check prompts (src/prompts, which imports no Node modules) and the Fix and Fix-up stages.
 
-/** Characters of the PR diff and of our patch shown to the checking model; over either, the stage holds without asking. */
+/** Characters of the PR diff and of our patch shown inline to the checking model; over either, the stage holds without asking. A change checked in its fix session's workspace has no cap. */
 export const CHECK_DIFF_CAP = 60_000;
 export const CHECK_PATCH_CAP = 80_000;
 export const CHECK_REASON_WORDS = 60;
@@ -21,8 +21,15 @@ export type FixupCheckInput = {
   fixes: { file: string; change: string }[];
   /** The pull request's unified diff. */
   diff: string;
-  /** Our patch, on top of the PR's head. */
+  /** Our patch, on top of the PR's head; empty when `change` is given. */
   patch: string;
+  /**
+   * A fix session's change checked in its workspace (src/fixsession/check.ts): `patch` is empty, the workspace's /work/src holds the
+   * PR's head with the change, which is the tree's diff against `base`; `files` says what it does to each file, `chars` is its size.
+   */
+  change?: { base: string; chars: number; files: { path: string; kind: "edit" | "new" | "deleted" }[] };
+  /** Set by the remote call when it works in a workspace pod (classify/run.ts WorkspaceAsk); not part of the quoted JSON. */
+  workspace?: boolean;
   /** An operator's instructions the patch is meant to carry out (trusted text; the fix list is empty). */
   operator?: string;
   /** For a CI fix (`fixes` is empty): the failing checks and the tails of their failed steps' logs (untrusted text from the PR's CI run). `patch` is meant only to make them pass. */

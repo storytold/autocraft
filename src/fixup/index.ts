@@ -16,7 +16,7 @@ import { commitIdentity, ownLogins, type CommitIdentity } from "../github/identi
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { askClaude } from "../classify/run.ts";
+import { askClaude, type WorkspaceAsk } from "../classify/run.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForPr } from "../sandbox/index.ts";
 import { audit } from "../dash/audit.ts";
@@ -64,6 +64,7 @@ import { pushesAreUnsettled } from "./unsettled.ts";
 import { POOL_MAX, pool } from "../classify/run.ts";
 import { diffFiles, type DiffFile } from "../fixsession/gates.ts";
 import { fixSessionsOn } from "../fixsession/switch.ts";
+import { inCheckWorkspace, workspacePatch } from "../fixsession/check.ts";
 import { endStepPod } from "../fixsession/park.ts";
 import { defaultSessionDeps, sessionFixup, sessionPatch, storedSessionPatch, type FixSessionDeps } from "./session.ts";
 
@@ -87,7 +88,7 @@ export type FixupDeps = {
   /** The model's reply to the fixup.patch prompt, or null when it gave none. */
   ask: (db: Db, input: FixupPr[], checkout?: string, tool?: CheckTool, session?: SessionAsk) => Promise<string | null>;
   /** The model's reply to the fixup.check prompt (Opus), or null when it gave none. */
-  check: (db: Db, input: FixupCheckInput[], checkout?: string) => Promise<string | null>;
+  check: (db: Db, input: FixupCheckInput[], checkout?: string, ws?: WorkspaceAsk) => Promise<string | null>;
   /** The model's reply to the fixup.conflict prompt (Sonnet), or null when it gave none. Absent: conflicts are not resolved by a model. */
   resolve?: (db: Db, input: ConflictPr[], checkout?: string, session?: SessionAsk) => Promise<string | null>;
   /** Host directory with a read-only checkout of the PR head for the sandboxed model calls, or null to ask without tools. Absent: no tools. */
@@ -105,7 +106,7 @@ export function defaultDeps(): FixupDeps {
   return {
     querier: new Client(1000), exec, fetchDiff: ghDiff, now: () => new Date(), root: fixupDir(),
     ask: async (db, input, checkout, tool, session) => (await askClaude("fixup.patch", PROMPT.models[0]!, input, db, { checkout, check: tool, session }))?.text ?? null,
-    check: async (db, input, checkout) => (await askClaude("fixup.check", CHECK.models[0]!, input, db, { checkout }))?.text ?? null,
+    check: async (db, input, checkout, workspace) => (await askClaude("fixup.check", CHECK.models[0]!, input, db, { checkout, ...(workspace && { workspace }) }))?.text ?? null,
     resolve: async (db, input, checkout, session) => (await askClaude("fixup.conflict", CONFLICT.models[0]!, input, db, { checkout, session }))?.text ?? null,
     checkout: (r, n, h) => checkoutForPr(r, n, h, console.log),
   };
@@ -499,6 +500,8 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       let split: { diff: string; changes: string[] };
       let v: { patch: string; files: string[]; changed: number };
       let sessionTurn: number | null = null;
+      /** A new change a fix session made: the diff read from its workspace, which the patch check reads there. */
+      let madeInSession: string | null = null;
       // A stored change a fix session wrote keeps the session's rules, whatever the switch says now; a new change is a session's
       // while the switch is on.
       if (folded !== null ? c.lint!.sessionTurn !== null : sessionDeps !== null) {
@@ -526,6 +529,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
           v = got;
           split = { diff: got.patch, changes: got.changes };
           sessionTurn = got.turnId;
+          madeInSession = got.diff;
         }
       } else {
         // The model's patch: the stored one when it is clean, else a new answer (with the findings on the earlier patch).
@@ -567,9 +571,19 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       if (outside) { await fail("refused", outside); return; }
 
       // Opus checks the validated patch; only an approve goes on. A stored patch that came back clean was checked already (the format changes are whitespace only).
+      // A fix session's change is checked in its workspace, whole; the patch path's, or one whose workspace cannot be had, inline.
       if (folded === null) {
-        if (v.patch.length > CHECK_PATCH_CAP) { await fail("refused", `the patch is over the ${CHECK_PATCH_CAP} character limit for the check`); return; }
-        const checkReply = await d.check(db, [{ ref, title: titleOf(c), review_reason: c.reason, fixes: c.fixes, ...(c.operator ? { operator: c.operator.instructions } : {}), diff: checkoutDiff(modelDiff, new Set([...c.fixes.map((f) => f.file), ...v.files]), CHECK_DIFF_CAP), patch: v.patch, ...repoDir }], checkout);
+        const input = { ref, title: titleOf(c), review_reason: c.reason, fixes: c.fixes, ...(c.operator ? { operator: c.operator.instructions } : {}), diff: checkoutDiff(modelDiff, new Set([...c.fixes.map((f) => f.file), ...v.files]), CHECK_DIFF_CAP) };
+        const inline = async (why: string | null): Promise<string | null | { refused: string }> => {
+          if (v.patch.length > CHECK_PATCH_CAP) return { refused: `the patch is over the ${CHECK_PATCH_CAP} character limit for the check${why ? `, which runs inline because ${why}` : ""}` };
+          if (why) log(`  ${ref}: inline patch check: ${why}`);
+          return await d.check(db, [{ ...input, patch: v.patch, ...repoDir }], checkout);
+        };
+        const sessionEnv = madeInSession === null ? null : (d.fixSession ?? defaultSessionDeps)(db);
+        const checkReply = madeInSession === null ? await inline(null)
+          : await inCheckWorkspace(sessionEnv && { ...sessionEnv, db, log }, { repo, number: c.number }, { head, diff: madeInSession },
+            async (place) => ("why" in place ? await inline(place.why) : await d.check(db, [{ ...input, ...workspacePatch(place) }], undefined, place.ws)));
+        if (checkReply !== null && typeof checkReply === "object") { await fail("refused", checkReply.refused); return; }
         if (checkReply === null) { await fail("failed", "the patch check gave no answer"); return; }
         const verdict = parseCheck(checkReply);
         if (!verdict.ok) { await fail("failed", `the patch check gave no valid answer: ${verdict.error}`); return; }

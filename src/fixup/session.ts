@@ -42,11 +42,12 @@ export async function sessionFixup(c: FixCandidate, o: { head: string; title: st
   };
 }
 
-/** A stored session change that came back clean from its lint task, through the step's gate again for its files and size. */
+/** A stored session change that came back clean from its lint task, through the step's gate again for its files. */
 export const storedSessionPatch = (t: SessionFixup, patch: string): Promise<GateResult> => runGate(t.gate, patch, null);
 
 export type SessionPatch =
-  | { kind: "ok"; patch: string; files: string[]; changed: number; changes: string[]; turnId: number }
+  /** `diff`: the change as read from the workspace, which the patch check reads there (inCheckWorkspace). */
+  | { kind: "ok"; patch: string; files: string[]; changed: number; changes: string[]; turnId: number; diff: string }
   /** Recorded as today's shapes: refused (the gates refused the change after its undo turn), failed (no change to push). */
   | { kind: "failed" | "refused"; reason: string }
   /**
@@ -110,7 +111,7 @@ export async function sessionPatch(r: SessionRun, c: FixCandidate, t: SessionFix
     case "ok": {
       // The change must be on the head the fix-up applies it to; another one means the branch moved meanwhile.
       if (out.baseSha !== t.turn.head) return { kind: "wait", reason: `the fix session's tree is at ${out.baseSha.slice(0, 7) || "no commit"}, not at ${t.turn.head.slice(0, 7)}` };
-      return { kind: "ok", patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed, changes: out.report.changes, turnId: out.turnId };
+      return { kind: "ok", patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed, changes: out.report.changes, turnId: out.turnId, diff: out.diff };
     }
   }
 }
