@@ -36,13 +36,17 @@ export const OWNER_GONE_MS = scaled(10 * 60_000);
 
 /**
  * Whether a runner credential still holds its user's started work for the taker rule: it reported within OWNER_GONE_MS (or, never
- * reported, was made within it: its runner is being set up), or its last report was a usage limit or cool-off with an end still ahead,
- * or its user cools off until a known time.
+ * reported, was made within it: its runner is being set up), or its last report was a usage limit or cool-off with an end still ahead
+ * (within a day), or its user cools off until a known time (within a day).
  */
 const holdsWork = (s: RunnerSnapshot, r: RunnerRow, now: number): boolean =>
   (r.reportedAt ?? Date.parse(r.createdAt)) >= now - OWNER_GONE_MS
-  || ((r.readiness === "quota-held" || r.readiness === "cooled-off") && r.until !== null && Date.parse(r.until) > now)
-  || Date.parse(s.cooled.get(r.login.toLowerCase())?.until ?? "") > now;
+  || ((r.readiness === "quota-held" || r.readiness === "cooled-off") && r.until !== null && endsAhead(Date.parse(r.until), now))
+  || endsAhead(Date.parse(s.cooled.get(r.login.toLowerCase())?.until ?? ""), now);
+
+/** A reported end of a hold counts while it is ahead and within HOLD_END_CAP_MS: a later one is read as unknown. */
+const HOLD_END_CAP_MS = 24 * 3600_000;
+const endsAhead = (until: number, now: number): boolean => until > now && until <= now + HOLD_END_CAP_MS;
 
 /** The My tasks ids (my-tasks.ts) of the steps a live workflow of each entry runs. */
 const ENTRY_TASKS: Record<Entry, ReadonlySet<string>> = {
@@ -88,8 +92,11 @@ export type StartedCalls = {
    * (`refusedToken`). The lease's side is boundTakeAllows in src/data/runners/cross.ts.
    */
   boundTakers: (c: { prompt_id: string; refs: readonly ItemRef[]; forLogin: string; tier?: Tier; refusedToken?: number | null }) => ReadonlySet<string>;
-  /** The part one of a call's people has in its work, to name them to a reader who may not see logins: approver, else starter, else taker. */
-  roleOf: (login: string, c: { refs: readonly ItemRef[]; repos: readonly string[] }) => OwnerRole;
+  /**
+   * The part one of a call's people has in its work, to name them to a reader who may not see logins: approver, else starter, else taker.
+   * A call that names no item: approver for who approved Fix red main on `repos` (main-fix step), else none.
+   */
+  roleOf: (login: string, c: { refs: readonly ItemRef[]; repos: readonly string[]; step?: string }) => OwnerRole | undefined;
 };
 
 export type OwnerRole = "approver" | "starter" | "taker";
@@ -224,7 +231,8 @@ function buildStarted(v: RemoteView): StartedCalls {
     owners, runnerLogins,
     roleOf: (login, c) => {
       const key = login.toLowerCase();
-      if (c.refs.some((r) => approvers.get(`${r.repo}#${r.number}`)?.has(key)) || c.repos.some((x) => fixers.get(x) === key)) return "approver";
+      if (!c.refs.length) return approvedFix(c.repos, c.step).has(key) ? "approver" : undefined;
+      if (c.refs.some((r) => approvers.get(`${r.repo}#${r.number}`)?.has(key))) return "approver";
       return c.refs.some((r) => byItem.get(`${r.repo}#${r.number}`)?.has(key) || byMerged.get(`${r.repo}#${r.number}`)?.has(key)) ? "starter" : "taker";
     },
     tiersOf: (login) => new Set([...runnersOf.get(login.toLowerCase())?.tokens.values() ?? []].flatMap((t) => [...t])),

@@ -126,8 +126,7 @@ export async function stallNotices(db: Db, v: RemoteView, calls: readonly Stalle
     const starter = wf.startedBy !== RULE_STARTER ? wf.startedBy : null;
     if (!approver && !starter) continue;
     const person = call.forLogin ?? waitingOnIn(v, call)[0]?.login ?? approver ?? starter!;
-    const same = (l: string | null): boolean => l !== null && l.toLowerCase() === person.toLowerCase();
-    const whose = same(starter) ? "starter" : same(approver) ? "approver" : "taker";
+    const whose = startedOf(v).roleOf(person, { refs: call.refs, repos: call.repos, step: call.step }) ?? "taker";
     const repo = call.repos[0] ?? wf.repo;
     const room = runnerRoomIn(v, { repo, login: person, tier: call.tier, step: call.step, promptId: call.prompt_id, refs: call.refs, started: true, ...(call.forLogin && { bound: true as const }) });
     if (room.can) continue;
