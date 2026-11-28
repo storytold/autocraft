@@ -45,7 +45,13 @@ export async function batchDetail(db: Db, id: number, staff: boolean): Promise<B
   const by = (login: string) => (staff ? login : null);
   const ev = (e: Omit<BatchEvent, "by"> & { by?: string | null }) => events.push({ by: null, ...e });
 
-  ev({ id: "opened", at: b.created_at, kind: "opened", summary: `Opened with ${plural(nums.length, "PR")} on the default branch at ${b.base_sha.slice(0, 7)}` });
+  // A merge train car built on another car opens on that car's tip.
+  const below = b.below_id === null || b.below_id === undefined ? undefined : (await loadBatches(db, [b.below_id])).get(b.below_id);
+  ev({
+    id: "opened", at: b.created_at, kind: "opened",
+    summary: `Opened with ${plural(nums.length, "PR")} on ${below ? `car #${below.id}` : "the default branch"} at ${b.base_sha.slice(0, 7)}`,
+    ...(below ? { batchId: below.id, ...(below.pr_number !== null && below.pr_url ? { pr: { number: below.pr_number, url: below.pr_url } } : {}) } : {}),
+  });
   if (b.parent_id !== null) {
     ev({ id: "parent", at: b.created_at, kind: "opened", summary: page.parent === "split" ? `Half of batch #${b.parent_id}, which failed` : `Rebuilt from batch #${b.parent_id}`, batchId: b.parent_id });
   }

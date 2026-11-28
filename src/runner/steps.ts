@@ -331,7 +331,7 @@ export const STEPS: StepDef[] = [
     models: [],
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
-      { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 10, help: "pull requests to start or merge in this job" },
+      { name: "limit", label: "At most", kind: "int", min: 1, max: 500, default: 10, help: "pull requests to start or merge in this job" },
     ],
     // No repo check: whether a PR may merge is its own (src/core/may.ts), applied by the step to each PR.
     run: async (ctx) => {
@@ -344,7 +344,20 @@ export const STEPS: StepDef[] = [
         ctx.acted(singly.merged.length);
         return `${repo}: ${singly.merged.length} merged singly, ${singly.refused.length} refused`;
       }
-      const b = await runBatches(ctx.db, { repo, limit, onMerged: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
+      // Batches land under what the day's merge limit leaves, read again before each landing, not under this job's share of it (the
+      // share bounds what it starts). The day's usage counts this job's items as far as they were written; the rest of what it landed
+      // is taken off here.
+      const { limitRow, usageToday } = await import("./autopilot.ts");
+      const { loadJobs } = await import("../data/jobs/index.ts");
+      // A resumed job's row already holds its earlier runs' items; only what this run wrote counts against what it landed.
+      const writtenNow = async () => Number((await loadJobs(ctx.db, [ctx.job.id])).get(ctx.job.id)?.items ?? 0);
+      const itemsBefore = await writtenNow();
+      const dayLeft = async (landed: number): Promise<number> => {
+        const perDay = (await limitRow(ctx.db, "merge")).perDay;
+        if (perDay === null) return Infinity;
+        return perDay - await usageToday(ctx.db, "merge") - Math.max(0, landed - (await writtenNow() - itemsBefore));
+      };
+      const b = await runBatches(ctx.db, { repo, limit, onMerged: ctx.handled, by: byOfJob(ctx.job.requestedBy), dayLeft }, ctx.log);
       ctx.usageRun(b.runId);
       let single = { merged: [] as string[], attempted: [] as string[], refused: [] as unknown[] };
       if (limit > b.merged.length) {

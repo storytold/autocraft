@@ -138,17 +138,21 @@ export async function world() {
         await savePermissions(d, [{ login, repo, permission: "write", checkedAt: new Date().toISOString() }]);
         return { kind: "ok", permission: "write" };
       } }),
-      /** Deps of the batch stage over a fake git: a batch branch is "pushed", its PR is #900 and merges with the merge command. */
-      batchDeps: (o: { ci?: () => string } = {}): BatchDeps => {
+      /**
+       * Deps of the batch stage over a fake git: a batch branch is "pushed", its PR is #900 and merges with the merge command. `cars`:
+       * each batch PR gets a number of its own from #900 up, at the tip it was opened with and CI `cars.ci`.
+       */
+      batchDeps: (o: { ci?: () => string; cars?: { ci: Live["ci"] } } = {}): BatchDeps => {
         const MAIN = "a".repeat(40);
-        let commits = 0, tip = "none";
-        live.set(900, { head: "none", state: "OPEN", mergeable: "MERGEABLE", ci: "success", authors: ["bot"], assignees: [] });
+        let commits = 0, tip = "none", next = 900;
+        const carTips = new Map<string, string>();
+        if (!o.cars) live.set(900, { head: "none", state: "OPEN", mergeable: "MERGEABLE", ci: "success", authors: ["bot"], assignees: [] });
         const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
         return {
           querier, root: tmpdir("batch"), mergeCommand: "safe-merge", now: () => new Date(T1), mainHead: async () => MAIN,
           run: async (cmd, args) => {
             const r = await runMergeCommand(cmd, args);
-            if (r.code === 0 && args[1] === "900") live.get(900)!.state = "MERGED";
+            if (r.code === 0 && Number(args[1]) >= 900 && live.has(Number(args[1]))) live.get(Number(args[1]))!.state = "MERGED";
             return r;
           },
           exec: async (cmd, args, opts) => {
@@ -159,16 +163,31 @@ export async function world() {
               if (a[0] === "fetch") return ok();
               if (a[0] === "rev-parse") return ok((a[1] === "refs/batch/main" ? MAIN : await headOf(Number(a[1]!.split("pr-")[1]))) + "\n");
               if (a[0] === "merge-tree") return ok(`tree-${a.at(-1)}\n`);
-              if (a[0] === "commit-tree") { tip = `${"b".repeat(39)}${++commits}`; live.get(900)!.head = tip; return ok(`${tip}\n`); }
+              if (a[0] === "commit-tree") { tip = `${"b".repeat(39)}${++commits}`; if (!o.cars) live.get(900)!.head = tip; return ok(`${tip}\n`); }
               if (a[0] === "diff") return ok("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n");
-              if (a[0] === "push") { writes.push({ kind: "push", number: 900, head: tip }); return ok(); }
+              if (a[0] === "push") {
+                // `<sha>:refs/heads/<branch>`: the branch's tip, for the PR opened from it.
+                const spec = a.find((x) => x.includes(":refs/heads/"));
+                if (spec) carTips.set(spec.split(":refs/heads/")[1]!, spec.split(":")[0]!);
+                writes.push({ kind: "push", number: 900, head: tip });
+                return ok();
+              }
+              if (a[0] === "update-ref" || a[0] === "cat-file") return ok();
+              if (a[0] === "for-each-ref") return ok("");
             }
             if (cmd === "gh") {
               if (a[0] === "api" && a[1] === "user") return ok(JSON.stringify({ login: "bot", id: 7, node_id: "N7" }));
               if (a[0] === "api") return ok("storytold/app\n");
               if (a[0] === "pr" && a[1] === "list") return ok("");
+              if (a[0] === "pr" && a[1] === "create" && o.cars) {
+                const n = next++;
+                const head = a[a.indexOf("--head") + 1]!.split(":")[1]!;
+                live.set(n, { head: carTips.get(head) ?? tip, state: "OPEN", mergeable: "MERGEABLE", ci: o.cars.ci, authors: ["bot"], assignees: [] });
+                writes.push({ kind: "pr", number: n, head: live.get(n)!.head, detail: opts?.input });
+                return ok(`https://github.com/storytold/app/pull/${n}\n`);
+              }
               if (a[0] === "pr" && a[1] === "create") { writes.push({ kind: "pr", number: 900, head: tip, detail: opts?.input }); return ok("https://github.com/storytold/app/pull/900\n"); }
-              if (a[0] === "pr" && a[1] === "close") return ok();
+              if (a[0] === "pr" && a[1] === "close") { if (o.cars && live.has(Number(a[2]))) { live.get(Number(a[2]))!.state = "CLOSED"; writes.push({ kind: "close", number: Number(a[2]) }); } return ok(); }
             }
             throw new Error(`unexpected ${cmd} ${a.join(" ")}`);
           },

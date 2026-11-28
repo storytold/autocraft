@@ -24,7 +24,7 @@ export function batchViews(db: Db) {
   const k = queryDb(db).k;
   return k.selectFrom("merge_batches as b").select((eb) => [
     "b.id", "b.repo", "b.branch", "b.state", "b.base_sha", "b.commit_sha", "b.parent_id", "b.task_id", "b.retries", "b.pr_number", "b.pr_url", "b.summary",
-    "b.created_at", "b.updated_at", "b.fork", "b.build_state", "b.build_tries", "b.merge_sha", "b.ci_reruns", "b.ci_rerun_at", "b.opened_at", "b.topped_up",
+    "b.created_at", "b.updated_at", "b.fork", "b.build_state", "b.build_tries", "b.merge_sha", "b.ci_reruns", "b.ci_rerun_at", "b.opened_at", "b.topped_up", "b.below_id", "b.root_sha", "b.side",
     kx.jsonRows(db, eb.selectFrom("merge_batch_prs as bp").select(["bp.number", "bp.head_oid"]).whereRef("bp.batch_id", "=", "b.id").orderBy("bp.position")).as("members"),
   ]);
 }

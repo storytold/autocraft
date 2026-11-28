@@ -171,6 +171,13 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   // When the first batch PR of the batch's lineage opened (its upstream CI started; a rebuild carries its parent's), and 1 for a top-up and every rebuild of one.
   ["merge_batches", "opened_at", "TEXT"],
   ["merge_batches", "topped_up", "INTEGER NOT NULL DEFAULT 0"],
+  // Merge train: the car a batch is built on, the default branch head under the train, and 1 for a car built beside it.
+  ["merge_batches", "below_id", "INTEGER"],
+  ["merge_batches", "root_sha", "TEXT"],
+  ["merge_batches", "side", "INTEGER NOT NULL DEFAULT 0"],
+  // Merge train depth of a repo (null: 1), and why it runs one car at a time.
+  ["merge_repo_state", "train_depth", "INTEGER"],
+  ["merge_repo_state", "train_note", "TEXT"],
   ["fixups", "source", "TEXT"],
   // A model patch waiting for its lint task: the patch, the task, the lint round and the lint state (pending, requeued).
   ["fixups", "patch", "TEXT"],

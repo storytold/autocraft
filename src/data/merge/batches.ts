@@ -63,6 +63,13 @@ export async function loadBatchPage(db: Db, id: number): Promise<BatchPageView |
   };
 }
 
+/** Batches of the repo that ended without landing since `since` and have a PR, with members. 1 statement. */
+export async function loadEndedWithPr(db: Db, repo: string, since: string): Promise<BatchView[]> {
+  const rows = await queryDb(db).all(batchViews(db).where("b.repo", "=", repo).where("b.state", "in", ["superseded", "split", "failed"])
+    .where("b.pr_number", "is not", null).where("b.updated_at", ">=", since).orderBy("b.id"));
+  return rows.map(toBatchView);
+}
+
 /** Active batches with members, optionally of some repos and not hidden. 1 statement. */
 export async function listActiveBatches(db: Db, f: { repos?: string[]; hidden?: HiddenRepos }): Promise<BatchView[]> {
   if (f.repos && f.repos.length === 0) return [];
@@ -144,6 +151,7 @@ export async function openBatch(db: Db, b: NewBatch): Promise<{ id: number; bran
     const row = (await q.get(q.k.insertInto("merge_batches").values({
       repo: b.repo, branch, state: "checking", base_sha: b.baseSha, commit_sha: b.commitSha, parent_id: b.parentId, task_id: b.taskId, created_at: b.at, updated_at: b.at,
       build_state: b.build, build_tries: b.build === "pending" ? 1 : 0, topped_up: b.toppedUp ? 1 : 0, opened_at: b.openedAt ?? null,
+      below_id: b.belowId ?? null, root_sha: b.rootSha ?? null, side: b.side ? 1 : 0,
     }).returning("id")))!;
     const id = Number(row.id);
     for (const values of kx.batches(b.members.map((m, i) => ({ batch_id: id, repo: b.repo, number: m.number, head_oid: m.head_oid, position: i }))))
@@ -270,6 +278,46 @@ export async function setBatchSize(db: Db, repo: string, n: number, _by?: string
   await q.run(q.k.insertInto("merge_repo_state").values({ repo, batch_size: size, updated_at: new Date().toISOString() })
     .onConflict((oc) => oc.column("repo").doUpdateSet(kx.excluded(["batch_size", "updated_at"]))));
   return size;
+}
+
+/** Most cars a repo's merge train may have in flight. */
+export const MAX_TRAIN_DEPTH = 4;
+export type TrainState = { repo: string; depth: number; note: string | null };
+
+/** Merge train depth (null: 1) and note of the repos with a row, or of `repos` (a repo with no row at depth 1). 1 statement. */
+export async function loadTrains(db: Db, repos?: string[]): Promise<TrainState[]> {
+  const q = queryDb(db);
+  const rows = repos && repos.length === 0 ? [] : await q.all(q.k.selectFrom("merge_repo_state").select(["repo", "train_depth", "train_note"]).$if(!!repos, (s) => s.where(kx.inList(db, "repo", repos!))).orderBy("repo"));
+  const depthOf = (n: number | null) => (n !== null && Number.isInteger(n) && n >= 1 && n <= MAX_TRAIN_DEPTH ? n : 1);
+  const out = rows.map((r) => ({ repo: r.repo, depth: depthOf(r.train_depth), note: r.train_note }));
+  for (const repo of repos ?? []) if (!out.some((t) => t.repo === repo)) out.push({ repo, depth: 1, note: null });
+  return out;
+}
+
+/** Sets the repo's merge train depth (1 to MAX_TRAIN_DEPTH) and audits the change as `merge-train-depth`. Returns the previous depth. */
+export async function saveTrainDepth(db: Db, repo: string, depth: number, by: string): Promise<number> {
+  const q = queryDb(db);
+  return await db.write(async () => {
+    const was = (await loadTrains(db, [repo]))[0]!.depth;
+    if (was === depth) return was;
+    const at = new Date().toISOString();
+    await q.run(q.k.insertInto("merge_repo_state").values({ repo, batch_size: START_BATCH, updated_at: at, train_depth: depth })
+      .onConflict((oc) => oc.column("repo").doUpdateSet({ train_depth: depth, updated_at: at })));
+    await addAudit(db, [{ login: by, action: "merge-train-depth", target: repo, at, details: { depth, was } }]);
+    return was;
+  });
+}
+
+/** Sets or clears the note that holds the repo's merge train to one car, audited as `merge-train-note` when it changes. */
+export async function saveTrainNote(db: Db, repo: string, note: string | null, by: string): Promise<void> {
+  const q = queryDb(db);
+  await db.write(async () => {
+    if ((await loadTrains(db, [repo]))[0]!.note === note) return;
+    const at = new Date().toISOString();
+    await q.run(q.k.insertInto("merge_repo_state").values({ repo, batch_size: START_BATCH, updated_at: at, train_note: note })
+      .onConflict((oc) => oc.column("repo").doUpdateSet({ train_note: note, updated_at: at })));
+    await addAudit(db, [{ login: by, action: "merge-train-note", target: repo, at, details: { note } }]);
+  });
 }
 
 /** Batch sizes per repo; a requested repo with no row gets the starting size. */
