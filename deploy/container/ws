@@ -612,10 +612,18 @@ stop_all() {
   done
 }
 
+# stop: stops the calls and apps still running, `WS ok stopped`.
+cmd_stop() {
+  [ $# -eq 0 ] || die usage 2 "stop takes no arguments"
+  stop_all
+  printf 'WS ok stopped\n'
+}
+
 # reseed: replaces the seeded tree with the one of the tar on stdin and prints its base commit, `WS ok <commit>`, the
-# commit `untar` makes of the same tree. Calls and apps still running are stopped and the tree's changes are dropped.
-# Everything in $ROOT/src but the build target goes; files the new tree has unchanged keep their mtimes, so a build
-# after it rebuilds only what changed.
+# commit `untar` makes of the same tree. Calls and apps still running are stopped and the tree's changes are dropped,
+# also those to the repository's config, info and hooks, which are put back to what `untar` makes. Everything in
+# $ROOT/src but the build target goes; files the new tree has unchanged keep their mtimes, so a build after it
+# rebuilds only what changed. The new tree is unpacked beside the old one first, so the source takes twice its space.
 cmd_reseed() {
   [ $# -eq 0 ] || die usage 2 "reseed takes no arguments"
   [ -d "$ROOT/src/.git" ] || die nofile 3 "$ROOT/src holds no seeded tree"
@@ -625,33 +633,47 @@ cmd_reseed() {
     stop_all
     new=$ROOT/.ws/reseed
     idx=$ROOT/.ws/reseed.index
-    rm -rf "$new" "$idx" && mkdir -p "$new" || die io 2 "cannot create $new"
+    fresh=$ROOT/.ws/reseed.init
+    rm -rf "$new" "$idx" "$fresh" && mkdir -p "$new" || die io 2 "cannot create $new"
     if ! tar -x -f - -C "$new" --no-same-owner --no-same-permissions >&2; then
       rm -rf "$new"; die tar 2 "tar extraction failed"
     fi
     cd "$ROOT/src" || die io 2 "cannot enter $ROOT/src"
     HOME=$ROOT/home
-    export HOME
+    # Nothing the session wrote reaches these git commands: no global, system or repository-chosen config, hooks,
+    # fsmonitor or system attributes.
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
     GIT_AUTHOR_NAME=workspace GIT_AUTHOR_EMAIL=workspace@localhost
     GIT_COMMITTER_NAME=workspace GIT_COMMITTER_EMAIL=workspace@localhost
     GIT_AUTHOR_DATE="2000-01-01T00:00:00+0000" GIT_COMMITTER_DATE="2000-01-01T00:00:00+0000"
+    export HOME GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_ATTR_NOSYSTEM
     export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+    git init -q "$fresh" >&2 || { rm -rf "$new"; die git 2 "git init failed"; }
+    for d in config info hooks; do
+      rm -rf ".git/$d" && cp -R "$fresh/.git/$d" ".git/$d" || { rm -rf "$new" "$fresh"; die io 2 "cannot reset .git/$d"; }
+    done
+    rm -rf "$fresh" .git/objects/info/alternates
+    if [ -n "$CHECKOUT" ]; then
+      echo /target >>.git/info/exclude || { rm -rf "$new"; die io 2 "cannot write .git/info/exclude"; }
+    fi
     # The calls that held git's lock were stopped above.
     rm -f .git/index.lock
     # The new tree goes into the repository from its own directory and index, as `untar` would add it; then a hard
     # reset writes only the files that differ, and clean removes what the new tree lacks, the target excepted.
-    if ! GIT_INDEX_FILE=$idx git --work-tree="$new" add -A >&2 || ! tree=$(GIT_INDEX_FILE=$idx git write-tree) ||
-      ! commit=$(git -c commit.gpgsign=false commit-tree "$tree" -m base); then
+    if ! GIT_INDEX_FILE=$idx wsgit --work-tree="$new" add -A >&2 || ! tree=$(GIT_INDEX_FILE=$idx wsgit write-tree) ||
+      ! commit=$(wsgit -c commit.gpgsign=false commit-tree "$tree" -m base); then
       rm -rf "$new" "$idx"; die git 2 "cannot commit the new tree"
     fi
     rm -rf "$new" "$idx"
     # A refresh first, so a file whose mtime changed but whose content did not (the warm copy's mtimes) is not rewritten.
-    git update-index -q --refresh >/dev/null 2>&1
-    git reset -q --hard "$commit" >&2 || die git 2 "git reset failed"
-    git clean -ffdxq -e /target >&2 || die git 2 "git clean failed"
+    wsgit update-index -q --refresh >/dev/null 2>&1
+    wsgit reset -q --hard "$commit" >&2 || die git 2 "git reset failed"
+    wsgit clean -ffdxq -e /target >&2 || die git 2 "git clean failed"
     printf 'WS ok %s\n' "$commit"
   ) 9>"$ROOT/.ws/locks/reseed"
 }
+
+wsgit() { git -c core.fsmonitor= -c core.hooksPath=/dev/null "$@"; }
 
 # ---- apps -------------------------------------------------------------------
 
@@ -908,7 +930,7 @@ EOF
   image_out "shot $app $win $wx $wy $ww $wh" "$full" "$m"
 }
 
-[ $# -ge 1 ] || die usage 2 "ws <init|run|status|kill|put|untar|reseed|read|image|cat|rg|app-start|app-stop|shot>"
+[ $# -ge 1 ] || die usage 2 "ws <init|run|status|kill|put|untar|reseed|stop|read|image|cat|rg|app-start|app-stop|shot>"
 sub=$1; shift
 case $sub in
   init) cmd_init "$@" ;;
@@ -918,6 +940,7 @@ case $sub in
   put) cmd_put "$@" ;;
   untar) cmd_untar "$@" ;;
   reseed) cmd_reseed "$@" ;;
+  stop) cmd_stop "$@" ;;
   read) cmd_read "$@" ;;
   image) cmd_image "$@" ;;
   cat) cmd_cat "$@" ;;

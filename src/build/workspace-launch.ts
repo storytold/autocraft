@@ -519,8 +519,9 @@ async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
   const lastCheckpoint = Math.max(Date.parse(w.state_at), w.checkpoint_at ? Date.parse(w.checkpoint_at) : 0, tried);
   // A call back in the queue after its session did work: the next session's prompt states the checkpoint's changes.
   const requeued = bound === "queued" && w.last_call_at !== null && (w.checkpoint_at === null || w.last_call_at > w.checkpoint_at) && now - tried > REQUEUE_CHECKPOINT_MS;
-  // A checkpoint waits for a dependency fetch, which rewrites Cargo.lock: the next pass takes it.
-  if ((now - lastCheckpoint > CHECKPOINT_EVERY_MS || requeued) && !callRunning(c, w.id, now, "fetch_dependencies")) {
+  // A checkpoint waits for a dependency fetch, which rewrites Cargo.lock, and for a seed call (a fix session's reseed, restore
+  // or dependency fetch), which replaces the tree: the next pass takes it. (a fix session's reseed, restore or dependency fetch) replaces the tree: the next pass takes it.
+  if ((now - lastCheckpoint > CHECKPOINT_EVERY_MS || requeued) && !callRunning(c, w.id, now, "fetch_dependencies") && !callRunning(c, w.id, now, "seed")) {
     c.state.checkpointTried.set(w.id, now);
     background(c, w.id, async () => void await checkpoint(c, w.id));
   }
@@ -814,14 +815,19 @@ async function applyCheckpoint(c: Ctx, id: number): Promise<boolean> {
 
 // ---- checkpoints and parking -------------------------------------------------------
 
-/** Stores the workspace's diff against its base commit. Problems are recorded on the row and never fail the workspace; false then. */
+/**
+ * Stores the workspace's diff against its base commit. Problems are recorded on the row and never fail the workspace; false then,
+ * and when nothing was stored. Both writes hold only while the row is at the tree the diff was read from: a reseed or a restore
+ * meanwhile (a new base commit or restored_at) makes the diff stale.
+ */
 async function checkpoint(c: Ctx, id: number): Promise<boolean> {
   const { db } = c.d;
   const w = await getWorkspace(db, id);
   if (w?.state !== "ready" || !w.base_commit) return false;
+  const same = { base_commit: w.base_commit, restored_at: w.restored_at };
   // While checkpoint_error is set the volume holds work no checkpoint has, so it is not deleted with time or dropped with a lost node.
   const problem = async (why: string) => {
-    await patchWorkspaces(db, [{ id, set: { error: `checkpoint: ${why}`.slice(0, 300), checkpoint_error: why.slice(0, 300), updated_at: new Date(c.now()).toISOString() } }]);
+    await patchWorkspaces(db, [{ id, whereState: ["ready"], where: same, set: { error: `checkpoint: ${why}`.slice(0, 300), checkpoint_error: why.slice(0, 300), updated_at: new Date(c.now()).toISOString() } }]);
     c.d.log(`workspace launcher: workspace ${id}: checkpoint: ${why}`);
     return false;
   };
@@ -834,9 +840,7 @@ async function checkpoint(c: Ctx, id: number): Promise<boolean> {
     if (raw.exitCode !== 0) return await problem(`the diff could not be read (${raw.error ?? `exit ${raw.exitCode}`})`);
     if (raw.stdout.length > MAX_CHECKPOINT_BYTES) return await problem(`the diff is over ${MAX_CHECKPOINT_BYTES / 1024 ** 2} MiB; the previous checkpoint is kept`);
     const at = new Date(c.now()).toISOString();
-    // A reseed meanwhile moved the base: this diff is against the old one.
-    await patchWorkspaces(db, [{ id, whereState: ["ready"], where: { base_commit: w.base_commit }, set: { checkpoint: raw.stdout, checkpoint_at: at, checkpoint_error: null, error: null, updated_at: at } }]);
-    return true;
+    return await patchWorkspaces(db, [{ id, whereState: ["ready"], where: same, set: { checkpoint: raw.stdout, checkpoint_at: at, checkpoint_error: null, error: null, updated_at: at } }]) > 0;
   } catch (e) {
     return await problem(errText(e));
   }
