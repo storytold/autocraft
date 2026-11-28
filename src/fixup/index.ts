@@ -581,7 +581,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
         };
         const sessionEnv = madeInSession === null ? null : (d.fixSession ?? defaultSessionDeps)(db);
         const checkReply = madeInSession === null ? await inline(null)
-          : await inCheckWorkspace(sessionEnv && { ...sessionEnv, db, log }, { repo, number: c.number }, { head, diff: madeInSession },
+          : await inCheckWorkspace(sessionEnv && { ...sessionEnv, db, log }, { kind: "pr", repo, number: c.number }, { head, diff: madeInSession },
             async (place) => ("why" in place ? await inline(place.why) : await d.check(db, [{ ...input, ...workspacePatch(place) }], undefined, place.ws)));
         if (checkReply !== null && typeof checkReply === "object") { await fail("refused", checkReply.refused); return; }
         if (checkReply === null) { await fail("failed", "the patch check gave no answer"); return; }

@@ -16,6 +16,7 @@ import { guardRepo } from "../core/guard.ts";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { cifixFiles, errorFiles, guardApplied, logText, opusCheck, patchFromFailure, type CifixDeps } from "../cifix/index.ts";
+import { inCheckWorkspace } from "../fixsession/check.ts";
 import { CIFIX_SESSION_RULES, type CifixGate } from "../fixsession/gates.ts";
 import type { MainFixTurn } from "../fixsession/messages.ts";
 import { parkStepPod } from "../fixsession/park.ts";
@@ -288,7 +289,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
       const turn: MainFixTurn = { ref, title, head, ...(quiet && { quiet }), step: "main-fix", failure: logText(failure), allowed };
       const gate: CifixGate = {
         step: "cifix", allowed, scripts, quiet,
-        guard: async (patch) => (await guardApplied(git, c.fix.root, head, patch, [])) ?? (patch.length > CHECK_PATCH_CAP ? `the change is over the ${CHECK_PATCH_CAP} character limit for the check` : null),
+        guard: async (patch) => await guardApplied(git, c.fix.root, head, patch, []),
       };
       const opened = await openSession(c.db, "mainfix", c.repo, MAIN_FIX_ITEM, { head });
       if ("refused" in opened) return wait("the default branch's fix session was refused");
@@ -317,8 +318,16 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
         case "ok": {
           const tree = await treeOf(out.gate.patch);
           if (!tree.ok) return { ok: false, reason: tree.reason };
-          const checkout = (await c.fix.checkout?.(c.repo, now.branch, head)) ?? undefined;
-          const refusal = await opusCheck(c.db, c.fix, { ref, title, repo: c.repo, number: MAIN_FIX_ITEM, head, round, failure, reviewReason, runId, actor: PR_ACTOR, at }, "", checkout, out.gate.patch);
+          // The change is checked in the session's workspace, whole; inline, with the cap, when the workspace cannot be had.
+          const request = { ref, title, repo: c.repo, number: MAIN_FIX_ITEM, head, round, failure, reviewReason, runId, actor: PR_ACTOR, at };
+          const patch = out.gate.patch;
+          const refusal = await inCheckWorkspace(env, { kind: "mainfix", repo: c.repo, number: MAIN_FIX_ITEM }, { head, diff: out.diff }, async (place) => {
+            if (!("why" in place)) return await opusCheck(c.db, c.fix, request, "", undefined, patch, place);
+            if (patch.length > CHECK_PATCH_CAP) return `the change is over the ${CHECK_PATCH_CAP} character limit for the check, which runs inline because ${place.why}`;
+            c.log(`  ${c.repo}: inline patch check: ${place.why}`);
+            const checkout = (await c.fix.checkout?.(c.repo, now.branch, head)) ?? undefined;
+            return await opusCheck(c.db, c.fix, request, "", checkout, patch);
+          });
           if (refusal !== null) return { ok: false, reason: refusal.replace(/^rejected: /, "") };
           return { ok: true, patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed, shown: [], model: SESSION_MODEL, applied: tree, sessionTurn: out.turnId };
         }

@@ -733,7 +733,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
         if (out.baseSha !== head) return wait(`the fix session's tree is at ${short(out.baseSha) || "no commit"}, not the head ${short(head)}`);
         const v: Fix = { patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed };
         // The change is checked in the session's workspace, whole; inline, with the cap, when the workspace cannot be had.
-        const check = async (patch: string): Promise<string | null> => await inCheckWorkspace(env, { repo, number: c.number }, { head, diff: out.diff }, async (place) => {
+        const check = async (patch: string): Promise<string | null> => await inCheckWorkspace(env, { kind: "pr", repo, number: c.number }, { head, diff: out.diff }, async (place) => {
           const request = { ref, title: titleOf(c), repo, number: c.number, head, round: c.attempt, failure, runId, actor: ACTOR, at };
           // Without a checkout or the workspace the check reads the diff alone: cut to its limit, with the files left out listed.
           const shownDiff = (tree: boolean) => checkoutDiff(diff.text, new Set([...errorFiles(failureText(failure)), ...v.files]), tree ? Math.min(DIFF_CAP, CHECK_DIFF_CAP) : CHECK_DIFF_CAP);

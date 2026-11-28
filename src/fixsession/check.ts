@@ -1,5 +1,5 @@
-// The patch check (fixup.check) of a change a PR fix session made, in that session's workspace: the tree there is the PR's head
-// plus the change, so the check reads the change whole with the workspace tools (read, grep, glob, and shell to build and test, no
+// The patch check (fixup.check) of a change a fix session made (a PR's, or a repo's main-fix session's), in that session's workspace:
+// the tree there is the head plus the change, so the check reads the change whole with the workspace tools (read, grep, glob, and shell to build and test, no
 // write or edit) instead of inline, and no size cap applies. The workspace is made ready at the head with its tree kept (a parked
 // pod is resumed); a tree that no longer holds the change gets it back from the diff the step read. When the workspace cannot be
 // had (no cluster, another job on the session, a call still bound to it, a start that fails or takes too long, no Task Runner that
@@ -8,7 +8,7 @@ import { currentJob, isHalt, WaitLimitError } from "../agents/call.ts";
 import type { WorkspaceAsk } from "../classify/run.ts";
 import type { Db } from "../db/index.ts";
 import { loadCalls } from "../data/runners/index.ts";
-import { loadLiveFixSession } from "../data/fixsession/index.ts";
+import { loadLiveFixSession, type FixSessionKind } from "../data/fixsession/index.ts";
 import type { CallDeps } from "../build/session-turns.ts";
 import type { WorkspaceToolName } from "../build/workspace-tool-specs.ts";
 import { getWorkspace } from "../build/workspaces.ts";
@@ -42,23 +42,23 @@ async function busyCall(db: Db, workspaceId: number): Promise<number | null> {
 }
 
 /**
- * Runs `check` with the PR's fix session workspace holding `made.diff` on `made.head` (the change the step read from it), or, when
+ * Runs `check` with the item's fix session workspace (of `item.kind`) holding `made.diff` on `made.head` (the change the step read from it), or, when
  * the workspace cannot be had, with the reason, for the inline check. `env` null: this runner reaches no workspace. The job holds the
  * session's lease while the check runs, so no fix step moves the tree under it; the caller's step ends the pod's hold afterwards.
  */
-export async function inCheckWorkspace<T>(env: (FixWorkspaceEnv & { calls?: CallDeps }) | null, item: { repo: string; number: number }, made: { head: string; diff: string },
+export async function inCheckWorkspace<T>(env: (FixWorkspaceEnv & { calls?: CallDeps }) | null, item: { kind: FixSessionKind; repo: string; number: number }, made: { head: string; diff: string },
   check: (place: CheckPlace) => Promise<T>): Promise<T> {
   if (!env) return await check({ why: "this runner is not in the cluster, so it cannot reach the fix session's workspace" });
   const { db } = env;
   const ref = `${item.repo}#${item.number}`;
   const job = currentJob();
-  const s0 = await loadLiveFixSession(db, "pr", item.repo, item.number);
-  if (!s0) return await check({ why: "the pull request has no live fix session" });
+  const s0 = await loadLiveFixSession(db, item.kind, item.repo, item.number);
+  if (!s0) return await check({ why: "there is no live fix session" });
   const key = fixSessionLease(s0);
-  if (job && !await take(db, key, job.id, job.step)) return await check({ why: "another job works the pull request's fix session" });
+  if (job && !await take(db, key, job.id, job.step)) return await check({ why: "another job works the fix session" });
   try {
     const place = await (async (): Promise<CheckPlace> => {
-      const s = await loadLiveFixSession(db, "pr", item.repo, item.number);
+      const s = await loadLiveFixSession(db, item.kind, item.repo, item.number);
       if (!s || s.id !== s0.id) return { why: "the fix session ended" };
       const busy = s.workspaceId === null ? null : await busyCall(db, s.workspaceId);
       if (busy !== null) return { why: `call ${busy} still works in the fix session's workspace` };
