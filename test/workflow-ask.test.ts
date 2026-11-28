@@ -14,7 +14,7 @@ import { noteMergeable, unknownOf } from "../src/merge/mergeable.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
-import { questionFor } from "../src/workflow/ask.ts";
+import { questionFor, waitCloses } from "../src/workflow/ask.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { resolve } from "../src/workflow/resolve.ts";
 import { yesClause } from "../src/workflow/status.ts";
@@ -83,6 +83,13 @@ test("a person wait of a started PR has a question that a yes runs, unless its p
     if (!gone && p.state !== "opus-close" && p.state !== "opus-hold") assert.ok(p.waitCode && needsQuestion(p.waitCode, p.waitKind!, approved) && !busy, at);
     assert.ok(yesClause(q.rec), at);
     assert.equal(approved && !q.rec.merges, false, at);
+    // Asking stops an approved PR's merge leg: a question kept with only its wait may close then only where the plan, with the leg gone
+    // and the question closed, would come back with that same wait; else the leg starts again without a yes and asks again, in a loop.
+    if (approved && q.rec.cause?.code === "wait") {
+      const wait = q.rec.cause.wait, after = factsOf({ ...rows, legs: [], workflow: { ...rows.workflow!, state: "running", blocker: null } });
+      const again = questionFor(after, decidePr(after), { approved, review: null, parts: [], conflict: null });
+      assert.ok(again?.params.code === wait || !waitCloses(wait, true), at);
+    }
     const row = { entry: w.entry, state: approved ? "blocked" : "recommending", approvedBy: w.approvedBy, plan: [], rec: q.rec, blocker: q.blocker } as unknown as ItemWorkflow;
     const r = resolve({ kind: "yes", items: [] }, { kind: "pr", workflow: row });
     assert.ok(r.kind === "run" && (r.run.again || r.run.merges || r.run.goesOn || r.run.end || r.run.fix.length), at);

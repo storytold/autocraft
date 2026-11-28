@@ -43,7 +43,7 @@ import { ROUND_DELTA_LARGE, ROUND_UNSEPARATED, roundsToday } from "../core/autho
 import { partsToMake } from "../core/review-blocking.ts";
 import { verificationOf } from "../data/merge/index.ts";
 import { loadBlockerReads, openFrom, type BlockerReads } from "../review/blockers.ts";
-import { markReviewsStale, nextUtcMidnight } from "../review/discussion.ts";
+import { nextUtcMidnight } from "../review/discussion.ts";
 import { authorUnaskable } from "./unaskable.ts";
 import { actBlocked } from "../core/repo-approvals.ts";
 import { causeWent, fixable, itemQuestion, legStop, questionFor, type CauseNow, type Question } from "./ask.ts";
@@ -176,9 +176,6 @@ function recounted(pass: Pass, w: ItemWorkflow, ref: string, head: string, f: Pr
   const count = failures(pass, ref, since, head, f).find((x) => x.step === p.step)?.count ?? 0;
   return count >= FAILED_TWICE ? null : t("The {step} has not failed twice since, so the work goes on.", { step: p.step });
 }
-
-/** Waits of an approved PR whose plan, while its merge leg works, shows the leg instead (core/decide.ts queueWait). */
-const LEG_CARRIES: readonly string[] = ["batch-failed", "merge-refused"];
 
 /** The facts as the item's plan reads them once its question closed. */
 const asRunning = (f: PrFacts): PrFacts => (f.may.workflow ? { ...f, may: { ...f.may, workflow: { ...f.may.workflow, state: "running", blocker: null } } } : f);
@@ -551,7 +548,12 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     w = { ...w, ...on };
   }
   /** The question made at `head`: one that follows another the author pushed past says so. */
-  const ask = (rec: Recommendation, head: string): Recommendation => (w.recHead !== null && !ownChain(pass, key(w.repo, target!), w.recHead, head) ? afterPush(rec) : rec);
+  const ask = (rec: Recommendation, head: string): Recommendation => {
+    // A wait whose question closed by itself at this head once comes back as a question that only an answer closes, so it cannot close and come back in a loop.
+    const c = rec.cause, closed = w.closedWaits;
+    const kept = c?.code === "wait" && closed?.head === head && closed.waits.includes(c.wait) ? (({ cause: _, ...r }) => r)(rec) : rec;
+    return w.recHead !== null && !ownChain(pass, key(w.repo, target!), w.recHead, head) ? afterPush(kept) : kept;
+  };
   /** The attempt's open question, as the issue's recommendation; a stuck attempt of an approved issue is a step that failed twice. */
   const comeBack = async (patch: WorkflowPatch, head: string | null): Promise<{ to: ItemWorkflow["state"] | null } | null> => {
     const q = openQuestionOf(attempt);
@@ -565,12 +567,14 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   /** The approver's merge, refused before for their access, is tried again with this pass's write. */
   let retried = false;
   /** Closes the question whose cause went: the item goes on with the plan and the approval it had. */
-  const closeQuestion = async (why: string): Promise<void> => {
+  const closeQuestion = async (why: string, head: string | null = null): Promise<void> => {
     const gone = w.rec?.cause?.code === "actor-gone" && w.approvedBy !== null && target !== null;
     const waiting = gone ? [...(await loadActions(db, { workflowIds: [w.id], kinds: ["merge"], states: ["waiting-permission"] })).values()].flat().filter((a) => a.by.toLowerCase() === w.approvedBy!.toLowerCase()) : [];
     retried = waiting.length > 0;
     writes.closed.push({ w, line: t("The question closed without an answer: {why} {rec}", { why, rec: w.rec!.text }), at, retry: waiting.map((a) => a.id) });
-    const on = { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null } as const satisfies WorkflowPatch;
+    const c = w.rec?.cause;
+    const closedWaits = c?.code === "wait" && head !== null ? { head, waits: [...(w.closedWaits?.head === head ? w.closedWaits.waits : []), c.wait] } : w.closedWaits;
+    const on = { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, closedWaits } as const satisfies WorkflowPatch;
     Object.assign(base, on);
     w = { ...w, ...on };
   };
@@ -661,10 +665,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       fixState: (fix) => tryState(pass, ref, fix),
       waitNow: () => {
         if (!now) return undefined;
-        const r = asRunning(now), plan = decidePr(r), asked = w.rec?.cause?.code === "wait" ? w.rec.cause.wait : null;
-        // The question ended the merge leg, and the plan waits for the next one, which would stop at a wait that a working leg carries past
-        // the plan: whether it still stands the facts cannot say.
-        if (plan.waitCode === "leg" && asked !== null && LEG_CARRIES.includes(asked)) return undefined;
+        const r = asRunning(now), plan = decidePr(r);
         return (questionFor(r, plan, { approved, review: null, parts: w.plan, conflict: conflictOf(r) })?.params.code as string | undefined) ?? null;
       },
       blocks: (items) => openFrom(pass.blockers, items).length > 0,
@@ -675,13 +676,11 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     legWent = cause === "fix-unmade" || cause === "leg" ? fixUnmade
       : cause === "merge-refused" ? (l) => codeOf(l) === "merge-refused"
         : cause === "blocked-by" ? (l) => codeOf(l) === "review-hold" : null;
-    await closeQuestion(went);
+    await closeQuestion(went, head);
     repushed = false;
-    // The items the review held it for went: it is reviewed again, as a yes would have it, and the item goes on once that review is made.
-    if (cause === "blocked-by") {
-      await markReviewsStale(db, ACTOR, w.repo, target);
-      if (!approved) return settle(base);
-    }
+    // The items the review held it for went: the facts read its review as stale then (review/discussion.ts staleFrom), so it is reviewed
+    // again once, within the review cap and interval, and an approved item goes on once that review is made.
+    if (cause === "blocked-by" && !approved) return settle(base);
   }
   if (repushed) {
     // The facts are at another head, as for a moment after a push: the next pass looks again.

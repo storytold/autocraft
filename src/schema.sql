@@ -2428,7 +2428,8 @@ CREATE TABLE IF NOT EXISTS item_workflows (
   version INTEGER NOT NULL DEFAULT 0, -- how often the row was written, for a write that must not pass another by
   accepted_head TEXT,                 -- the PR head a person accepted; NULL: base_head and the merge legs say it (src/core/evidence.ts acceptedHeads)
   review_asked_at TEXT,               -- a merge entry: a person asked for a model review of the head, newer than this; null when it merges without one
-  taken_by TEXT                       -- a row the automatic merge rule started: the person whose answer last ran on it, who its questions go to (src/workflow/asked.ts)
+  taken_by TEXT,                      -- a row the automatic merge rule started: the person whose answer last ran on it, who its questions go to (src/workflow/asked.ts)
+  closed_waits TEXT                   -- JSON {head, waits}: the plan waits whose questions closed by themselves at that head; each closes so once there (src/workflow/advance.ts)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');
 CREATE INDEX IF NOT EXISTS item_workflows_item ON item_workflows(repo, number, id);

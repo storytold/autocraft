@@ -18,7 +18,7 @@ import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   GoneOn, SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
 } from "./types.ts";
-import { authorAsk, RULE_STARTER, type Parsed } from "../../workflow/types.ts";
+import { authorAsk, RULE_STARTER, type ClosedWaits, type Parsed } from "../../workflow/types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
 
@@ -37,6 +37,7 @@ export type WorkflowRow = {
   base_head: string | null; approved_by: string | null; approved_at: string | null; approved_via: string | null; stopped_by: string | null; stopped_at: string | null;
   blocker: string | null; blocker_params: string | null; rec: string | null; rec_at: string | null; rec_head: string | null; plan: string; legacy_preapproval_id: number | null;
   updated_at: string; step: string | null; pr_number: number | string | null; version: number; accepted_head: string | null; review_asked_at: string | null; taken_by: string | null;
+  closed_waits: string | null;
 };
 
 /** Blockers earlier releases wrote that no longer exist; a row stopped at one reads as `other` until src/workflow/retired-stops.ts resumes it. */
@@ -71,6 +72,7 @@ export function workflowOf(r: WorkflowRow): ItemWorkflow {
     startedBy: r.started_by, startedAt: r.started_at, startedVia: r.started_via as Surface, baseHead: r.base_head, acceptedHead: r.accepted_head,
     approvedBy: r.approved_by, approvedAt: r.approved_at, approvedVia: r.approved_via as Surface | null,
     stoppedBy: r.stopped_by, stoppedAt: r.stopped_at, takenBy: r.taken_by ?? null,
+    closedWaits: parse<ClosedWaits | null>(r.closed_waits, null),
     blocker: (r.blocker !== null && RETIRED_BLOCKERS.includes(r.blocker) ? "other" : r.blocker) as Blocker | null, blockerParams: heldParams(parse<Record<string, unknown> | null>(r.blocker_params, null)),
     rec: parse<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head,
     plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), reviewAskedAt: r.review_asked_at, legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), version: Number(r.version), updatedAt: r.updated_at,
@@ -417,7 +419,8 @@ const PATCH_COLUMNS: { [K in keyof WorkflowPatch]-?: (v: never) => [string, Cell
   approvedBy: (v) => ["approved_by", v], approvedAt: (v) => ["approved_at", v], approvedVia: (v) => ["approved_via", v],
   stoppedBy: (v) => ["stopped_by", v], stoppedAt: (v) => ["stopped_at", v], takenBy: (v) => ["taken_by", v], blocker: (v) => ["blocker", v],
   blockerParams: (v) => ["blocker_params", v ? JSON.stringify(v) : null], rec: (v) => ["rec", v ? JSON.stringify(v) : null], recAt: (v) => ["rec_at", v],
-  recHead: (v) => ["rec_head", v], plan: (v) => ["plan", JSON.stringify(v ?? [])], step: (v) => ["step", v], reviewAskedAt: (v) => ["review_asked_at", v], legacyPreapprovalId: (v) => ["legacy_preapproval_id", v],
+  recHead: (v) => ["rec_head", v], plan: (v) => ["plan", JSON.stringify(v ?? [])], step: (v) => ["step", v], reviewAskedAt: (v) => ["review_asked_at", v],
+  closedWaits: (v) => ["closed_waits", v ? JSON.stringify(v) : null], legacyPreapprovalId: (v) => ["legacy_preapproval_id", v],
 };
 
 /** The rows to write per distinct column set; patches of the same id merge in order. Every row sets `updated_at` (the live topic `workflows`). */

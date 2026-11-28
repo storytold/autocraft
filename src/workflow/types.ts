@@ -165,6 +165,8 @@ export const authorAsk = (wf: Pick<ItemWorkflow, "kind" | "state" | "blockerPara
 /** What the held workflow goes back to. */
 export const heldWork = (wf: Pick<ItemWorkflow, "blockerParams">): HeldWork => (wf.blockerParams?.held ?? {}) as HeldWork;
 
+export type ClosedWaits = { head: string; waits: string[] };
+
 export type ItemWorkflow = {
   id: number;
   repo: string;
@@ -187,6 +189,8 @@ export type ItemWorkflow = {
   stoppedAt: string | null;
   /** A row the automatic merge rule started: the person whose answer last ran on it. Its questions go to them (asked.ts). */
   takenBy: string | null;
+  /** The plan waits whose questions closed by themselves at `head`: one that comes back there is asked without that cause (src/workflow/advance.ts). */
+  closedWaits: ClosedWaits | null;
   blocker: Blocker | null;
   blockerParams: Record<string, unknown> | null;
   rec: Recommendation | null;

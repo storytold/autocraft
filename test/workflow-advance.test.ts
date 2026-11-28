@@ -67,6 +67,42 @@ test("jobs of an approved PR's own lane that fail before they record a try stop 
   assert.match(String((await eventsOf(db, "app", 1)).at(-1)?.line), /closed without an answer/);
 });
 
+test("an approved PR that failed alone in a merge batch stays at its question until a yes: stopping its merge leg does not close it, and nothing goes back to the merge queue", async () => {
+  const w = await (await (await world()).repo(["merge", "push"])).acting("mira", "ann");
+  const db = w.db, by = { login: "mira", canWrite: async () => true };
+  await w.pr(1, { label: "feature" });
+  await (await w.verified(1)).premerge(1, "clean");
+  await pause();
+  await runCommand(db, by, "github", { parsed: parse("review and merge"), items: [{ repo: "app", number: 1 }] });
+  await w.review(1, { verdict: "close" });
+  await db.run(db.k.updateTable("main.opus_reviews").set({ at: new Date().toISOString() }));
+  await untilQuiet(db, [() => advanceWorkflows(db), () => advancePreapprovals(db)], 5);
+  await pause();
+  await runCommand(db, by, "github", { parsed: parse("merge"), items: [{ repo: "app", number: 1 }] });
+  for (let i = 0; i < 4; i++) { await advanceWorkflows(db); await advancePreapprovals(db); await pause(); }
+  assert.equal(await legState(w), "queued");
+  const at = new Date().toISOString();
+  const batch = Number((await db.get(db.k.insertInto("main.merge_batches").values({ repo: "app", branch: "b", base_sha: "b", commit_sha: "c", state: "failed", summary: "a test fails", created_at: at, updated_at: at }).returning("id")))!.id);
+  await db.run(db.k.insertInto("main.merge_batch_prs").values({ batch_id: batch, number: 1, head_oid: "sha1", position: 0 }));
+  const legs = async () => (await w.rows("SELECT id FROM preapprovals WHERE number = 1")).length;
+  await advanceWorkflows(db);
+  const before = await legs();
+  for (let i = 0; i < 6; i++) {
+    await advancePreapprovals(db);
+    await pause();
+    await advanceWorkflows(db);
+    const wf = (await liveWorkflow(db, "app", 1))!;
+    assert.deepEqual([wf.state, wf.blockerParams?.code], ["blocked", "batch-failed"], `pass ${i}`);
+  }
+  assert.equal(await legs(), before, "no new merge leg without a yes");
+  assert.ok(!(await eventsOf(db, "app", 1)).some((e) => /closed without an answer/.test(String(e.line))));
+  await runCommand(db, by, "github", { parsed: parse("yes"), items: [{ repo: "app", number: 1 }] });
+  await ticks(w);
+  assert.equal((await liveWorkflow(db, "app", 1))!.state, "running");
+  assert.ok(await legs() > before, "a yes starts a new merge leg");
+  w.close();
+});
+
 test("a merge leg a fix-up try ended stops the approved PR while that try stands; once it is superseded the question closes by itself and a new leg starts", async () => {
   const w = await approvedReview();
   const db = w.db;

@@ -191,7 +191,7 @@ test("an exception to a yes runs what drop runs, and both or all name the planne
   const wf = (plan: PlanPart[]): ItemWorkflow => ({
     id: 1, repo: "storytold/photocraft", number: 812, kind: "pr", entry: "review", weight: 5, state: "recommending", step: null,
     startedBy: "mira", startedAt: "2026-11-24T09:02:00Z", startedVia: "github", baseHead: "abc", acceptedHead: null, version: 0,
-    approvedBy: null, approvedAt: null, approvedVia: null, stoppedBy: null, stoppedAt: null, takenBy: null, blocker: null, blockerParams: null,
+    approvedBy: null, approvedAt: null, approvedVia: null, stoppedBy: null, stoppedAt: null, takenBy: null, closedWaits: null, blocker: null, blockerParams: null,
     rec, recAt: "2026-11-24T10:00:00Z", recHead: null, plan, prNumber: null, reviewAskedAt: null, legacyPreapprovalId: null, updatedAt: "2026-11-24T09:02:00Z",
   });
   const three = { kind: "pr" as const, workflow: wf([part(1, "Export dialog loses focus"), part(2, "Title typo"), part(3, "Unused import")]) };

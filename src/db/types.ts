@@ -1312,6 +1312,7 @@ export interface ItemWorkflows {
   accepted_head: string | null;
   review_asked_at: string | null;
   taken_by: string | null;
+  closed_waits: string | null;
 }
 
 export interface Items {
@@ -3312,7 +3313,7 @@ export const COLUMNS = {
   item_settled_dirty: ["run_id", "repo", "number", "n"],
   item_settled_runs: ["run", "refreshed_at"],
   item_stage: ["repo", "number", "stage", "at", "reviewed"],
-  item_workflows: ["id", "repo", "number", "kind", "entry", "weight", "state", "started_by", "started_at", "started_via", "base_head", "approved_by", "approved_at", "approved_via", "stopped_by", "stopped_at", "blocker", "blocker_params", "rec", "rec_at", "rec_head", "plan", "legacy_preapproval_id", "updated_at", "step", "pr_number", "version", "accepted_head", "review_asked_at", "taken_by"],
+  item_workflows: ["id", "repo", "number", "kind", "entry", "weight", "state", "started_by", "started_at", "started_via", "base_head", "approved_by", "approved_at", "approved_via", "stopped_by", "stopped_at", "blocker", "blocker_params", "rec", "rec_at", "rec_head", "plan", "legacy_preapproval_id", "updated_at", "step", "pr_number", "version", "accepted_head", "review_asked_at", "taken_by", "closed_waits"],
   items: ["repo", "number", "kind", "state", "title", "body", "url", "author", "author_type", "author_association", "created_at", "updated_at", "closed_at", "merged_at", "merged_by", "state_reason", "is_draft", "labels", "assignees", "comments_count", "reactions_count", "additions", "deletions", "changed_files", "head_ref", "head_oid", "head_repo", "base_ref", "maintainer_can_modify", "mergeable", "review_decision", "ci_state", "closing_issues", "detail_level", "embed_hash", "class_hash", "class_scheme", "jev_failed_hash", "text_refs", "author_id"],
   jev_unsure: ["prompt_id", "ref", "input_hash", "answer", "at"],
   job_items: ["id", "job_id", "repo", "number", "outcome", "at", "ref"],

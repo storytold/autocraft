@@ -115,10 +115,19 @@ export function withoutFixes(f: PrFacts, o: Asked, forPerson = false): Recommend
 export const fixable = (rec: Recommendation, f: PrFacts, o: Asked): Recommendation =>
   (rec.parts.fix.length && nobodyFixesFor(f) ? withoutFixes(f, o, true) ?? rec : rec);
 
-/** The question of the plan's wait `code`. Every one has a cause: its own where one says more, else the wait itself (causeWent). */
+/**
+ * Waits of an approved PR that the facts alone say, whatever its merge leg does. Asking stops the leg (block.ts), so the plan read afterwards
+ * no longer shows a wait that the leg's hand-over, hold or pre-merge review made: a question of one of those stands until it is answered.
+ */
+const LEG_FREE_WAITS: ReadonlySet<string> = new Set<WaitCode>(["conflict-person", "mergeable-unknown"]);
+
+/** Whether a question kept with only the wait `wait` that asked it may close once the plan no longer stops there (causeWent). */
+export const waitCloses = (wait: string, approved: boolean): boolean => !approved || LEG_FREE_WAITS.has(wait);
+
+/** The question of the plan's wait `code`. Its cause is its own where one says more, else the wait itself where that may close (waitCloses). */
 function recFor(code: WaitCode, f: PrFacts, wait: string | null, o: Asked): Recommendation {
   const rec = waitRec(code, f, wait, o);
-  return rec.cause ? rec : { ...rec, cause: { code: "wait", wait: code } };
+  return rec.cause || !waitCloses(code, o.approved) ? rec : { ...rec, cause: { code: "wait", wait: code } };
 }
 
 function waitRec(code: WaitCode, f: PrFacts, wait: string | null, o: Asked): Recommendation {
@@ -278,6 +287,7 @@ export function causeWent(cause: Recommendation["cause"], f: PrFacts | ItemFacts
       return fixAgainText(approved);
     }
     case "wait": {
+      if (!waitCloses(cause.wait, approved)) return null;
       const wait = now.waitNow?.();
       return wait === undefined || wait === cause.wait ? null : t("Its plan no longer waits for that.");
     }

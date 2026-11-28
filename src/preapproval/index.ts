@@ -138,7 +138,7 @@ async function cancelRow(db: Db, leg: { id: number; repo: string; number: number
     const p = (await loadLegs(db, [{ repo: leg.repo, number: leg.number }], { activeOnly: true })).get(refOf(leg.repo, leg.number))?.find((r) => r.id === leg.id);
     if (!p || !ACTIVE.includes(p.state)) return null;
     const late = guard ? await pastCancel(db, p) : null;
-    if (late !== null) throw new Error(late);
+    if (late !== null) throw new PreapprovalRefused(late);
     return await moveRaw(db, p, "cancelled", { by, stop, via }) ? p : null;
   });
   if (!p) return false;
@@ -280,7 +280,7 @@ export async function checkMergeLeg(db: Db, o: { repo: string; number: number; b
   if (!fact || fact.integration) throw outOfScope(ref);
   if (fact.draft) throw isDraft(ref);
   const head = needHead(it, ref);
-  if (o.head !== undefined && head !== o.head) throw new Error(HEAD_CHANGED);
+  if (o.head !== undefined && head !== o.head) throw new PreapprovalRefused(HEAD_CHANGED);
   if (await hasLeg(db, repo, number)) throw busy(ref);
   return {
     write: async (workflowId) => {
