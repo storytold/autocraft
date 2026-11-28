@@ -30,7 +30,7 @@ import { embedDue } from "../embed/store.ts";
 import { selectFixups } from "../fixup/select.ts";
 import { approvedRepos } from "../core/repo-approvals.ts";
 import { ciApproveRepos } from "../merge/ci-approval.ts";
-import { batchesDue } from "../merge/batch-store.ts";
+import { batchesDue, publishBackoffs } from "../merge/batch-store.ts";
 import { trackedNames } from "../repos.ts";
 import { inFlightNow, ownLane, planned, type Planned } from "../core/select.ts";
 import { isQueueState } from "../core/plan.ts";
@@ -583,6 +583,11 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "merge",
     perRepo: true,
     topics: TASK_TOPICS,
+    // A publish backoff ending changes no row: its end is part of the input, so the job runs again then.
+    extra: async (db) => {
+      const now = Date.now();
+      return [...await publishBackoffs(db, new Date(now))].map(([repo, at]) => `${repo}:${at}:${at > now ? "on" : "over"}`).sort().join(",");
+    },
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx);
       // The merge queue: PRs with a queue state (merged ones too) whose merge is approved, by a person or by the repo.
@@ -590,6 +595,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         .map((p) => ({ repo: p.facts.repo, number: p.facts.number, state: p.plan.state, eligible: p.plan.eligible }));
       const due = new Set((await planned(db, "merge", { plans })).map((p) => p.facts.repo));
       const batches = new Set(await batchesDue(db));
+      // A repo whose last batches could not be published starts no batch until its backoff ends (single merges go on): the planner wakes then.
+      for (const at of due.size ? (await publishBackoffs(db, new Date(), [...due])).values() : []) ctx.wake?.push(at);
       const out: Candidate[] = [];
       // A merge job that advanced a batch runs again at once; one that only watched waits.
       const later = async (step: string, repo: string): Promise<boolean> => {

@@ -1,7 +1,7 @@
 // Pure rules of the merge queue's integration batches (see batch.ts), and the batch reads other features call. The rows
 // live in the merge module (src/data/merge).
 import { cancelTasks } from "../data/build/index.ts";
-import { getBatch as loadBatch, listBatchPage, loadBatchDue, loadBatchRun, loadBatchSizes, loadMergeFacts, updateBatches } from "../data/merge/index.ts";
+import { getBatch as loadBatch, listBatchPage, loadBatchDue, loadBatchRun, loadBatchSizes, loadMergeFacts, loadPublishFailures, updateBatches } from "../data/merge/index.ts";
 import { openItemKeys } from "../data/mirror/index.ts";
 import type { HiddenRepos } from "../data/control/types.ts";
 import type { BatchMember, BatchPatch, BatchRow, BatchView } from "../data/merge/types.ts";
@@ -15,6 +15,13 @@ export { setBatchSize } from "../data/merge/index.ts";
 export const MAX_PUBLISH_FAILURES = 5;
 /** Wait before a batch whose push or PR creation failed is tried again: 1, 2, 4, 8 minutes, at most 30. */
 export const publishDelayMs = (failures: number): number => (failures === 0 ? 0 : Math.min(60_000 * 2 ** (failures - 1), 30 * 60_000));
+/**
+ * Wait before a repo's next batch starts after batches in a row failed to push or open their PR (a GitHub outage, a refused push):
+ * 30 minutes after the first, doubling up to 4 hours. Their PRs are back in the queue meanwhile; a batch PR that opens ends the run.
+ */
+export const publishBackoffMs = (failures: number): number => (failures <= 0 ? 0 : Math.min(30 * 60_000 * 2 ** (failures - 1), 4 * 3600_000));
+/** How far back the publish failures of a run are read: older ones no longer lengthen the wait. */
+const PUBLISH_BACKOFF_WINDOW_MS = 24 * 3600_000;
 /** Wait before a batch's build task is queued again after a build-environment error: none for the first retry, then doubling from 5 minutes up to 30 minutes. */
 export const retryDelayMs = (retries: number): number => (retries <= 0 ? 0 : Math.min(5 * 60_000 * 2 ** (retries - 1), 30 * 60_000));
 /** Builds a batch's task may take, counting every try, before the batch PR opens without the build. */
@@ -69,6 +76,12 @@ export async function batchStates(db: Db, repo?: string): Promise<Map<string, "b
 export async function batchesDue(db: Db, now = new Date()): Promise<string[]> {
   // No repo approval is read: a batch may hold only PRs people approved one by one, and each member's approval is checked before the batch's writes.
   return [...new Set((await loadBatchDue(db, now)).map((b) => b.repo))];
+}
+
+/** Per repo whose last batches failed to publish, when its next batch may start (ms); it may be in the past. */
+export async function publishBackoffs(db: Db, now = new Date(), repos?: string[]): Promise<Map<string, number>> {
+  const runs = await loadPublishFailures(db, new Date(now.getTime() - PUBLISH_BACKOFF_WINDOW_MS).toISOString(), repos);
+  return new Map([...runs].map(([repo, r]) => [repo, Date.parse(r.at) + publishBackoffMs(r.count)] as const));
 }
 
 /** One page of batches, newest first (ids below `before`), with their members in order. */

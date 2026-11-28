@@ -1,11 +1,14 @@
 // Build batches: with the feature on, a build task checks the combined tree before the batch PR opens; every failure to
-// build opens the PR anyway. GitHub, git and the build worker are faked (test/world-db.ts); no build runs.
+// build opens the PR anyway. A batch that cannot be published frees its PRs behind a backoff. GitHub, git and the build worker
+// are faked (test/world-db.ts); no build runs.
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import { setFeature } from "../src/build/features.ts";
 import { like } from "../src/db/kx.ts";
 import { runBatches, type BatchDeps } from "../src/merge/batch.ts";
-import { world, type World } from "./world-db.ts";
+import { MAX_PUBLISH_FAILURES } from "../src/merge/batch-store.ts";
+import { planned } from "../src/core/select.ts";
+import { T1, world, type World } from "./world-db.ts";
 
 const quiet = () => {};
 let current: World | null = null;
@@ -27,7 +30,7 @@ async function setup(prs: number[], on: boolean) {
   return { w, deps, calls, setPatch: (p: string) => { patch = p; } };
 }
 const run = (t: Awaited<ReturnType<typeof setup>>) => runBatches(t.w.db, { repo: "app" }, quiet, t.deps);
-const batches = async (w: World) => await w.db.all(w.db.k.selectFrom("merge_batches").select(["id", "state", "build_state", "build_tries", "task_id", "parent_id", "pr_number"]).orderBy("id"));
+const batches = async (w: World) => await w.db.all(w.db.k.selectFrom("merge_batches").select(["id", "state", "build_state", "build_tries", "task_id", "parent_id", "pr_number", "updated_at"]).orderBy("id"));
 const tasks = async (w: World) => await w.rows("SELECT id, step, state FROM build_tasks ORDER BY id");
 
 /** Ends a task the way a worker would: every plan step passed, or the named step failed (earlier ones passed), or no step ran. */
@@ -140,4 +143,23 @@ describe("batch-build", () => {
     await run(t);
     assert.deepEqual((await batches(t.w)).map((b) => [b.state, b.build_state, b.pr_number]), [["open", "skipped", 900]]);
   });
+});
+
+test("a batch that cannot be published returns its PRs to the queue, and the repo's next batch waits out a backoff", async () => {
+  const t = await setup([1, 2], false);
+  let clock = Date.parse(T1), pushes = false;
+  const deps: BatchDeps = { ...t.deps, now: () => new Date(clock), exec: async (cmd, args, opts) => (cmd === "git" && args.includes("push") && !pushes ? { code: 1, stdout: "", stderr: "HTTP 503" } : t.deps.exec(cmd, args, opts)) };
+  const go = () => runBatches(t.w.db, { repo: "app" }, quiet, deps);
+  for (let i = 0; i < MAX_PUBLISH_FAILURES; i++) { await go(); clock += 31 * 60_000; }
+  assert.deepEqual((await batches(t.w)).map((b) => b.state), ["failed"]);
+  // Back in the queue, not held for a person.
+  assert.deepEqual((await planned(t.w.db, "merge", { repo: "app" })).map((p) => p.facts.number).sort(), [1, 2]);
+
+  pushes = true;
+  clock = Date.parse((await batches(t.w))[0]!.updated_at) + 10 * 60_000;
+  await go();
+  assert.equal((await batches(t.w)).length, 1, "no batch starts during the backoff");
+  clock += 30 * 60_000;
+  await go();
+  assert.deepEqual((await batches(t.w)).map((b) => [b.state, b.pr_number]), [["failed", null], ["open", 900]]);
 });

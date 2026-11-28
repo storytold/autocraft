@@ -5,7 +5,9 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { classify, derive, prNumberOf, type HeadRow, type MainCheck } from "../src/mainci/classify.ts";
-import { mainCiRepos, redMainHolds, redMainRepos } from "../src/mainci/index.ts";
+import { mainCiRepos, pollMainCi, redMainHolds, redMainRepos } from "../src/mainci/index.ts";
+import { loadTrip, loadTrips, tripStage } from "../src/data/control/index.ts";
+import type { Querier } from "../src/mirror.ts";
 import { saveMainHeads } from "../src/data/mirror/mainci.ts";
 import { decidePr } from "../src/core/decide.ts";
 import { prFacts } from "./world.ts";
@@ -96,4 +98,41 @@ test("a red branch stays red while a head's checks run, also a rerun of the red 
   await poll("f", 70, "green", 70);
   assert.equal(await held(ms(75)), false);
   assert.equal((await row(ms(75))).culprit, null);
+});
+
+test("a merge breaker a red main tripped resumes once main passes again; one tripped by a post-merge defect stays", async () => {
+  mkdirSync(SCRATCH, { recursive: true });
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "main-ci-")), "t.db"));
+  const t = (min: number) => new Date(Date.now() - 60 * 60_000 + min * 60_000).toISOString();
+  for (const name of ["app", "lib"]) {
+    await db.run(db.k.insertInto("tracked_repos").values({ name, added_by: "op", added_at: t(0), pipeline: 1 }));
+    await db.run(db.k.insertInto("repos").values({ name, visibility: "public", synced_at: t(0) }));
+  }
+  await db.run(db.k.insertInto("merges").values({ repo: "app", number: 7, head_oid: "h7", at: t(1), run_id: "r", path: "rule", outcome: "merged" }));
+  // What GitHub answers for each repo's default branch: its head, the PR its headline names, and its gate check.
+  let heads: Record<string, { sha: string; pr: number; gate: "SUCCESS" | "FAILURE" }> = {};
+  const client: Querier = {
+    spent: 0, remaining: null,
+    query: async (_q, vars) => Object.fromEntries(Object.entries(vars).map(([k, owner], i) => {
+      const repo = Object.keys(heads)[i]!, h = heads[repo]!;
+      return [k.replace("o", "r"), { defaultBranchRef: { name: "main", target: { oid: h.sha, committedDate: new Date().toISOString(), messageHeadline: `Merge pull request #${h.pr} from ${owner}/x`,
+        statusCheckRollup: { contexts: { nodes: [{ __typename: "CheckRun", name: "gate / test", status: "COMPLETED", conclusion: h.gate, detailsUrl: null }] } } } } }];
+    })) as never,
+  };
+  const active = async () => [...(await loadTrips(db)).keys()].sort();
+
+  heads = { app: { sha: "a1", pr: 7, gate: "FAILURE" }, lib: { sha: "l1", pr: 3, gate: "SUCCESS" } };
+  await pollMainCi(db, client);
+  await tripStage(db, [{ key: "merge:lib", reason: "the post-merge review of lib#3 found 1 defect", evidence: ["lib#3"], at: t(2) }]);
+  assert.deepEqual(await active(), ["merge:app", "merge:lib"]);
+
+  // Still red on a later head: nothing resumes.
+  heads = { app: { sha: "a2", pr: 8, gate: "FAILURE" }, lib: { sha: "l2", pr: 4, gate: "SUCCESS" } };
+  await pollMainCi(db, client);
+  assert.deepEqual(await active(), ["merge:app", "merge:lib"]);
+
+  heads = { app: { sha: "a3", pr: 9, gate: "SUCCESS" }, lib: { sha: "l3", pr: 5, gate: "SUCCESS" } };
+  await pollMainCi(db, client);
+  assert.deepEqual(await active(), ["merge:lib"]);
+  assert.equal((await loadTrip(db, "merge:app"))?.clearedBy, "pipeline");
 });
