@@ -71,7 +71,7 @@ async function setup(depth: number) {
     },
   };
   const ready = async (n: number) => { await (await (await (await w.pr(n)).review(n)).verified(n)).premerge(n, "clean"); };
-  const run = () => runBatches(w.db, { repo: "app" }, () => {}, deps);
+  const run = (limit?: number) => runBatches(w.db, { repo: "app", ...(limit === undefined ? {} : { limit }) }, () => {}, deps);
   const batches = async () => await Promise.all((await w.db.all(w.db.k.selectFrom("merge_batches").select(["id", "branch", "state", "base_sha", "commit_sha", "below_id", "root_sha", "side", "pr_number", "summary"]).orderBy("id")))
     .map(async (b) => ({ ...b, members: (await w.db.all(w.db.k.selectFrom("merge_batch_prs").select("number").where("batch_id", "=", b.id).orderBy("position"))).map((r) => r.number) })));
   const active = async () => (await batches()).filter((b) => b.state === "checking" || b.state === "open");
@@ -203,4 +203,15 @@ test("a car behind the default branch after the car below landed holds the train
   await t.run();
   assert.ok((await loadTrains(t.w.db, ["app"]))[0]!.note, "the note stands");
   assert.equal((await t.active()).length, 1);
+});
+
+test("a merge job of a full one-car train gets room for the open batch's one top-up", async () => {
+  const t = await setup(1);
+  const limit = async () => (await mergeJobLimits(t.w.db, ["app"], new Set(["app"]))).get("app")!;
+  for (const n of [1, 2, 3]) await t.ready(n);
+  await t.run(await limit());
+  assert.deepEqual((await t.active()).map((b) => b.members), [[1, 2, 3]]);
+  for (const n of [4, 5, 6, 7, 8]) await t.ready(n);
+  await t.run(await limit());
+  assert.deepEqual((await t.active()).map((b) => b.members), [[1, 2, 3, 4, 5, 6, 7, 8]], "the open batch is topped up within the job's limit");
 });

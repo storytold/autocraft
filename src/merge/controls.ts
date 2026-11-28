@@ -53,12 +53,15 @@ function carsAbove(active: readonly BatchView[], id: number): BatchView[] {
 async function endBatch(db: Db, by: string, id: number, why: string, comment: string, run: Exec, after = ""): Promise<{ closed: number | null }> {
   const b = (await getBatch(db, id))!;
   const above = carsAbove((await loadBatchRun(db, b.repo)).active, id);
-  for (const x of [b, ...above]) await cancelBuild(db, x, by);
+  await cancelBuild(db, b, by);
   const now = new Date().toISOString();
   const aboveWhy = `the car below it, ${b.branch}, was ended: ${why}`;
   await updateBatches(db, [{ id, at: now, set: { state: "superseded", summary: why } }, ...above.map((x) => ({ id: x.id, at: now, set: { state: "superseded" as const, summary: aboveWhy } }))]);
   const restore = async () => await updateBatches(db, [b, ...above].map((x) => ({ id: x.id, at: new Date().toISOString(), set: { state: x.state, summary: x.summary } })));
+  // Only once the batch's own end stands: their builds are cancelled and their PRs closed. A close that fails leaves the PR to the
+  // merge run's sweep of ended batches with an open PR.
   const closeAbove = async () => {
+    for (const x of above) await cancelBuild(db, x, by);
     const open = above.filter((x) => x.pr_number !== null);
     if (!open.length) return;
     const g = await guardRepo(db, b.repo, null, { operator: by });

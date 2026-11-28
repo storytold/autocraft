@@ -41,7 +41,7 @@ export async function batchSizeOf(db: Db, repo: string): Promise<number> {
 /**
  * The limit of an automatic merge job of each repo. When a new car can start (fewer cars in flight than the train's depth, 1 while a
  * note holds it to one car, and `due` holds the repo: PRs may merge there), the train's capacity: that depth times the repo's batch
- * size. Otherwise the PRs of its cars in flight, at least 1, so a job that only watches or lands reserves no more of the day's merges.
+ * size. Otherwise the PRs of its cars in flight plus one batch size, room for one top-up or rebuild, so such a job reserves no more.
  */
 export async function mergeJobLimits(db: Db, repos: string[], due: ReadonlySet<string>): Promise<Map<string, number>> {
   const [trains, sizes, active] = await db.together(() => Promise.all([loadTrains(db, repos), loadBatchSizes(db, repos), listActiveBatches(db, { repos })]));
@@ -49,7 +49,8 @@ export async function mergeJobLimits(db: Db, repos: string[], due: ReadonlySet<s
     const depth = t.note ? 1 : t.depth;
     const cars = active.filter((b) => b.repo === t.repo);
     const start = due.has(t.repo) && cars.length < depth;
-    return [t.repo, start ? depth * sizes.get(t.repo)! : Math.max(1, cars.reduce((n, b) => n + b.members.length, 0))] as const;
+    // A full train still gets one batch size beyond its cars' PRs: a top-up or a rebuild that takes newly eligible PRs, or single merges, fit.
+    return [t.repo, start ? depth * sizes.get(t.repo)! : cars.reduce((n, b) => n + b.members.length, 0) + sizes.get(t.repo)!] as const;
   }));
 }
 

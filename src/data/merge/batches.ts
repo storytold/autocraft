@@ -63,6 +63,13 @@ export async function loadBatchPage(db: Db, id: number): Promise<BatchPageView |
   };
 }
 
+/** Batches of the repo that ended without landing since `since` and have a PR, with members. 1 statement. */
+export async function loadEndedWithPr(db: Db, repo: string, since: string): Promise<BatchView[]> {
+  const rows = await queryDb(db).all(batchViews(db).where("b.repo", "=", repo).where("b.state", "in", ["superseded", "split", "failed"])
+    .where("b.pr_number", "is not", null).where("b.updated_at", ">=", since).orderBy("b.id"));
+  return rows.map(toBatchView);
+}
+
 /** Active batches with members, optionally of some repos and not hidden. 1 statement. */
 export async function listActiveBatches(db: Db, f: { repos?: string[]; hidden?: HiddenRepos }): Promise<BatchView[]> {
   if (f.repos && f.repos.length === 0) return [];

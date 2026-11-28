@@ -58,9 +58,9 @@ import { jobItem } from "../runner/job-items.ts";
 import { leaseItem } from "../runner/leases.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { addAudit } from "../data/control/index.ts";
-import { loadBatchRun, loadBatchSizes, loadRunApprovals, loadTrains, loadVsMainAt, MAX_TRAIN_DEPTH, openBatch, recordLanded as saveLanded, saveTrainDepth, saveTrainNote, updateBatches, type VsMainRow } from "../data/merge/index.ts";
+import { loadBatchRun, loadBatchSizes, loadEndedWithPr, loadRunApprovals, loadTrains, loadVsMainAt, MAX_TRAIN_DEPTH, openBatch, recordLanded as saveLanded, saveTrainDepth, saveTrainNote, updateBatches, type VsMainRow } from "../data/merge/index.ts";
 import type { BatchRow, StageRow } from "../data/merge/types.ts";
-import { loadItems, loadMainCiAt } from "../data/mirror/index.ts";
+import { loadChecks, loadItems, loadMainCiAt } from "../data/mirror/index.ts";
 import { sizeOf } from "../core/rules.ts";
 import { addStageEvents } from "../data/planner/index.ts";
 import { loadItemAreas } from "../data/triage/index.ts";
@@ -76,6 +76,8 @@ export const RERUN_WAIT_MS = 45 * 60_000;
 export const TOPUP_WINDOW_MS = 15 * 60_000;
 /** Refusals of a member's merge that say nothing about the PR: the batch waits for them, as a single merge does. Any other leaves the member out. */
 const WAITED_FOR: ReadonlySet<RefusalCode> = new Set(["breaker", "actor-unknown"]);
+/** How far back the merge run looks for ended batches whose PR stayed open (a close that failed) to close it again. */
+const SWEEP_MS = 24 * 3600_000;
 /** Batches in flight per repo at most; a split or a trace starts no more. */
 const MAX_ACTIVE = 8;
 const PR_URL = /^https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+\/pull\/(\d+)$/;
@@ -108,8 +110,8 @@ export type BatchParams = {
   limit?: number;
   /** Called with the running count of PRs merged. */
   onMerged?: (merged: number) => void;
-  /** PRs the stage's daily limit leaves for today when the run starts: landing is bounded by it, not by `limit`. */
-  dayLeft?: number;
+  /** PRs the stage's daily limit leaves today, read again before each landing (`landed`: what this run landed so far); landing is bounded by it, not by `limit`. */
+  dayLeft?: (landed: number) => Promise<number>;
   /** Who asked; default: an operator at the command line. */
   by?: By;
 };
@@ -205,8 +207,8 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   let landed = 0;
   /** PRs this run may still start or land under the stage's daily limit. */
   const left = () => (params.limit === undefined ? Infinity : params.limit - landed);
-  /** PRs that may still land today: the stage's daily limit left when the run started, less what this run landed (the job's share without one). */
-  const dayLeft = () => (params.dayLeft === undefined ? left() : params.dayLeft - landed);
+  /** PRs that may still land today, read now: the stage's daily limit left (the job's share without one). */
+  const dayLeft = async (): Promise<number> => (params.dayLeft === undefined ? left() : await params.dayLeft(landed));
   /** Batches this run opened: one superseded again in the same run is not rebuilt, so a rebuild can never loop through its own publish. */
   const openedNow = new Set<number>();
 
@@ -443,6 +445,22 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     if (openedNow.has(b.id)) { if (keep.length) log(`  ${b.branch}: opened in this run; its PRs wait for the next run`); return; }
     if (next) await openChain(next, b.id, { toppedUp: true });
     else if (keep.length && left() > 0) await rebuild(keep, left(), b.id, b.members, { place: await placeOf(b) });
+  }
+
+  /**
+   * The first car below `b`, down the whole chain, that has not landed (active or ended), or null. Cars below a car have smaller ids,
+   * so the walk ends at a landed car older than every car in flight.
+   */
+  async function notLandedBelow(b: BatchRow): Promise<BatchView | null> {
+    const oldest = Math.min(...(await loadBatchRun(db, repo)).active.map((x) => x.id));
+    for (let id = b.below_id ?? null; id !== null;) {
+      const x = await getBatch(db, id);
+      if (!x) return null;
+      if (x.state !== "merged") return x;
+      if (x.id < oldest) return null;
+      id = x.below_id ?? null;
+    }
+    return null;
   }
 
   /** The merge commit of the nearest car below `b` that landed, or null: none did, or its merge commit is not known. */
@@ -803,7 +821,8 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     if (ch.mergeable === "CONFLICTING") return supersede(b, members, `the batch PR conflicts with ${branch}`);
     const moved = await movedAway(b);
     if (moved) return supersede(b, members, moved);
-    if (members.length > dayLeft()) { log(`  ${b.branch}: ${members.length} PRs exceed the ${Math.max(dayLeft(), 0)} left of the daily limit; waits`); s.waiting.push(b.branch); return; }
+    const today = await dayLeft();
+    if (members.length > today) { log(`  ${b.branch}: ${members.length} PRs exceed the ${Math.max(today, 0)} left of the daily limit; waits`); s.waiting.push(b.branch); return; }
     // CI still running (neither red nor green): the PRs that became eligible since it started may join, once.
     if (ci !== "success" && await topUp(b)) return;
     if (ci !== "success" || ch.mergeable !== "MERGEABLE") {
@@ -876,13 +895,15 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       leases.push(release);
     }
     try {
-      // The car below may have been stopped or removed since the wait was read: only a landed car below lets this one merge (it landed
-      // only after its own car below did).
-      if (b.below_id !== null && b.below_id !== undefined && (await getBatch(db, b.below_id))?.state !== "merged") {
-        log(`  ${b.branch}: the car below has not landed; not merged`);
+      // The cars below may have been stopped, removed or merged out of order since the wait was read: every one must have landed.
+      const under = await notLandedBelow(b);
+      if (under) {
+        log(`  ${b.branch}: ${under.branch} below it has not landed; not merged`);
         s.waiting.push(b.branch);
         return;
       }
+      // Other repos' merge jobs land under the same daily limit meanwhile: read it again right before the merge.
+      if (members.length > await dayLeft()) { log(`  ${b.branch}: the daily merge limit has no room left for its ${members.length} PRs; waits`); s.waiting.push(b.branch); return; }
       let after: Awaited<ReturnType<typeof refreshChecks>>[number] | undefined;
       // Every member must still hold at its batched head, and the batch PR at the batch tip.
       const g = await guardBatchMerge(db, { repo, number: b.pr_number!, head: b.commit_sha }, members.map((m) => ({ number: m.number, head: m.head_oid })), by, liveRead);
@@ -1100,6 +1121,28 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     }
   }
 
+  /**
+   * Closes the PR of each batch of the repo that ended in the last day while its PR stayed open: a close that failed, here or in a
+   * control, is tried again. Only PRs the stored checks do not already show closed or merged are read; closing is the same guarded write.
+   */
+  async function sweepEnded(): Promise<void> {
+    const inFlight = new Set((await loadBatchRun(db, repo)).active.flatMap((b) => (b.pr_number === null ? [] : [b.pr_number])));
+    const ended = (await loadEndedWithPr(db, repo, new Date(d.now().getTime() - SWEEP_MS).toISOString())).filter((b) => !inFlight.has(b.pr_number!));
+    if (!ended.length) return;
+    const stored = await loadChecks(db, [...new Set(ended.map((b) => b.pr_number!))].map((number) => ({ repo, number })));
+    const unsure = ended.filter((b) => (stored.get(refOf(b.pr_number!))?.state ?? "OPEN") === "OPEN");
+    if (!unsure.length) return;
+    const live = await refreshChecks(db, d.querier, repo, [...new Set(unsure.map((b) => b.pr_number!))]);
+    const closed = new Set<number>();
+    for (const b of unsure) {
+      if (closed.has(b.pr_number!) || live.find((c) => c.number === b.pr_number)?.state !== "OPEN") continue;
+      closed.add(b.pr_number!);
+      log(`  ${b.branch}: ended with its PR still open; closing it`);
+      await closePr(b, "Closing: this batch ended. Its pull requests went back to the queue.");
+    }
+  }
+
+  await sweepEnded();
   const first = await batchesNow();
   // One queue read for the run: each batch's effects re-read its own row before they write. Bottom car first (ids ascend up the
   // train), so a car whose car below lands in this run is read again after it and may land too.
@@ -1131,6 +1174,8 @@ export const commands = {
         if (!new RegExp(`^[1-${MAX_TRAIN_DEPTH}]$`).test(rest[0])) throw new Error(TRAIN_USAGE);
         if (!(await loadRepoScopes(db, [repo!])).has(repo!)) throw new Error(`${repo} is not tracked`);
         await saveTrainDepth(db, repo!, Number(rest[0]), "cli");
+        // Setting the depth is a person's word on the branch: a note that holds the train to one car is lifted (the next car start reads the rules again).
+        await saveTrainNote(db, repo!, null, "cli");
       }
       for (const t of await loadTrains(db, repo ? [repo] : undefined)) console.log(`${t.repo}: depth ${t.depth}${t.note ? `, one car at a time: ${t.note}` : ""}`);
     },
