@@ -363,14 +363,19 @@ export function approvedNowLine(wf: ItemWorkflow, clock: Clock = utcClock): stri
   return next.length ? t("{state}. Next: {steps}.", { state: now, steps: listText(next) }) : t("{state}.", { state: now });
 }
 
-/** The reply when nothing ran: what was understood, and why it waits. `proposed`: a command a model read in text the parser could not read. */
-export function replyLine(r: Exclude<Resolved, { kind: "run" }>, clock: Clock = utcClock, mention?: string, proposed?: string): string {
+/** The reply when nothing ran: what was understood, and why it waits. `proposed`: one or two commands a model read in text the parser could not read, likeliest first. */
+export function replyLine(r: Exclude<Resolved, { kind: "run" }>, clock: Clock = utcClock, mention?: string, proposed?: string | readonly string[]): string {
   return r.kind === "ambiguous" ? ambiguityText(r.understood, r.ambiguity, mention, proposed) : refusalText(r.refusal, clock);
 }
 
-/** The sentence that proposes a command to send. */
-const proposalLine = (command: string, mention?: string): string =>
-  t("I read this as `{command}`. Reply `{reply}` to run it.", { command, reply: mention ? `@${mention} ${command}` : command });
+/** The sentence that proposes a command to send, or two to pick from. */
+function proposalLine(proposed: string | readonly string[], mention?: string): string {
+  const [command, other] = typeof proposed === "string" ? [proposed] : proposed;
+  const reply = (c: string): string => (mention ? `@${mention} ${c}` : c);
+  return other === undefined
+    ? t("I read this as `{command}`. Reply `{reply}` to run it.", { command: command!, reply: reply(command!) })
+    : t("I read this as `{command}` or `{other}`. Reply `{reply}` or `{otherReply}` to run one.", { command: command!, other, reply: reply(command!), otherReply: reply(other) });
+}
 
 /** Words that reverse or postpone a command: a reply holding one is never read back as that command. */
 export const MEANING_WORDS = /(?<![\w-])(?:don't|dont|do not|not|no|never|wait|hold|stop|pause|later|unless|but|if|instead|n't)(?![\w-])|n't(?![\w-])/i;
@@ -388,16 +393,16 @@ function partHint(rest: string): string | null {
   return COMMANDS.some((x) => x.answer && [x.word, ...x.aliases].includes(word)) ? t("“{word}” names a part of the plan, as in “{example}”.", { word, example: `${word} 1` }) : null;
 }
 
-function ambiguityText(understood: string, a: Ambiguity, mention?: string, proposed?: string): string {
+function ambiguityText(understood: string, a: Ambiguity, mention?: string, proposed?: string | readonly string[]): string {
   switch (a.why) {
     case "unreadable":
-      if (a.ends && !proposed) {
+      if (a.ends && !proposed?.length) {
         const say = (command: string) => (mention ? `@${mention} ${command}` : command);
         return t("I understood “{understood}” but not whether the work should end in a merge (“{rest}”). Nothing runs. Reply `{merge}` to merge it when CI is green, or `{back}` to have it come back to you.", {
           understood, rest: a.rest, merge: say(`${a.ends}, then merge`), back: say(`${a.ends}, but don't merge`),
         });
       }
-      if (proposed) {
+      if (proposed?.length) {
         const unread = understood && a.rest ? t("I understood “{understood}” but not “{rest}”.", { understood, rest: a.rest }) : a.rest ? t("I couldn't read “{rest}” as a command.", { rest: a.rest }) : null;
         return [unread, proposalLine(proposed, mention)].filter((x) => x !== null).join(" ");
       }
