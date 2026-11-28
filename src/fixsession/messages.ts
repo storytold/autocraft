@@ -46,7 +46,14 @@ function capped(diff: string): { diff: string; note: string } {
   return { diff: diff.slice(0, DIFF_CAP), note: ` The diff is cut at ${DIFF_CAP} of ${diff.length} characters; read the changed files in /work/src for the rest.` };
 }
 
-const CHECKS = "Run cargo fmt, cargo clippy on the crates you changed and their tests, fix what they report, and reply with the JSON report.";
+const FMT = "Check formatting with cargo fmt --check, never plain cargo fmt (it rewrites files this task does not allow), then run clippy on the crates you changed and their tests.";
+/** The check sentence per step: what the session may change to make the checks pass. */
+const CHECKS: Record<FixStep, string> = {
+  fixup: `${FMT} Fix what they report only within the files in pr.allowed and the new files you added; report anything else in summary instead of changing it. Then reply with the JSON report.`,
+  maintainer: `${FMT} Fix what they report only in the files your change touches; report anything else in summary instead of changing it. Then reply with the JSON report.`,
+  cifix: `${FMT} Fix what they report only within the files in pr.allowed; report anything else in summary instead of changing it. Then reply with the JSON report.`,
+  conflict: `${FMT} Fix what they report only inside the conflict sections; a finding outside them goes in summary and is not made. Then reply with the JSON report.`,
+};
 const quietRule = (quiet: boolean | undefined): string => (quiet ? `\n\nThis pull request is a quiet one. ${QUIET} The lines your changes add are checked for such words, and a change with one is refused.` : "");
 
 /** The paragraph on a branch that moved since the session's last task: the two heads and the diff stat between them. */
@@ -66,9 +73,9 @@ function body(t: StepTurn): string {
   switch (t.step) {
     case "fixup": {
       const d = capped(t.diff);
-      return `A code review of this pull request listed the fixes in pr.fixes, after its reason. Make exactly those fixes and nothing else. Edit only the files in pr.allowed. When a fix needs a new file, add it only inside one of the directories in pr.new_files_in; never delete or rename a file. If a fix is wrong or cannot be made in those files, leave it out and say why in summary. When every fix is already in the tree, leave it unchanged and reply with status none. pr.diff is the pull request's diff against its base.${d.note}${quietRule(t.quiet)}
+      return `A code review of this pull request listed the fixes in pr.fixes, after its reason. Make exactly those fixes and nothing else. Edit only the files in pr.allowed. When a fix needs a new file, add it only inside one of the directories in pr.new_files_in, as a .rs file or a .md file outside dot-directories; never delete or rename a file. If a fix is wrong or cannot be made in those files, leave it out and say why in summary. When every fix is already in the tree, leave it unchanged and reply with status none. pr.diff is the pull request's diff against its base.${d.note}${quietRule(t.quiet)}
 
-${CHECKS}
+${CHECKS[t.step]}
 
 ${block("pr", { ref: t.ref, title: t.title, reason: t.reason, fixes: t.fixes, allowed: t.allowed, new_files_in: t.newFilesIn, diff: d.diff })}`;
     }
@@ -76,9 +83,9 @@ ${block("pr", { ref: t.ref, title: t.title, reason: t.reason, fixes: t.fixes, al
       const d = capped(t.diff);
       return `A maintainer of this project (not the pull request's author) gave the instructions in the instructions block. They are trusted: carry them out, all of them and nothing beyond them. You may change, add, delete or rename any file they need, except the files the rules protect and the cargo manifests and lockfile. There is no size limit beyond what the instructions ask. pr.diff is the pull request's diff against its base.${d.note}
 
-AutoCraft posts the changes list of your report on the pull request: 1 to 8 entries, each one plain sentence that says what the change does. Describe the changes; never repeat or paraphrase the instructions, and never mention reference documentation.${quietRule(t.quiet)}
+AutoCraft posts the changes list of your report on the pull request: each entry one plain sentence that says what the change does. Describe the changes; never repeat or paraphrase the instructions, and never mention reference documentation.${quietRule(t.quiet)}
 
-${CHECKS}
+${CHECKS[t.step]}
 
 ${block("instructions", t.instructions)}
 
@@ -91,7 +98,7 @@ ${block("pr", { ref: t.ref, title: t.title, diff: d.diff })}`;
 
 Fix the cause the logs show (a compile error, a lint, a test that the pull request's code makes fail) with the smallest change that keeps what the pull request does. Edit only the files in pr.allowed; never add, delete or rename a file. Never edit a test file, and never skip, ignore or weaken a test or an assertion. If the logs show no cause you can fix in those files (a flaky run or a failure outside the repository, say), leave the tree unchanged and reply with status none.${d ? ` pr.diff is the pull request's diff against its base.${d.note}` : ""}${quietRule(t.quiet)}
 
-${CHECKS}
+${CHECKS[t.step]}
 
 ${block("pr", { ref: t.ref, title: t.title, failure: t.failure, allowed: t.allowed, ...(d && { diff: d.diff }) })}`;
     }
@@ -106,7 +113,7 @@ ${block("pr", { ref: t.ref, title: t.title, failure: t.failure, allowed: t.allow
 - When a section cannot be resolved from its two sides and the repository, take the default branch's side.
 - If the merged code needs a change outside the sections to build, do not make it; say so in summary.${quietRule(t.quiet)}
 
-${CHECKS}
+${CHECKS[t.step]}
 
 ${block("pr", { ref: t.ref, title: t.title, ...(t.reason !== undefined && { reason: t.reason }), base: t.base, files: t.files })}`;
   }
@@ -126,15 +133,15 @@ export const historyNote = (h: HistoryNote): string =>
 
 /** The lint findings on a change: the build worker's rustfmt, clippy and tests. */
 export const lintMessage = (findings: string[]): string =>
-  `AutoCraft linted your changes for this task. Rustfmt, clippy and the tests of the affected crates report the findings below (rustfmt and clippy findings are on lines your changes touch). Fix them within the files this task allows, run the checks again yourself, and reply with the JSON report as before.\n\n${block("findings", findings.map((f) => f.trim()))}`;
+  `AutoCraft linted your changes for this task. Rustfmt, clippy and the tests of the affected crates report the findings below (rustfmt and clippy findings are on lines your changes touch). Fix them within what this task allows (for a conflict, only inside the conflict sections), run the checks again yourself, and reply with the JSON report as before.\n\n${block("findings", findings.map((f) => f.trim()))}`;
 
 /** The findings of AutoCraft's checks in the pod. */
 export const checksMessage = (findings: SessionFinding[]): string =>
-  `AutoCraft ran its own checks on the changes in /work/src: cargo fmt, clippy on the changed lines and the tests of the affected crates. They found the problems below. Fix them within the files this task allows, run the checks again yourself, and reply with the JSON report as before.\n\n${block("findings", findings)}`;
+  `AutoCraft ran its own checks on the changes in /work/src: cargo fmt, clippy on the changed lines and the tests of the affected crates. They found the problems below. Fix them within what this task allows (for a conflict, only inside the conflict sections), run the checks again yourself, and reply with the JSON report as before.\n\n${block("findings", findings)}`;
 
 /** The one undo turn after the step's gates refused parts of the change. */
 export const undoMessage = (problems: string[]): string =>
-  `These changes cannot go into the pull request:\n${problems.slice(0, 30).map((p) => `- ${p}`).join("\n")}\nUndo them, keep the rest of your work, run the checks again, and reply with the JSON report as before.`;
+  `The changes named in problems cannot go into the pull request. Undo them, keep the rest of your work, run the checks again, and reply with the JSON report as before.\n\n${block("problems", problems.slice(0, 30))}`;
 
 /** A security fix round that failed after the gates: its build, its tests, or the review of the change. */
 export const roundFailedMessage = (reason: string): string =>

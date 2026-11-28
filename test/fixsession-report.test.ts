@@ -10,6 +10,8 @@ const read = (v: unknown) => parseFixReport(typeof v === "string" ? v : JSON.str
 test("a fix session's report is read only when it keeps the format", () => {
   const good = read(ok);
   assert.ok("report" in good && good.report.status === "done" && good.report.changes.length === 1);
+  const stray = read({ ...ok, blocked_reason: "left over" });
+  assert.ok("report" in stray && stray.report.blocked_reason === undefined, "only a blocked report keeps blocked_reason");
   const fenced = read(`I made the fix.\n\n\`\`\`json\n${JSON.stringify({ status: "none", summary: "Already fixed." })}\n\`\`\``);
   assert.ok("report" in fenced && fenced.report.status === "none");
 

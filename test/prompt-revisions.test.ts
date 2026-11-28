@@ -27,7 +27,7 @@ const codeVersion = (id: ClaudePromptId | JevPromptId): string =>
  */
 const BEFORE_SLOT: Record<(typeof GUIDANCE_PROMPTS)[number], string> = {
   "review.opus": "39d27a37c9", "premerge.opus": "de590c35f4", "postmerge.opus": "cf241da7cd", "review.issue": "6fcdf12ad8",
-  "fixup.patch": "72ead667fc", "cifix.patch": "a942377ddd", "fixup.conflict": "946e1e8281", "fix.session": "b37bc143d0",
+  "fixup.patch": "72ead667fc", "cifix.patch": "a942377ddd", "fixup.conflict": "946e1e8281", "fix.session": "196aa1a193",
 };
 
 test("an active edit and a repo's guidance reach the Task Runner; versions and the system prompt follow", async () => {

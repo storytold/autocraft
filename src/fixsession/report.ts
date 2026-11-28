@@ -11,6 +11,8 @@ export const FIX_SESSION_CALL = { timeoutSeconds: 90 * 60, maxTurns: 400 } as co
 export const FIX_FOLLOW_UP_CALL = { timeoutSeconds: 45 * 60, maxTurns: 200 } as const;
 /** Bytes of the diff read back from the pod: a transport bound, not a scope rule. */
 export const SESSION_DIFF_MAX_BYTES = 5 * 1024 * 1024;
+/** Where a fix session's workspace holds the default branch's maintainer documents (AGENTS.txt): outside /work/src, so the PR cannot change them and they are not part of the diff. */
+export const SESSION_REPO_DOCS = "/work/repo-docs";
 
 /**
  * done: the tree holds the change. none: nothing needed changing, or the step has no cause it can fix in the files it
@@ -57,7 +59,7 @@ function read(text: string, security: boolean): SecurityReport {
   return {
     status, summary: o.summary.trim(), changes: strings(o.changes, "changes"),
     tests_run: (tests as { command: string; exit: number }[]).map((t) => ({ command: t.command.slice(0, 500), exit: t.exit })),
-    ...(typeof o.blocked_reason === "string" && o.blocked_reason.trim() && { blocked_reason: o.blocked_reason.trim().slice(0, REPORT_TEXT_MAX) }),
+    ...(status === "blocked" && { blocked_reason: (o.blocked_reason as string).trim().slice(0, REPORT_TEXT_MAX) }),
     ...(typeof o.title === "string" && o.title.trim() && { title: o.title.trim() }),
   };
 }
