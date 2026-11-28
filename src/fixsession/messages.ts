@@ -2,6 +2,7 @@
 // session's cached prefix stays the same and data cannot end a block early ("<" is escaped). Pure functions over plain
 // data; no Node imports, since the prompts module renders a first turn with them.
 import { DIFF_CAP } from "../fixup/patch.ts";
+import { CHECK_PATCH_CAP } from "../patchcheck/types.ts";
 import { QUIET } from "../security/prompts.ts";
 import type { SessionFinding } from "../implement/session-input.ts";
 
@@ -81,9 +82,9 @@ ${block("pr", { ref: t.ref, title: t.title, reason: t.reason, fixes: t.fixes, al
     }
     case "maintainer": {
       const d = capped(t.diff);
-      return `A maintainer of this project (not the pull request's author) gave the instructions in the instructions block. They are trusted: carry them out, all of them and nothing beyond them. You may change, add, delete or rename any file they need, except the files the rules protect and the cargo manifests and lockfile. There is no size limit beyond what the instructions ask. pr.diff is the pull request's diff against its base.${d.note}
+      return `A maintainer of this project (not the pull request's author) gave the instructions in the instructions block. They are trusted: carry them out, all of them and nothing beyond them. You may change, add, delete or rename any file they need, except the files the rules protect and the cargo manifests and lockfile. There is no limit on changed lines, but AutoCraft's patch check reads at most ${CHECK_PATCH_CAP} characters of your change's diff, so a larger change is refused. pr.diff is the pull request's diff against its base.${d.note}
 
-AutoCraft posts the changes list of your report on the pull request: each entry one plain sentence that says what the change does. Describe the changes; never repeat or paraphrase the instructions, and never mention reference documentation.${quietRule(t.quiet)}
+${t.quiet ? "AutoCraft posts nothing about your changes on this pull request; still list them in your report, each entry one plain sentence that says what the change does." : "AutoCraft posts the changes list of your report on the pull request: each entry one plain sentence that says what the change does."} Describe the changes; never repeat or paraphrase the instructions, and never mention reference documentation.${quietRule(t.quiet)}
 
 ${CHECKS[t.step]}
 

@@ -3,7 +3,7 @@
 // checks in the pod find nothing.
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Db } from "./raw-db.ts";
 import type { KubeApi } from "../../src/build/kube-api.ts";
@@ -54,7 +54,7 @@ export function fixPod(db: Db, o: { top: string; src: string; head: string; repo
   }, 50).unref();
 
   const queued: WorkspaceCallRequest[] = [];
-  let edits: (r: WorkspaceCallRequest) => Record<string, string> = () => ({});
+  let edits: (r: WorkspaceCallRequest) => Record<string, string | null> = () => ({});
   let report: Record<string, unknown> = { status: "done", summary: "Made the change." };
   let unclaimed: (r: WorkspaceCallRequest) => boolean = () => false;
   const deps: Pick<StepEnv, "api" | "agents" | "checks" | "calls" | "pollMs"> = {
@@ -74,7 +74,11 @@ export function fixPod(db: Db, o: { top: string; src: string; head: string; repo
       async await(_db, id): Promise<Outcome> {
         const r = queued[id - callId(1)]!, root = roots.get(r.workspaceId)!;
         if (unclaimed(r)) return { state: "unclaimed" };
-        for (const [p, text] of Object.entries(edits(r))) { mkdirSync(dirname(join(root, "src", p)), { recursive: true }); writeFileSync(join(root, "src", p), text); }
+        for (const [p, text] of Object.entries(edits(r))) {
+          if (text === null) { rmSync(join(root, "src", p)); continue; }
+          mkdirSync(dirname(join(root, "src", p)), { recursive: true });
+          writeFileSync(join(root, "src", p), text);
+        }
         return { state: "done", text: JSON.stringify(report), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null } as never, byModel: null, costUsd: 0.5, turns: 3, sessionId: "s", runId: null };
       },
     },
@@ -91,7 +95,7 @@ export function fixPod(db: Db, o: { top: string; src: string; head: string; repo
   };
   return {
     api, deps, queued, session,
-    /** Each call writes the files `f` gives into the tree, then replies with `r`; a call `lost` picks is not taken (unclaimed). */
+    /** Each call writes the files `f` gives into the tree (null deletes one), then replies with `r`; a call `lost` picks is not taken (unclaimed). */
     model(f: typeof edits, r: Record<string, unknown> = { status: "done", summary: "Made the change." }, lost: typeof unclaimed = () => false) { edits = f; report = r; unclaimed = lost; },
     /** The workspace's scratch /work. */
     root: (ws: number) => roots.get(ws)!,

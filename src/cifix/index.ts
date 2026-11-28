@@ -727,7 +727,8 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
         const v: Fix = { patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed };
         const check = async (patch: string): Promise<string | null> => {
           const checkout = (await d.checkout?.(repo, c.number, head)) ?? undefined;
-          const shownDiff = checkout ? checkoutDiff(diff.text, new Set(errorFiles(failureText(failure))), Math.min(DIFF_CAP, CHECK_DIFF_CAP)) : diff.text;
+          // Without a checkout the check reads the diff alone: cut to its limit, with the files left out listed.
+          const shownDiff = checkoutDiff(diff.text, new Set([...errorFiles(failureText(failure)), ...v.files]), checkout ? Math.min(DIFF_CAP, CHECK_DIFF_CAP) : CHECK_DIFF_CAP);
           return await opusCheck(db, d, { ref, title: titleOf(c), repo, number: c.number, head, round: c.attempt, failure, runId, actor: ACTOR, at }, shownDiff, checkout, patch);
         };
         return await deliver(c, "code", pr, v, failure.checks[0]?.name ?? "CI", check, [], null, {}, out.turnId);

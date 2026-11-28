@@ -3,17 +3,18 @@
 // change when that session's runner does not take them. Real git and the real workspace helper; the model, the network and
 // AutoCraft's checks in the pod are fakes.
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
 import { createEnv } from "../src/build/envs.ts";
+import { addFixupRequests } from "../src/data/workflow/index.ts";
 import { setFixSessions } from "../src/fixsession/switch.ts";
 import { runFixup } from "../src/fixup/index.ts";
 import { CLIPPY_ARTIFACT } from "../src/prepush/index.ts";
 import { carriedReviews } from "../src/review/carry.ts";
 import { callId, fixPod } from "./helpers/fix-pod.ts";
-import { fresh, world } from "./helpers/fixup-world.ts";
+import { fresh, git, T0, world } from "./helpers/fixup-world.ts";
 import type { Db } from "./helpers/raw-db.ts";
 
 const LIB = "crates/app/src/lib.rs", README = "crates/app/README.md";
@@ -32,9 +33,10 @@ async function sessionWorld(file: string) {
   const pod = fixPod(db, { top: w.base, src: join(w.base, "work"), head: w.head });
   w.deps.fixSession = () => pod.deps;
   const session = await pod.session("pr", 7);
-  const run = () => runFixup(db, { repo: "app", dryRun: false }, () => {}, w.deps);
+  const out: string[] = [];
+  const run = () => runFixup(db, { repo: "app", dryRun: false }, (l) => out.push(l), w.deps);
   const rows = () => db.all(db.k.selectFrom("fixups").select(["state", "source", "to_head", "session_turn", "lint_round"]).orderBy("created_at"));
-  return { w, db, pod, session, run, rows };
+  return { w, db, pod, session, run, rows, out };
 }
 
 /** Finishes the newest lint task as done with the given clippy output. */
@@ -48,6 +50,13 @@ async function lintDone(db: Db, clippy: string): Promise<void> {
 }
 
 const pushes = (log: string[]) => log.filter((l) => l.startsWith("push "));
+const comments = (log: string[]) => log.filter((l) => l.startsWith("comment: "));
+
+/** Makes PR #7 a quiet one: the fix PR of a security finding that is landing. */
+const makeQuiet = (db: Db) => db.run(db.k.insertInto("security_findings").values({ repo: "app", number: 1, scan_id: 1, area: "a", title: "t", severity: "high", urgent: 0, state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "f", fix_pr: 7, created_at: T0, updated_at: T0 }));
+
+/** A maintainer's instructions on PR #7 at its head. */
+const instruct = (s: { db: Db; w: { head: string } }) => addFixupRequests(s.db, [{ repo: "app", number: 7, fromHead: s.w.head, instructions: "Move the notes into NOTES.md and drop the README.", by: "op" }]);
 
 test("a fix session's fix-up push is recorded as our checked fix-up, so the review's take carries over it", async () => {
   const s = await sessionWorld(README);
@@ -97,4 +106,61 @@ test("lint findings on a stored change go back to the session that wrote it, and
     assert.notEqual(again!.session_turn, stored!.session_turn);
     assert.deepEqual(pushes(s.w.log), [], "nothing is pushed before the lint task passes");
   }
+});
+
+test("a maintainer's fix in a session adds and deletes files and is pushed; on a quiet pull request it posts nothing, while a review fix-up posts its files", async () => {
+  const NOTES = "crates/app/NOTES.md";
+  for (const quiet of [false, true]) {
+    const s = await sessionWorld(README);
+    if (quiet) await makeQuiet(s.db);
+    await instruct(s);
+    s.pod.model(() => ({ [NOTES]: "# Notes\n- one\n", [README]: null }), { status: "done", summary: "Moved the notes.", changes: ["Moves the notes into their own file."] });
+    await s.run();
+    const [row] = await s.rows();
+    assert.deepEqual([row?.state, row?.source], ["pushed", "operator"], s.out.join("\n"));
+    assert.deepEqual(git(s.w.fork, "diff", "--name-status", s.w.head, "refs/heads/fix").split("\n"), [`A\t${NOTES}`, `D\t${README}`]);
+    if (quiet) assert.deepEqual(comments(s.w.log), [], "nothing is posted on a quiet pull request");
+    else assert.match(comments(s.w.log).join("\n"), /Moves the notes into their own file/);
+  }
+  const s = await sessionWorld(README);
+  await makeQuiet(s.db);
+  s.pod.model(() => ({ [README]: "# App\n- two\n" }));
+  await s.run();
+  assert.equal((await s.rows())[0]?.state, "pushed", s.out.join("\n"));
+  assert.match(comments(s.w.log).join("\n"), new RegExp(`\`${README}\``), "a review fix-up on a quiet pull request names its files, as the patch path does");
+});
+
+test("a commit that holds a file outside the session's change is refused, and a change made on another commit than the head is not applied", async () => {
+  const s = await sessionWorld(README);
+  // The commit gets one more file than the session's change holds.
+  const inner = s.w.deps.exec;
+  s.w.deps.exec = async (cmd, args, o = {}) => {
+    const at = args.indexOf("commit-tree");
+    if (cmd !== "git" || at < 0) return await inner(cmd, args, o);
+    const env = { ...o.env, GIT_INDEX_FILE: join(s.w.base, "extra.index") };
+    const blob = (await inner("git", ["hash-object", "-w", "--stdin"], { ...o, input: "extra\n" })).stdout.trim();
+    await inner("git", ["read-tree", args[at + 1]!], { ...o, env });
+    await inner("git", ["update-index", "--add", "--cacheinfo", `100644,${blob},crates/app/EXTRA.md`], { ...o, env });
+    const tree = (await inner("git", ["write-tree"], { ...o, env })).stdout.trim();
+    return await inner(cmd, args.map((a, i) => (i === at + 1 ? tree : a)), o);
+  };
+  s.pod.model(() => ({ [README]: "# App\n- two\n" }));
+  await s.run();
+  const [row] = await s.rows();
+  assert.equal(row?.state, "refused", s.out.join("\n"));
+  assert.deepEqual(pushes(s.w.log), []);
+
+  // The workspace was reseeded at another commit while the turn ran: the change is not applied to the head.
+  const t = await sessionWorld(README);
+  const calls = t.pod.deps.calls!;
+  t.w.deps.fixSession = () => ({ ...t.pod.deps, calls: { ...calls, await: async (db, id, o) => {
+    await t.db.run(t.db.k.updateTable("workspaces").set({ base_sha: "f".repeat(40) }));
+    return await calls.await(db, id, o);
+  } } });
+  t.pod.model(() => ({ [README]: "# App\n- two\n" }));
+  await t.run();
+  assert.equal(t.pod.queued.length, 1, "the turn ran");
+  assert.match(t.out.join("\n"), /the fix session's tree is at fffffff, not at/);
+  assert.deepEqual(await t.rows(), [], "nothing is recorded");
+  assert.deepEqual(pushes(t.w.log), []);
 });

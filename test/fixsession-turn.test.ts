@@ -108,7 +108,7 @@ test("a refused fix-up edit left in the pod never reaches the next step: the CI 
   assert.ok(existsSync(join(root, "repo-docs/AGENTS.txt")), "the default branch's AGENTS.md is in the workspace, outside the tree");
 });
 
-test("a fix-up's pod diff keeps its CRLF lines as written, and a new file belongs to its innermost package", async () => {
+test("a fix-up's pod diff keeps its CRLF lines as written, a new file belongs to its innermost package, and a quiet one's new file names no giveaway", async () => {
   const crlf = `diff --git a/${LIB} b/${LIB}\nindex 1111111..2222222 100644\n--- a/${LIB}\n+++ b/${LIB}\n@@ -1 +1 @@\n-pub fn a() -> u8 { 0 }\r\n+pub fn a() -> u8 { 1 }\r\n`;
   const gate: StepGate = { step: "fixup", allowed: [LIB], newFilesIn: ["crates/app"], packages: ["crates/app", "crates/app/inner"], scripts: null };
   const ok = await runGate(gate, crlf, null);
@@ -118,4 +118,8 @@ test("a fix-up's pod diff keeps its CRLF lines as written, and a new file belong
   const refused = await runGate(gate, nested, null);
   assert.ok(!refused.ok && refused.problems.some((p) => p.includes("inner/src/new.rs")), "a file inside another package is not the PR's crate's");
   assert.ok((await runGate({ ...gate, newFilesIn: ["crates/app/inner"] }, nested, null)).ok);
+  // An empty new file has no ---/+++ lines; on a quiet pull request its name is checked all the same.
+  const empty = "diff --git a/crates/app/src/exploit.rs b/crates/app/src/exploit.rs\nnew file mode 100644\nindex 0000000..e69de29\n";
+  assert.ok((await runGate(gate, empty, null)).ok);
+  assert.ok(!(await runGate({ ...gate, quiet: true }, empty, null)).ok, "a quiet pull request's new file may not name what the fix protects against");
 });

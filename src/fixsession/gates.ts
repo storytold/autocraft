@@ -4,8 +4,9 @@
 import { TEST_PATH } from "../cifix/guard.ts";
 import { fixupEditable, hasMarkers, operatorEditable, editable, resolvablePath, validatePatch, type BuildScripts, type PatchRules } from "../fixup/patch.ts";
 import { validateFixPatch } from "../security/patch.ts";
-import { patchGiveaway, QUIET_PATCH_REFUSAL, quietProblem } from "../security/rules.ts";
+import { nameGiveaway, patchGiveaway, QUIET_PATCH_REFUSAL, quietProblem } from "../security/rules.ts";
 import type { Git } from "../fixup/git.ts";
+import { CHECK_PATCH_CAP } from "../patchcheck/types.ts";
 import type { SecurityReport } from "./report.ts";
 
 export type GateOk = { ok: true; patch: string; files: string[]; changed: number; /** A security fix: only its test file, for the base task. */ testPatch?: string };
@@ -88,7 +89,15 @@ function checked(diff: string, problems: string[], allowed: string[] | null, can
 /** The patch rules of a CI fix made in a fix session: git's own diff, no line cap. A stored one is validated again with them. */
 export const CIFIX_SESSION_RULES: PatchRules = { lineCap: null, exact: true };
 
-const quietWord = (diff: string, quiet: boolean | undefined): string | null => (quiet && patchGiveaway(diff) ? QUIET_PATCH_REFUSAL : null);
+/** The refusal of a fix-up's change the patch check (fixup.check) cannot read whole. */
+const checkSize = (diff: string): string | null => (diff.length > CHECK_PATCH_CAP ? `the change is over the ${CHECK_PATCH_CAP} character limit for the patch check` : null);
+
+/**
+ * The refusal of a quiet pull request's change for its wording: the added lines, and the path of every new file (an empty one has no
+ * ---/+++ lines for patchGiveaway to read).
+ */
+const quietWord = (diff: string, files: readonly DiffFile[], quiet: boolean | undefined): string | null =>
+  (quiet && (patchGiveaway(diff) || files.some((f) => f.kind === "new" && nameGiveaway(f.path))) ? QUIET_PATCH_REFUSAL : null);
 
 /** Runs the step's gate on the diff read from the workspace, and the session's report (a security fix's title and summary). */
 export async function runGate(g: StepGate, diff: string, report: SecurityReport | null): Promise<GateResult> {
@@ -103,14 +112,12 @@ export async function runGate(g: StepGate, diff: string, report: SecurityReport 
         else if (f.kind === "edit" && !fixupEditable(f.path, g.scripts)) problems.push(`${f.path} is not a file a fix-up may edit`);
         else if (f.kind === "edit" && !g.allowed.includes(f.path)) problems.push(`${f.path} is not a file named in the review's fixes`);
       }
-      const q = quietWord(diff, g.quiet);
-      if (q) problems.push(q);
+      for (const x of [quietWord(diff, files, g.quiet), checkSize(diff)]) if (x) problems.push(x);
       return checked(diff, problems, g.allowed, (p) => fixupEditable(p, g.scripts), { lineCap: null, newFile: canAdd, exact: true });
     }
     case "maintainer": {
       for (const f of files) if (!operatorEditable(f.path, g.scripts)) problems.push(`${f.path} is a protected file`);
-      const q = quietWord(diff, g.quiet);
-      if (q) problems.push(q);
+      for (const x of [quietWord(diff, files, g.quiet), checkSize(diff)]) if (x) problems.push(x);
       return checked(diff, problems, null, (p) => operatorEditable(p, g.scripts), { lineCap: null, newFile: (p) => operatorEditable(p, g.scripts), deletes: true, exact: true });
     }
     case "cifix": {
@@ -120,7 +127,7 @@ export async function runGate(g: StepGate, diff: string, report: SecurityReport 
         else if (!editable(f.path, g.scripts)) problems.push(`${f.path} is not a file a CI fix may edit`);
         else if (!g.allowed.includes(f.path)) problems.push(`${f.path} is not a file the failure or the pull request's diff names`);
       }
-      const q = quietWord(diff, g.quiet);
+      const q = quietWord(diff, files, g.quiet);
       if (q) problems.push(q);
       const r = checked(diff, problems, g.allowed, (p) => editable(p, g.scripts), CIFIX_SESSION_RULES);
       if (!r.ok) return r;
@@ -144,7 +151,7 @@ export async function runGate(g: StepGate, diff: string, report: SecurityReport 
           if (bad) problems.push(`${p}: ${bad}`);
         }
       }
-      const q = quietWord(diff, g.quiet);
+      const q = quietWord(diff, files, g.quiet);
       if (q) problems.push(q);
       return checked(diff, problems, g.conflicted, (p) => resolvablePath(p, g.scripts), { lineCap: null, exact: true });
     }

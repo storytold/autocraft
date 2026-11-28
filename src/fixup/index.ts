@@ -475,7 +475,9 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       let split: { diff: string; changes: string[] };
       let v: { patch: string; files: string[]; changed: number };
       let sessionTurn: number | null = null;
-      if (sessionDeps) {
+      // A stored change a fix session wrote keeps the session's rules, whatever the switch says now; a new change is a session's
+      // while the switch is on.
+      if (folded !== null ? c.lint!.sessionTurn !== null : sessionDeps !== null) {
         // The fix session's change: the stored one when it is clean, else a turn (a follow-up with the findings on the stored change).
         if (c.lint?.session) dropSessions(c.lint.session);
         const task = await sessionFixup(c, { head, title: titleOf(c), quiet, scripts, prDiff: diff.text, git });
@@ -486,7 +488,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
           split = { diff: c.lint!.patch, changes: c.lint!.changes };
           sessionTurn = c.lint!.sessionTurn;
         } else {
-          const got = await sessionPatch({ db, deps: sessionDeps, git, log, by: params.by === undefined || params.by === "pipeline" ? "pipeline" : params.by.operator, ...(c.lint && findings.length && { lint: { findings, patch: c.lint.patch, sessionTurn: c.lint.sessionTurn } }) }, c, task);
+          const got = await sessionPatch({ db, deps: sessionDeps!, git, log, by: params.by === undefined || params.by === "pipeline" ? "pipeline" : params.by.operator, ...(c.lint && findings.length && { lint: { findings, patch: c.lint.patch, sessionTurn: c.lint.sessionTurn } }) }, c, task);
           if (got.kind === "wait") {
             // Nothing recorded and no try: the step runs again once the session's lease is free or its workspace moves (the lane's
             // planner reading, fixWorkspaceReading).
@@ -531,7 +533,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       const commit = await git.commit(applied.tree, head, commitMessage(v.files, !!c.operator), { name: who.login, email: who.email });
       const changes = await git.rawChanges(head, commit);
       const touched = changes.map((x) => x[3]!).sort().join("\n");
-      if ((sessionDeps ? !sameChanges(changes, diffFiles(v.patch)) : changes.some((x) => x[2] !== "M" || x[0] !== x[1] || (x[0] !== "100644" && x[0] !== "100755"))) || touched !== [...v.files].sort().join("\n")) {
+      if ((sessionTurn !== null ? !sameChanges(changes, diffFiles(v.patch)) : changes.some((x) => x[2] !== "M" || x[0] !== x[1] || (x[0] !== "100644" && x[0] !== "100755"))) || touched !== [...v.files].sort().join("\n")) {
         await fail("refused", "the commit would change files or modes outside the validated diff");
         return;
       }
@@ -542,7 +544,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       // Opus checks the validated patch; only an approve goes on. A stored patch that came back clean was checked already (the format changes are whitespace only).
       if (folded === null) {
         if (v.patch.length > CHECK_PATCH_CAP) { await fail("refused", `the patch is over the ${CHECK_PATCH_CAP} character limit for the check`); return; }
-        const checkReply = await d.check(db, [{ ref, title: titleOf(c), review_reason: c.reason, fixes: c.fixes, ...(c.operator ? { operator: c.operator.instructions } : {}), diff: modelDiff.slice(0, CHECK_DIFF_CAP), patch: v.patch, ...repoDir }], checkout);
+        const checkReply = await d.check(db, [{ ref, title: titleOf(c), review_reason: c.reason, fixes: c.fixes, ...(c.operator ? { operator: c.operator.instructions } : {}), diff: checkoutDiff(modelDiff, new Set([...c.fixes.map((f) => f.file), ...v.files]), CHECK_DIFF_CAP), patch: v.patch, ...repoDir }], checkout);
         if (checkReply === null) { await fail("failed", "the patch check gave no answer"); return; }
         const verdict = parseCheck(checkReply);
         if (!verdict.ok) { await fail("failed", `the patch check gave no valid answer: ${verdict.error}`); return; }
@@ -591,6 +593,8 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       summary.pushed.push(ref);
       await jobItem(db, repo, c.number, `pushed ${short(commit)} on ${short(head)}: ${v.files.join(", ")}`, log);
 
+      // A maintainer's fix made in a fix session posts nothing on a quiet pull request (the session's turn says so).
+      if (c.operator && quiet && sessionTurn !== null) { log(`  ${ref}: no comment on a quiet pull request`); return; }
       const body = c.operator ? operatorCommentText(v.files, quiet ? [] : await postableChanges(db, repo, `${repo}#${c.number}`, split.changes, c.operator.instructions)) : commentText(v.files, c.attempt);
       const note: Note = c.operator ? { by: "fixed-operator" } : { by: "model", kind: "comment", model: PROMPT.models[0] };
       // A plain review-fix push right after our own review-fix comment extends that comment instead of adding a second one.
