@@ -161,6 +161,46 @@ export function parseComment(body: unknown, slug: string | readonly string[], op
   return { kind: "ambiguous", understood: p.kind === "yes" ? "yes" : describe(p.parts, p.items), rest };
 }
 
+/** The text without a leading mention of the app (`@<slug>`, `@<slug>[bot]`). */
+export const withoutMention = (text: string, slug: string | readonly string[]): string => {
+  const names = [slug].flat().filter(Boolean);
+  return names.length ? text.trimStart().replace(mentionRe(names), "") : text;
+};
+
+/** The longest question `ask` takes (the chat's message limit). */
+export const QUESTION_MAX = 4000;
+const ASK_RE = /^(?:(?:please|pls)\s+)?ask(?![\w-])[\s,:]*/i;
+/** `ask author`, `ask the author`: the ask-author command, never a question. */
+const AUTHOR_NEXT = /^(?:the\s+)?author(?![\w-])/i;
+
+/**
+ * The question of an `ask <question>` message ("ask why does the export drop alpha?"), as written after `ask`; null for any other text,
+ * `ask author` and its forms included. A mention of the app in front is dropped. Nothing else of the text is read: the question is the
+ * person's own words, with no question mark needed.
+ */
+export function askedQuestion(text: string, opts: Pick<ParseOptions, "slug"> = {}): string | null {
+  let s = text.trim().replace(/[\u2018\u2019]/g, "'");
+  const names = [opts.slug ?? []].flat().filter(Boolean);
+  if (names.length) s = s.replace(mentionRe(names), "");
+  const m = ASK_RE.exec(s);
+  if (!m) return null;
+  const q = s.slice(m[0].length).trim();
+  return /[\p{L}\p{N}]/u.test(q) && !AUTHOR_NEXT.test(q) ? q.slice(0, QUESTION_MAX) : null;
+}
+
+/**
+ * The question of a GitHub comment whose first line addressed to the app is `@<slug> ask <question>`: that line's text and every visible
+ * line after it (commentLines), so a question may run over several lines. Null for any other comment.
+ */
+export function commentQuestion(body: unknown, slug: string | readonly string[]): string | null {
+  const names = [slug].flat().filter(Boolean);
+  if (typeof body !== "string" || !names.length) return null;
+  const lines = commentLines(body.slice(0, BODY_MAX));
+  const mention = mentionRe(names);
+  const at = lines.findIndex((l) => mention.test(l));
+  return at < 0 ? null : askedQuestion([lines[at]!.replace(mention, ""), ...lines.slice(at + 1)].join("\n"));
+}
+
 /** The conditions that do not stand beside what they need: a merge, and for the review, a start that reviews. */
 function unmetConditions(conditions: readonly Condition[], parts: readonly CommandPart[]): string[] {
   const has = (w: string) => parts.some((p) => p.word === w);

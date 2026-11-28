@@ -96,8 +96,8 @@ const PR_455: Story = {
       ask: { to: ["kiri-n"], question: "Fix the hidden-group case, then merge?" } },
     { b: "discord", min: 150, channel: "designcraft-reviews" },
     { b: "gh", min: 120, actor: "sable-ui", summary: "Commented", body: "The SnapSource → SnapTarget rename was asked for in #430, that's why it's in here." },
-    { b: "said", min: 52, login: "ochre-fox", via: "dashboard", body: "Does the rename touch the plugin API?", withdrawnBy: "ochre-fox" },
-    { b: "said", min: 44, login: "ochre-fox", via: "dashboard", body: "Is the rename needed for this fix, or can it go in a separate PR?" },
+    { b: "said", min: 52, login: "ochre-fox", via: "dashboard", body: "ask does the rename touch the plugin API?", withdrawnBy: "ochre-fox" },
+    { b: "said", min: 44, login: "ochre-fox", via: "dashboard", body: "ask is the rename needed for this fix, or can it go in a separate PR?" },
     { b: "work", min: 43, kind: "model-call", run: 7202, title: "Answered from the review", model: "Opus", seconds: 18, costUsd: 0.03, tokens: [14_100, 420], tools: 0 },
     { b: "reply", min: 43, body: "The fix doesn't need it: only `targets.rs` and its test change behaviour. The rename touches 14 files and was asked for in designcraft#430, so I'd keep it in this PR.", ask: { to: ["kiri-n", "ochre-fox"], question: "Fix the hidden-group case, then merge, rename included?" } },
     { b: "gh", min: 31, actor: "github-actions", summary: "CI passed on 2c9e4f1 (re-run)" },
@@ -141,7 +141,7 @@ const ISSUE_77: Story = {
         { label: "Notes page, before", taskId: 9103, name: "notes-page.png" }, { label: "Notes page, after", taskId: 9104, name: "notes-page.png" },
       ] },
     { b: "work", min: 6, kind: "check", state: "running", title: "Running the full test suite in the workspace", detail: [["Command", "cargo test --workspace"], ["Workspace", "deckcraft at 81c2e0a + 2 commits"]] },
-    { b: "said", min: 3, login: "kiri-n", via: "dashboard", body: "Does the notes page keep the slide's font when the font is missing on the machine?", pending: true },
+    { b: "said", min: 3, login: "kiri-n", via: "dashboard", body: "ask does the notes page keep the slide's font when the font is missing on the machine?", pending: true },
   ],
 };
 
@@ -303,7 +303,13 @@ export function createChatMock(me: User, changed: () => void): Pick<Api, "itemCh
         const word = text.trim().toLowerCase();
         const open = chatOf(ref, s, me).open;
         s.beats.push({ b: "said", min: 0, login: me.login, via: "dashboard", body: text.trim() });
-        if (/^(yes|y|approve|lgtm|go)$/.test(word) && open) {
+        if (/^ask\s+(?!(?:the\s+)?author\b)\S/.test(word)) {
+          // A question waits for Opus; the server answers it with no line.
+          const said = s.beats.at(-1);
+          if (said?.b === "said") said.pending = true;
+          changed();
+          return wait({ chat: read(repo, number), lines: [] }, 400);
+        } else if (/^(yes|y|approve|lgtm|go)$/.test(word) && open) {
           s.beats.push({ b: "reply", min: 0, body: `Fixing the hidden-group case, then merging when CI is green, rename included (answered by ${me.login}). Reply **hold** to stop.` });
           s.beats.push({ b: "work", min: 0, kind: "model-call", run: 7290, state: "running", title: "Fixing the hidden-group case", model: "Sonnet" });
           s.status = `Fixing the hidden-group case, approved by ${me.login}`;

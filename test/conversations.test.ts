@@ -322,8 +322,8 @@ describe("access", () => {
     assert.equal(writes.length, 2);
     // No route is operator-only: messages and withdrawals check who may write in the handler (refused for the viewer above).
     assert.deepEqual(writes.filter((r) => r.operator === true).map((r) => r.pattern), []);
-    assert.deepEqual((await say("operator", "Why?")).lines, []);
-    assert.equal((await say("operator", "Again?")).lines.length, 1, "the second question gets the refusal and asks nothing");
+    assert.deepEqual((await say("operator", "ask why")).lines, []);
+    assert.equal((await say("operator", "ask again")).lines.length, 1, "the second question gets the refusal and asks nothing");
   });
 });
 
@@ -331,7 +331,7 @@ describe("maintainers talk to Opus", () => {
   test("a maintainer asks Opus only with write access, with the pipeline on and a ready runner of theirs", async () => {
     const db = await fresh();
     const maint = (write: boolean, text: string): Req => ({ ...req("viewer", { repo: "app", n: "1" }, { conversation: "main", text }), user: { login: "maint", role: "maintainer", canWrite: async () => write, canRead: async () => true } });
-    const refusal = async (write: boolean) => (await postChat(db, maint(write, "Is this in scope?"))).lines.join(" ");
+    const refusal = async (write: boolean) => (await postChat(db, maint(write, "ask is this in scope"))).lines.join(" ");
     await assert.rejects(() => postChat(db, maint(false, "Hi?")), (e) => e instanceof HttpError && e.status === 403);
     assert.match(await refusal(true), /pipeline is off/);
     await setEnabled(db, true, "test");

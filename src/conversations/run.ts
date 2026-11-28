@@ -1,6 +1,7 @@
 // The Conversation step: answers each person's message that waits for Opus with one sandboxed `claude -p` call
 // (the item's repository and the workspace, read-only) and stores the reply with its action cards. An operator's message is a
 // call of the shared model queue; a maintainer's runs only on the maintainer's own Task Runners (a call bound to their login).
+// A message put as a question from GitHub (src/conversations/ask.ts) gets its answer, or why there is none, sent back there.
 import { jobItem } from "../runner/job-items.ts";
 import { referenceDir } from "../reference.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
@@ -14,7 +15,9 @@ import { runModelStep } from "../agents/step.ts";
 import { CONVERSATION } from "../agents/steps.ts";
 import { PROGRESS_KEEP, coalesce } from "../classify/progress.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
-import { defaultSemanticDeps, type SemanticDeps } from "../reference-lint.ts";
+import { defaultSemanticDeps, referenceProblems, type SemanticDeps } from "../reference-lint.ts";
+import { needsFixTurn } from "../replylint.ts";
+import { answerAsked } from "./ask.ts";
 import { sweepRunningCards } from "./act.ts";
 import { claimPending, failTurn, pendingConversations, promptParts, refreshItem, releaseTurn, setTurnProgress, storeReply, type DiffSource } from "./store.ts";
 import type { Db } from "../db/index.ts";
@@ -76,6 +79,10 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     if (!held) return;
     const { turn: wait, claim } = held;
     const forLogin = ownerOf(c);
+    // A failed turn tells a GitHub question why it has no answer.
+    const fail = async (why: string): Promise<void> => {
+      if (await failTurn(db, repo, n, claim, why)) await answerAsked(db, { repo, n, turnId: wait.id, error: why }).catch((e: Error) => p.log(`conversation: ${repo}#${n}: answer not sent: ${e.message}`));
+    };
     // An operator's message counts when claimed (the step's daily limit). A maintainer's counts once it has an outcome: one given
     // back for a later job is no work done, so the lane waits for its input to change instead of running again at once.
     let released = false;
@@ -83,10 +90,10 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     try {
       if (forLogin !== undefined) {
         const why = !await ownTaker(db, forLogin, { prompt_id: CONVERSATION_PROMPT.id, repos: [repo], tier }) ? ownRunnerGone(forLogin) : null;
-        if (why) { await failTurn(db, repo, n, claim, why); return; }
+        if (why) { await fail(why); return; }
       }
       const parts = await promptParts(db, repo, n, wait);
-      if (!parts) { await failTurn(db, repo, n, claim, "the conversation has no item block; send the message again"); return; }
+      if (!parts) { await fail("the conversation has no item block; send the message again"); return; }
       if (!checkouts.has(repo)) checkouts.set(repo, p.checkout(repo).catch(() => null));
       const checkout = await checkouts.get(repo)!;
       let recent: string[] = [];
@@ -111,15 +118,21 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
         // Their runners took nothing in time: the message waits for a later job, which does not hold this one.
         if (e instanceof WaitLimitError) { released = await releaseTurn(db, repo, n, claim); p.log(`conversation: ${repo}#${n}: ${forLogin}'s Task Runner did not take the message in time; it waits for a later run`); return; }
         // Their runners went away while the call waited (src/remote/takers.ts sweepTakers): only theirs could answer it.
-        await failTurn(db, repo, n, claim, ownRunnerGone(forLogin));
+        await fail(ownRunnerGone(forLogin));
         return;
       }
       await shown.flush();
       const parsed = r.ok ? r.value : null;
       if (parsed) {
-        if (await storeReply(db, repo, n, claim, parsed.text, parsed.cards, parsed.notes, parts.seen) !== null) { answered++; await jobItem(db, repo, n, "answered a message", p.log); }
+        if (await storeReply(db, repo, n, claim, parsed.text, parsed.cards, parsed.notes, parts.seen) !== null) {
+          answered++;
+          await jobItem(db, repo, n, "answered a message", p.log);
+          // The answer goes public only when reply lint finds nothing in it; otherwise the reply points to the item's chat.
+          const clean = async () => !needsFixTurn(await referenceProblems([{ field: "text", text: parsed.text }], dir ?? undefined, semantic, { stage: "fix" }));
+          await answerAsked(db, { repo, n, turnId: wait.id, text: parsed.text, clean }).catch((e: Error) => p.log(`conversation: ${repo}#${n}: answer not sent: ${e.message}`));
+        }
       } else {
-        await failTurn(db, repo, n, claim, "Opus gave no usable reply; send the message again");
+        await fail("Opus gave no usable reply; send the message again");
         await jobItem(db, repo, n, "no usable reply to a message", p.log);
       }
     } finally {

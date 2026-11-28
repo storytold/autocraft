@@ -5,6 +5,10 @@
 // written on: a list naming another item, or several, runs nothing. The app answers in the thread with the confirmation line, or
 // with what it understood when the text was not clear. A comment without the mention runs nothing.
 //
+// `@<app-slug> ask <question>` (and a comment a model reads as only a question) is no command: the question goes to Opus as the
+// commenter's message on the item (src/conversations/ask.ts), from an operator or a maintainer with write access, and the command waits
+// (state `asked`) until the answer settles it; the drain then posts the answer as the reply.
+//
 // The webhook keeps only the fields of github_commands (the parsed result, never the comment's text), and nothing of it reaches a
 // prompt. The runner carries the command out: the commenter must have an AutoCraft login with the GitHub id bound to it, the
 // comment must still exist with the same command in it, and then the act rule applies (actRefusal in src/github/identity.ts), with the write
@@ -31,11 +35,12 @@ import { installationToken } from "./install-token.ts";
 import { ghComment, WritePacedError, type Writer } from "./write.ts";
 import { envVar } from "../env.ts";
 import { t } from "../i18n/index.ts";
-import { runCommand, type Actor } from "../workflow/apply.ts";
+import { runCommand, type Actor, type CommandResult } from "../workflow/apply.ts";
 import { namesOption, READ_BACKGROUND_WAIT_MS, runText, type ReadDeps } from "../workflow/read.ts";
 import { commentLines } from "./comment-lines.ts";
-import { commentCondition, parseComment } from "../workflow/parse.ts";
-import { linkingComment, recordSaid } from "../workflow/said.ts";
+import { commentCondition, commentQuestion, parseComment, withoutMention } from "../workflow/parse.ts";
+import { linkAskTurn, linkingComment, recordSaid } from "../workflow/said.ts";
+import { askQuestion } from "../conversations/ask.ts";
 import type { ItemRef, Parsed } from "../workflow/types.ts";
 import type { Db } from "../db/index.ts";
 
@@ -213,6 +218,16 @@ async function expire(db: Db, d: Drain, r: Row, now: Date): Promise<void> {
   await settle(db, d, r, "expired", answer ? NO_ACCESS_READ : null, now, { reply: answer });
 }
 
+/** The refusal of a question from someone the act rule refuses on the repo. */
+const ASK_NOT_ALLOWED = t("Only operators, and maintainers with write access to the repository, ask Opus.");
+
+/** Puts the comment's question to Opus as the commenter's message on its item, and links the comment's stored message to that turn. */
+async function putQuestion(db: Db, r: Row, operator: boolean, question: string): Promise<{ turnId: number } | { refusal: string }> {
+  const a = await askQuestion(db, { login: r.login, operator }, r.repo, r.number, question, { limit: true });
+  if ("turnId" in a) await linkAskTurn(db, { repo: r.repo, number: r.number, login: r.login, via: "github", turnId: a.turnId, commentId: Number(r.comment_id) });
+  return a;
+}
+
 /** `reading`: a model reads the comment in the background (readInBackground), which settles and answers it. */
 type Outcome = "settled" | "retry" | "wait" | "reading";
 
@@ -318,6 +333,14 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
   const allowed = !await actRefusal(db, actor, r.repo);
   const reply = !await quietFor(db, d, r);
   const ref = refOf(r);
+  const question = c.kind === "ok" ? commentQuestion(c.body, names) : null;
+  if (question !== null) {
+    // A question on a quiet pull request is not answered there (only an operator gets this far).
+    const a = !allowed ? { refusal: ASK_NOT_ALLOWED } : !reply ? { refusal: "" } : await putQuestion(db, r, access.role === "operator", question);
+    if ("turnId" in a) await settle(db, d, r, "asked", null, now);
+    else await settle(db, d, r, "refused", a.refusal || null, now, { reply: reply && !!a.refusal, allowed });
+    return "settled";
+  }
   const items = again.kind !== "ambiguous" ? again.items ?? [] : [];
   if (items.length === 1 && !isOwnItem(items[0]!, r.repo, r.number)) {
     await settle(db, d, r, "refused", t("On GitHub a command acts on the item it is written on. Send it there, or from the dashboard, Discord or your agent."), now, { reply, allowed });
@@ -330,7 +353,7 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
   // An option of the open question named on its own runs as typed, pinned to the head like any typed command: no model reading.
   if (again.kind === "ambiguous" && allowed && deps.read !== null && !await namesOption(db, [{ repo: r.repo, number: r.number }], again)) {
     const body = c.kind === "ok" ? c.body : "";
-    readInBackground(db, d, r, deps, { actor, again, names, text: addressedText(body, names), condition: commentCondition(body, names) !== null, mention: mentionName, reply, allowed });
+    readInBackground(db, d, r, deps, { actor, again, names, text: addressedText(body, names), condition: commentCondition(body, names) !== null, mention: mentionName, reply, allowed, operator: access.role === "operator" });
     return "reading";
   }
   try {
@@ -370,7 +393,7 @@ function addressedText(body: string, names: readonly string[]): string {
  * is: deleted or changed meanwhile, the command ends unanswered; when GitHub cannot give it, the command stays queued and is tried again. It is pinned to the PR's head at the comment, as a typed one is. The row
  * stays queued meanwhile, and the drain passes over it (`reading`); after a restart the drain reads it again.
  */
-function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { actor: Actor; again: Parsed; names: readonly string[]; text: string; condition: boolean; mention: string | undefined; reply: boolean; allowed: boolean }): void {
+function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { actor: Actor; again: Parsed; names: readonly string[]; text: string; condition: boolean; mention: string | undefined; reply: boolean; allowed: boolean; operator: boolean }): void {
   const id = Number(r.comment_id);
   const clock = deps.now ?? (() => new Date());
   const nowMs = Date.now();
@@ -385,11 +408,22 @@ function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { acto
     const p2 = await (deps.pr ?? prSince)(deps.querier, r.repo, r.number, r.created_at).catch(() => undefined);
     return p2 && !p2.changed ? { head: p2.head } : t("{ref} changed after the command was written. Send it again.", { ref: `${slugOf(r.repo)}#${r.number}` });
   };
+  // A reading of the comment as only a question puts it to Opus; the command then waits for the answer.
+  let asked = false;
+  const ask = async (question: string): Promise<CommandResult> => {
+    // The model read the addressed text, which starts with the mention.
+    const own = withoutMention(question, o.names).trim();
+    const a = o.reply ? await putQuestion(db, r, o.operator, own || question) : { refusal: t("Nothing is said on a quiet pull request.") };
+    if ("turnId" in a) asked = true;
+    const line = "turnId" in a ? "" : a.refusal;
+    return { items: [{ repo: r.repo, number: r.number, outcome: "turnId" in a ? "run" : "refused", line, workflowId: null }], lines: line ? [line] : [] };
+  };
   const job = (async () => {
     let state: CommandState = "refused", line = NOT_RUN;
     try {
       const res = await linkingComment(db, id, r.login, () => runText(db, o.actor, "github", { parsed: o.again, items: [{ repo: r.repo, number: r.number }], ...(o.mention ? { mention: o.mention } : {}), at: clock().toISOString(), asked: () => r.created_at },
-        { text: o.text, own: [{ repo: r.repo, number: r.number }], named: false, condition: o.condition, waitMs: READ_BACKGROUND_WAIT_MS, parse: { repo: r.repo }, pin, ...(deps.read ? { deps: deps.read } : {}) }));
+        { text: o.text, own: [{ repo: r.repo, number: r.number }], named: false, condition: o.condition, waitMs: READ_BACKGROUND_WAIT_MS, parse: { repo: r.repo }, pin, ask, ...(deps.read ? { deps: deps.read } : {}) }));
+      if (asked) { await settle(db, d, r, "asked", null, clock()); return; }
       const out = res.items[0];
       if (out?.question && o.reply) await markQuestionShown(db, r.repo, r.number, `${out.question.workflowId}:${out.question.recAt}`, clock().toISOString());
       state = out?.outcome === "run" ? "done" : "refused";

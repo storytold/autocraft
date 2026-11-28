@@ -114,3 +114,17 @@ export async function recordNudges(db: Db, rows: { login: string; at: string }[]
     for (const part of kx.batches(unique)) await q.run(q.k.insertInto("main.github_link_nudges").values(part).onConflict((oc) => oc.column("login").doUpdateSet(kx.excluded(["at"]))));
   });
 }
+
+/**
+ * Settles a command that waits for the answer to its question (state `asked`) with the answer to post: `done` with the answer, `refused`
+ * with why there is none. False when the command does not wait (it was settled already, or pruned).
+ */
+export async function settleAsked(db: Db, commentId: number, o: { state: "done" | "refused"; result: string; at: string }): Promise<boolean> {
+  const q = queryDb(db);
+  return await db.write(async () => {
+    const row = await q.get(q.k.selectFrom(T).select("state").where("comment_id", "=", commentId));
+    if (row?.state !== "asked") return false;
+    await settleCommands(db, [{ commentId, state: o.state, result: o.result, reply: true, allowed: true, at: o.at }]);
+    return true;
+  });
+}

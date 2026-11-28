@@ -187,3 +187,23 @@ export async function setMessageRefusal(db: Db, id: number, refusal: string): Pr
     await q.run(q.k.updateTable("main.chat_messages").set({ payload: JSON.stringify(payload) }).where("id", "=", id));
   });
 }
+
+/** The person's message a question turn was put from (linkMessage turnId): where it came from, or null. */
+export async function loadTurnMessage(db: Db, turnId: number): Promise<{ id: number; via: ChatVia; author: string; githubCommentId: number | null; payload: unknown } | null> {
+  const q = queryDb(db);
+  const m = await q.get(q.k.selectFrom("main.chat_messages").select(["id", "via", "author", "github_comment_id", "payload"]).where("turn_id", "=", turnId).orderBy("id").limit(1));
+  return m ? { id: Number(m.id), via: m.via as ChatVia, author: m.author, githubCommentId: m.github_comment_id === null ? null : Number(m.github_comment_id), payload: parse(m.payload as string | null) } : null;
+}
+
+/** Links the person's newest message on the item from `via` that is linked to nothing yet to the question turn it was put as; returns its id, or null. */
+export async function linkNewestSaid(db: Db, o: { repo: string; number: number; author: string; via: ChatVia; turnId: number }): Promise<number | null> {
+  const q = queryDb(db);
+  return await db.write(async () => {
+    const m = await q.get(q.k.selectFrom("main.chat_messages as m").innerJoin("main.chat_conversations as c", "c.id", "m.conversation_id").select("m.id as id")
+      .where("c.repo", "=", o.repo).where("c.number", "=", o.number).where("m.author", "=", o.author).where("m.via", "=", o.via).where("m.kind", "=", "said")
+      .where("m.turn_id", "is", null).where("m.workflow_event_id", "is", null).orderBy("m.id", "desc").limit(1));
+    if (!m) return null;
+    await q.run(q.k.updateTable("main.chat_messages").set({ turn_id: o.turnId }).where("id", "=", Number(m.id)));
+    return Number(m.id);
+  });
+}

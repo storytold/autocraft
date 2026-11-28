@@ -22,8 +22,8 @@ export type FakeRunner = {
 };
 
 /** A Task Runner that reports in (fresh, ready, `slots` calls at once, every tier) and claims nothing: the room and takers that pools and planners read. Returns its token id. */
-export async function reportingTaskRunner(db: Db, login = "fake-runner", slots = 8): Promise<number> {
-  await db.run(db.k.insertInto("access").values({ login, role: "operator" }).onConflict((oc) => oc.doNothing()));
+export async function reportingTaskRunner(db: Db, login = "fake-runner", slots = 8, role: "operator" | "maintainer" = "operator"): Promise<number> {
+  await db.run(db.k.insertInto("access").values({ login, role }).onConflict((oc) => oc.doNothing()));
   const id = (await createToken(db, login, "fake runner", { kind: "runner" })).row.id;
   // A fresh, ready status makes the runner a taker for every tier: callers queue calls only when a Task Runner may take them.
   await storeStatus(db, id, login, parseStatus({ slots, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus", mid: "sonnet", small: "haiku" }, reserve: { fiveHour: 0, weekly: 0 } }));
@@ -32,10 +32,10 @@ export async function reportingTaskRunner(db: Db, login = "fake-runner", slots =
   return id;
 }
 
-/** Starts a runner for `login` (an operator, so any call fits it) and returns its handle. */
-export async function fakeTaskRunner(db: Db, answer: (call: FakeCall, beat: (progress: string) => Promise<void>) => FakeReply | Promise<FakeReply>, login = "fake-runner"): Promise<FakeRunner> {
+/** Starts a runner for `login` (by default an operator, so any call fits it) and returns its handle. */
+export async function fakeTaskRunner(db: Db, answer: (call: FakeCall, beat: (progress: string) => Promise<void>) => FakeReply | Promise<FakeReply>, login = "fake-runner", role: "operator" | "maintainer" = "operator"): Promise<FakeRunner> {
   allocation.pollMs = Math.min(allocation.pollMs, 10);
-  const caller: Caller = { tokenId: await reportingTaskRunner(db, login, 4), login, role: "operator" };
+  const caller: Caller = { tokenId: await reportingTaskRunner(db, login, 4, role), login, role };
   const calls: FakeCall[] = [];
   let stopped = false, n = 0;
   /** The calls whose session the runner keeps: it claims their follow-ups first. */

@@ -83,7 +83,8 @@ export type NewFixupRequest = { repo: string; number: number; fromHead: string; 
 
 export type CommandRow = Selectable<DB["github_commands"]>;
 export type NewCommand = Pick<CommandRow, "comment_id" | "repo" | "number" | "pr" | "login" | "github_id" | "created_at" | "requested_at" | "parsed">;
-export type CommandState = "done" | "refused" | "ignored" | "expired";
+/** `asked`: an `ask <question>` put to Opus; its answer settles it `done` (or `refused` without one), to post. */
+export type CommandState = "done" | "refused" | "ignored" | "expired" | "asked";
 export type CommandSettle = { commentId: number; state: CommandState; result: string | null; reply: boolean; allowed: boolean; at: string };
 export type CommandProgress = { commentId: number; triedAt?: string; retryInc?: boolean; reply?: "posted" | "failed" | "none" };
 

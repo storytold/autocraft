@@ -133,6 +133,22 @@ export const COMMANDS: readonly CommandDef[] = [
   },
 ];
 
+/**
+ * `ask <question>`: a question about the item, answered in words where it was asked; it runs no command. Not a workflow command, so
+ * the parser leaves it to askedQuestion (parse.ts); `ask author` stays that command. Help lists it after the workflow commands.
+ */
+export const ASK: Omit<CommandDef, "word" | "entry"> & { word: "ask"; entry: null } = {
+  word: "ask", usage: "ask <question>", aliases: [], entry: null,
+  short: tk("Ask the model about the item; it answers where you asked and changes nothing."),
+  does: tk("Opus reads the item, its discussion and its code, and answers in the same place: a reply on GitHub, the Discord thread or the item's chat. Everyone who can see the item can read the answer. It changes nothing; it may recommend a command, which runs only when someone sends it. It runs on your own Task Runner."),
+  back: tk("With the answer."),
+  example: "ask why does the preview lose the alpha channel?",
+};
+
+export type HelpCommand = CommandDef | typeof ASK;
+/** Every command as Help lists it: the workflow commands, then ask. */
+export const HELP_COMMANDS: readonly HelpCommand[] = [...COMMANDS, ASK];
+
 /** The words that mean a hold, lower case. */
 export const HOLD_WORDS: readonly string[] = COMMANDS.filter((c) => c.word === "hold").flatMap((c) => [c.word, ...c.aliases]);
 

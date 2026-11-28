@@ -8,7 +8,7 @@ import { parse } from "../../../../src/workflow/parse.ts";
 import { resolve } from "../../../../src/workflow/resolve.ts";
 import { attributionLines, confirmLine, currentStep, stateLine, stepLines, workflowSteps } from "../../../../src/workflow/status.ts";
 import type { ItemKind, ItemWorkflow } from "../../../../src/workflow/types.ts";
-import { COMMANDS, WEIGHT_HELP } from "../../../../src/workflow/vocab.ts";
+import { HELP_COMMANDS, WEIGHT_HELP } from "../../../../src/workflow/vocab.ts";
 import { useQuery } from "../../api/client";
 import type { ChatEntry } from "../../api/types";
 import type { ViewProps } from "../../registry/types";
@@ -191,7 +191,7 @@ function CommandsStep() {
         </li>
       </Bullets>
       <ul aria-label={t("Commands")} className="flex flex-col divide-y divide-line rounded-md border border-line text-sm">
-        {COMMANDS.map((c) => (
+        {HELP_COMMANDS.map((c) => (
           <li key={c.word} className="grid gap-x-3 px-3 py-1.5 sm:grid-cols-[11rem_1fr]">
             <Link to={c.more ? "/help/commands" : `/help/commands#cmd-${c.word.split(" ")[0]}`} className="code w-fit rounded text-accent-ink hover:underline">
               {c.usage}
@@ -323,8 +323,8 @@ function WhereStep({ mention }: { mention: string }) {
   );
 }
 
-function TalkStep() {
-  const question: Extract<ChatEntry, { t: "said" }> = { t: "said", id: "q1", at: "2026-11-28T10:02:00.000Z", login: WHO, via: "dashboard", body: t("Why does the preview lose the alpha channel?"), url: null };
+function TalkStep({ mention }: { mention: string }) {
+  const question: Extract<ChatEntry, { t: "said" }> = { t: "said", id: "q1", at: "2026-11-28T10:02:00.000Z", login: WHO, via: "dashboard", body: "ask why does the preview lose the alpha channel?", url: null };
   const answer: Extract<ChatEntry, { t: "reply" }> = {
     t: "reply", id: "r1", at: "2026-11-28T10:03:00.000Z", findings: [], ask: null,
     body: t("The preview encoder converts to RGB before writing the PNG (`preview/encode.rs`, line 88). Writing RGBA there keeps the alpha channel; the full export already does that."),
@@ -332,13 +332,15 @@ function TalkStep() {
   return (
     <TutorialStep id="talk" n={7} title={t("Ask the model about an item")} refs={[{ to: "/help/roles", label: t("Who can do what") }]}>
       <Bullets>
-        <li>{t("Write a question, with a question mark, in the item's chat.")}</li>
+        <li>{t("Write ask and your question in the item's chat.")}</li>
         <li>{t("Opus reads the item, the chat and the repository's code; it changes nothing.")}</li>
         <li>{t("It runs on your own Task Runner, which must be ready.")}</li>
         <li>{t("Everyone who can see the repository reads the answer.")}</li>
         <li>{t("It may recommend a command; nothing runs until someone sends it.")}</li>
         <li>{t("You can withdraw the question until Opus answers.")}</li>
-        <li>{t("A message that is not a question is read as a command.")}</li>
+        <li>
+          {t("On GitHub, ask in a comment:")} <Code>@{mention} ask &lt;question&gt;</Code>. {t("The answer comes as a reply.")}
+        </li>
       </Bullets>
       <figure className="flex min-w-0 flex-col gap-2">
         <figcaption className="text-sm font-semibold">{t("A question and Opus's answer")}</figcaption>
@@ -448,7 +450,7 @@ export function TutorialView({ user }: ViewProps) {
           <CommandsStep />
           <AnswerStep />
           <WhereStep mention={mention} />
-          <TalkStep />
+          <TalkStep mention={mention} />
           <FollowStep />
         </Section>
         <Section id="agent-section">

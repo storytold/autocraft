@@ -4,7 +4,9 @@
 // slots. The command must parse in full, name no item the text does not, and hold no word in a fix's instructions that the text (or a
 // plan part's title) does not; Jev then scores whether the text asks for exactly it.
 // It runs through runCommand as if the sender had typed it only with Jev's score at READ_RUN_SCORE or more, with the message's own
-// items, and with no condition or hedge in the text (a hold runs anyway); otherwise the reply proposes it. With no reading (no Task
+// items, and with no condition or hedge in the text (a hold runs anyway); otherwise the reply proposes it. A reading of `ask` (the text
+// is only a question) puts the text to Opus as `ask <text>` would (ReadText.ask) when Jev's question score is at READ_RUN_SCORE or
+// more and the text is about one item; otherwise the reply proposes it. On a surface without questions it is no reading. With no reading (no Task
 // Runner took the call, it failed or timed out, or the model found it unclear) the reply is the parser's own. The text goes only
 // into the calls, whose recorded texts are deleted when they end; each reading is logged as a `read` event with the text's hash.
 import { createHash } from "node:crypto";
@@ -20,8 +22,8 @@ import { t } from "../i18n/index.ts";
 import { ownerOf } from "../owners.ts";
 import { JEV_PROMPTS } from "../prompts/index.ts";
 import { runCommand, type Actor, type CommandInput, type CommandResult } from "./apply.ts";
-import { CONDITION, GUARD, parse, type ParseOptions } from "./parse.ts";
-import { addedWords, jevExact, parseTranslation, READ_ITEMS_MAX, READ_TEXT_CHARS, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
+import { askedQuestion, CONDITION, GUARD, parse, type ParseOptions } from "./parse.ts";
+import { addedWords, jevScore, parseTranslation, READ_ITEMS_MAX, READ_TEXT_CHARS, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
 import { isLive, optionNamed } from "./resolve.ts";
 import { MEANING_WORDS, recommendationText } from "./status.ts";
 import { openRecommendation, shownWorkflow, type ItemRef, type Parsed, type Surface } from "./types.ts";
@@ -50,8 +52,11 @@ export function hedged(text: string): boolean {
 }
 
 export type Translation = { command: string | null; confidence: number };
-/** `fit`: how its items fit the message (itemsFit). */
-export type Reading = { command: string; parsed: Parsed; score: number; source: "jev" | "haiku"; fit: "own" | "text" };
+/** `fit`: how its items fit the message (itemsFit). `asks`: the command is ask, the text only a question. */
+export type Reading = { command: string; parsed: Parsed; score: number; source: "jev" | "haiku"; fit: "own" | "text"; asks?: true };
+
+/** A translation that reads the text as a question: `ask` alone, or with words after it other than the author's. */
+const readsAsk = (command: string): boolean => /^ask$/i.test(command.trim()) || askedQuestion(command) !== null;
 
 /** What tests replace: the translate call (null: no answer) and Jev's score (null: no answer). */
 export type ReadDeps = {
@@ -79,6 +84,8 @@ export type ReadText = {
   /** Settles what the command needs before it runs (GitHub: the comment unchanged, the PR head at it), or a line saying why it cannot run; may throw to end the command. */
   pin?: (p: Parsed) => Promise<Partial<CommandInput> | string>;
   deps?: ReadDeps;
+  /** Puts the text to Opus as `ask <text>` (the surface's own route); absent where a surface answers no questions. */
+  ask?: (question: string) => Promise<CommandResult>;
 };
 
 const lower = (s: string): string => s.toLowerCase();
@@ -165,7 +172,7 @@ const SCORE: JevStep<ScoreAsk, number> = {
   provider: "jev", id: "command.read.jev",
   request: (a) => ({ item: { ref: "command" }, body: JSON.stringify({ ...JEV_PROMPTS["command.read.jev"].request, state: scoreState(a) }) }),
   parse: (answers, _a, ctx) => {
-    const p = ctx.code === 0 ? jevExact(answers) : null;
+    const p = ctx.code === 0 ? jevScore(answers, readsAsk(_a.command) ? "question" : "exact") : null;
     return p === null ? null : { value: p };
   },
 };
@@ -205,6 +212,12 @@ export async function readCommand(db: Db, login: string, read: ReadText): Promis
   const { ask, quiet } = await askOf(db, read);
   const tr = await (read.deps?.translate ?? translate)(db, ask, login, { ownOnly: quiet });
   if (!tr?.command) return null;
+  if (readsAsk(tr.command)) {
+    const p = await (read.deps?.score ?? score)(db, { message: ask.message, command: "ask" });
+    const fit = read.own.length === 1 ? "own" : "text";
+    const parsed: Parsed = { kind: "ambiguous", understood: "", rest: "" };
+    return p === null ? { command: "ask", parsed, score: tr.confidence, source: "haiku", fit, asks: true } : { command: "ask", parsed, score: p, source: "jev", fit, asks: true };
+  }
   const parsed = parse(tr.command, read.parse);
   const fit = itemsFit(parsed, tr.command, read);
   if (fit === "none") return null;
@@ -227,7 +240,10 @@ const isHold = (p: Parsed): boolean => p.kind === "commands" && p.parts.length >
  * the message's own, and no condition the parser found and no hedge in the text, unless it is a hold.
  */
 export const readingRuns = (r: Reading, read: Pick<ReadText, "text" | "condition">): boolean =>
-  r.source === "jev" && r.score >= READ_RUN_SCORE && r.fit === "own" && (isHold(r.parsed) || (!read.condition && !hedged(read.text)));
+  r.source === "jev" && r.score >= READ_RUN_SCORE && r.fit === "own" && (isHold(r.parsed) || !!r.asks || (!read.condition && !hedged(read.text)));
+
+/** The longest question a proposal quotes whole; a longer one is proposed as the usage. */
+const PROPOSED_QUESTION_CHARS = 200;
 
 /** Adds the note to every item's line and to the reply. */
 function noted(res: CommandResult, note: string): CommandResult {
@@ -246,17 +262,22 @@ export async function namesOption(db: Db, items: readonly ItemRef[], parsed: Par
 }
 
 /**
- * Runs text the way every surface does: through runCommand. Text the parser could not read, from a sender who may send commands
- * on `read.own`, is read by a model first (see the file comment). `read` null: no reading on this path.
+ * Runs text the way every surface does: through runCommand. `ask <question>` goes to `read.ask` where the surface has one. Text the
+ * parser could not read, from a sender who may send commands on `read.own`, is read by a model first (see the file comment). `read`
+ * null: no reading on this path.
  */
 export async function runText(db: Db, actor: Actor, via: Surface, given: CommandInput, read: ReadText | null): Promise<CommandResult> {
+  // `ask <question>` is a question on a surface that answers them; `ask author` stays the command.
+  const question = read?.ask ? askedQuestion(read.text) : null;
+  if (question !== null) return await read!.ask!(question);
   // An ambiguous parse carries no items: on a surface with none of its own, the parser's reply goes on the items the text names.
   const input = given.parsed.kind === "ambiguous" && !given.items.length && read?.named ? { ...given, items: [...read.own] } : given;
   if (input.parsed.kind !== "ambiguous" || !read || !actor.login || !await mayRead(db, actor, read.own)) return await runCommand(db, actor, via, input);
   // An option of the open question named on its own ("2", "go with one archive") answers it as the parser reads it: no model reading.
   if (await namesOption(db, input.items.length ? input.items : read.own, input.parsed)) return await runCommand(db, actor, via, input.items.length ? input : { ...input, items: [...read.own] });
   const reading = await within(read.waitMs ?? READ_WAIT_MS, readCommand(db, actor.login, read));
-  if (!reading) return await runCommand(db, actor, via, input);
+  // A question on a surface that answers none (the agent, Discord) is no reading: nothing to propose there.
+  if (!reading || (reading.asks && !read.ask)) return await runCommand(db, actor, via, input);
   const runs = readingRuns(reading, read);
   const hash = createHash("sha256").update(read.text).digest("hex").slice(0, 16);
   const line = t("Read “{command}” from a message ({hash}): {source} {score}, {outcome}.", { command: reading.command, hash, source: reading.source === "jev" ? "Jev" : "Haiku", score: reading.score.toFixed(2), outcome: runs ? t("run") : t("proposed") });
@@ -264,7 +285,10 @@ export async function runText(db: Db, actor: Actor, via: Surface, given: Command
   // Logged before the command's own event, which stays the item's latest.
   await recordEvents(db, read.own.map((i) => ({ workflowId: null, repo: i.repo.split("/").pop()!, number: i.number, login: actor.login!, via, kind: "read" as const, parsed: reading.parsed, line, at })));
   const items = input.items.length ? input.items : [...read.own];
-  if (!runs) return await runCommand(db, actor, via, { ...input, items, proposed: reading.command });
+  const said = read.text.trim().replace(/\s+/g, " ");
+  const proposed = !reading.asks ? reading.command : said.length <= PROPOSED_QUESTION_CHARS ? `ask ${said}` : "ask <question>";
+  if (!runs) return await runCommand(db, actor, via, { ...input, items, proposed });
+  if (reading.asks) return noted(await read.ask!(read.text.trim()), t("Read from your words as a question."));
   const note = t("Read from your words as `{command}`.", { command: reading.command });
   const pinned = read.pin ? await read.pin(reading.parsed) : {};
   if (typeof pinned === "string") {

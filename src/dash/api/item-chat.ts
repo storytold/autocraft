@@ -7,7 +7,7 @@
 import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatQueued, ChatRunner, ChatShot, ChatVia, ItemChat, ItemChatState, ItemChatUnchanged, ItemConversation } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
 import { loadArtifacts } from "../../data/build/index.ts";
-import { ensureMainConversation, linkMessage, loadConversationsOfItem, loadMessages, setMessageRefusal, type ChatMessageRow, type ConversationRow } from "../../data/chat/index.ts";
+import { ensureMainConversation, loadConversationsOfItem, loadMessages, type ChatMessageRow, type ConversationRow } from "../../data/chat/index.ts";
 import { commentDatabaseId, loadThreads } from "../../data/conversations/index.ts";
 import { loadItems } from "../../data/mirror/index.ts";
 import { loadScreenshotRuns } from "../../data/merge/index.ts";
@@ -28,10 +28,9 @@ import { queuedOfItems, type QueuedWork } from "../../runner/why-queued.ts";
 import { openRecommendation, shownWorkflow, type ItemWorkflow, type PlanPart, type Recommendation } from "../../workflow/types.ts";
 import type { Req } from "../types.ts";
 import { parse } from "../../workflow/parse.ts";
-import { recordSaid } from "../../workflow/said.ts";
 import { HttpError } from "../server/util.ts";
 import { needVisible } from "./visible.ts";
-import { askOpus, assertAskRate, canTalk, withdrawMessage } from "./conversations.ts";
+import { canTalk, withdrawMessage } from "./conversations.ts";
 import { runItemText } from "./commands.ts";
 import { discordKeys, type ItemMention } from "./discord.ts";
 import { statusOf } from "./maintain-item.ts";
@@ -341,10 +340,10 @@ async function shotsOf(db: Db, c: Ctx): Promise<Map<string, ChatShot[]>> {
 const TEXT_MAX = 4000;
 
 /**
- * POST /api/items/:repo/:n/chat { conversation, text }: what a person writes in the item's chat. The text is stored as their message,
- * then it is a question to Opus (the parser reads it as nothing and it has a "?") or a command through the command core, as the command
- * box runs it. Only the main conversation takes messages. Nothing is posted to GitHub beyond what a command writes. Returns the chat and
- * the lines the command answered with.
+ * POST /api/items/:repo/:n/chat { conversation, text }: what a person writes in the item's chat, run as the command box runs it
+ * (runItemText): stored as their message, then `ask <question>` (or text a model reads as only a question) goes to Opus and anything
+ * else is a command through the command core. Only the main conversation takes messages. Nothing is posted to GitHub beyond what a
+ * command writes. Returns the chat and the lines the command answered with.
  */
 export async function postChat(db: Db, req: Req): Promise<{ chat: ItemChat; lines: string[] }> {
   const repo = req.params.repo!;
@@ -359,20 +358,7 @@ export async function postChat(db: Db, req: Req): Promise<{ chat: ItemChat; line
   if (!(await loadItems(db, [{ repo, number: n }], "ref")).has(`${repo}#${n}`)) throw new HttpError(404, `${repo}#${n} is not an item AutoCraft has read`);
   const mainId = await ensureMainConversation(db, repo, n, req.user.login);
   if (b.conversation !== MAIN && String(b.conversation) !== String(mainId)) throw new HttpError(404, "only the main conversation takes messages");
-  const parsed = parse(text, { repo });
-  const lines: string[] = [];
-  if (parsed.kind === "ambiguous" && parsed.understood === "" && text.includes("?")) {
-    await assertAskRate(db, req.user.login);
-    const [said] = await recordSaid(db, { login: req.user.login, via: "dashboard", text, items: [{ repo, number: n }], by: { canWrite: (r) => req.user.canWrite(r), role: req.user.role } });
-    const asked = await askOpus(db, req, repo, n, text);
-    if (said) {
-      if ("turnId" in asked) await linkMessage(db, said.id, { turnId: asked.turnId });
-      else await setMessageRefusal(db, said.id, asked.refusal);
-    }
-    if ("refusal" in asked) lines.push(asked.refusal);
-  } else {
-    lines.push(...(await runItemText(db, req, repo, n, text, parsed, null)).lines);
-  }
+  const { lines } = await runItemText(db, req, repo, n, text, parse(text, { repo }), null);
   return { chat: await readChat(db, req), lines };
 }
 

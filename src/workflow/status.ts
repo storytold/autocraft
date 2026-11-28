@@ -7,7 +7,7 @@ import type { Blocker, Entry, ItemWorkflow, Recommendation } from "./types.ts";
 import { clipText } from "../prose.ts";
 import { asksNobody } from "./asked.ts";
 import { authorAsk, heldWork, openRecommendation, RULE_STARTER } from "./types.ts";
-import { COMMANDS, ENTRY_LABEL, weightWord } from "./vocab.ts";
+import { ASK, COMMANDS, ENTRY_LABEL, weightWord } from "./vocab.ts";
 import type { RunnerRoom } from "../core/runner-room.ts";
 
 export type StepName = "implement" | "review" | "fix-up" | "review again" | "update from main" | "fix CI and conflicts" | "batch" | "merge" | "recommend" | "review new commits";
@@ -401,7 +401,7 @@ function ambiguityText(understood: string, a: Ambiguity, mention?: string, propo
         if (one) return proposalLine(one, mention);
         const hint = partHint(a.rest);
         if (hint) return t("{hint} Nothing runs until the instruction is clear.", { hint });
-        return t("I couldn't read “{rest}” as a command. Nothing runs until the instruction is clear. Commands: {commands}.", { rest: a.rest, commands: COMMANDS.filter((c) => !c.answer || c.word === "drop").map((c) => c.usage).join(", ") });
+        return t("I couldn't read “{rest}” as a command. Nothing runs until the instruction is clear. Commands: {commands}.", { rest: a.rest, commands: [...COMMANDS.filter((c) => !c.answer || c.word === "drop"), ASK].map((c) => c.usage).join(", ") });
       }
       if (understood) return t("I understood “{understood}” but not which items. Nothing runs until the instruction is clear.", { understood });
       return t("There was no command. Nothing runs.");

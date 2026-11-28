@@ -34,6 +34,7 @@ export type ScoreAsk = { message: string; command: string };
 /** The command vocabulary as the prompt lists it, from the parser's own list. */
 export const READ_VOCABULARY = [
   ...COMMANDS.map((c) => `- ${c.usage}: ${c.short}${c.word === "fix" ? " It names parts of the plan by number or by words from their title; other words after fix are instructions for the fix-up, which must be the message's own words." : c.answer ? " Only in an answer to an open question; it names parts of the plan by number or by words from their title." : ""} Example: ${c.example}`),
+  "- ask: the message only asks a question about the item, and asks for nothing to be done; AutoCraft answers it in words. Write ask alone: the question is the message itself.",
   `- yes: runs the open recommendation as it stands (also: ${YES_WORDS.filter((w) => w !== "yes").slice(0, 6).join(", ")}). Only when a question is open.`,
   `- Weight words, alone or after a command: ${WEIGHT_HELP.filter((w) => w.word !== "(none)").map((w) => w.word).join(", ")}.`,
   "- Several commands in one: separate them with commas, as in \"fix 1, drop 2, then merge\".",
@@ -41,6 +42,8 @@ export const READ_VOCABULARY = [
 ].join("\n");
 
 export const READ_QUESTION = "Does the message ask AutoCraft for exactly the command given, nothing more and nothing less, and without a condition or a question?";
+/** Jev's second question: whether the message is only a question, which `ask` answers in words. */
+export const READ_ASKS = "Is the message only a question about the item, asking for an answer in words and asking AutoCraft to do nothing?";
 
 export const SAMPLE_READ: ReadAsk[] = [{
   ref: "photocraft#812",
@@ -89,8 +92,11 @@ export function addedWords(fix: string, a: ReadAsk): string[] {
   return wordsIn(fix).filter((w) => !LINKING.has(w) && !known.has(stem(w)));
 }
 
-/** Jev's answer: the probability that the message asks for exactly the command, or null without a number from 0 to 1. */
-export function jevExact(answers: unknown): number | null {
-  const p = (answers as { exact?: { noul?: unknown } } | undefined)?.exact?.noul;
+/**
+ * Jev's answer to one of its questions: `exact`, the probability that the message asks for exactly the command, or `question`, that it is
+ * only a question (READ_ASKS); null without a number from 0 to 1.
+ */
+export function jevScore(answers: unknown, field: "exact" | "question" = "exact"): number | null {
+  const p = (answers as Record<string, { noul?: unknown } | undefined> | undefined)?.[field]?.noul;
   return typeof p === "number" && p >= 0 && p <= 1 ? p : null;
 }

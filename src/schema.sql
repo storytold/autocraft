@@ -637,7 +637,7 @@ CREATE TABLE IF NOT EXISTS github_commands (
   github_id INTEGER NOT NULL,         -- the commenter's numeric GitHub id
   created_at TEXT NOT NULL,           -- the comment's creation time on GitHub: the PR head is pinned to this moment
   requested_at TEXT NOT NULL,         -- when the delivery arrived
-  state TEXT NOT NULL,                -- queued | done | refused | ignored (no answer) | expired
+  state TEXT NOT NULL,                -- queued | done | refused | ignored (no answer) | expired | asked (an ask waits for Opus's answer)
   result TEXT,                        -- what the answer says
   done_at TEXT,
   tried_at TEXT,                      -- the last try that waited on GitHub (a re-read or a read that failed); the next one waits a minute

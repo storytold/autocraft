@@ -14,7 +14,9 @@ import { mentionName, shownMention } from "../../github/slugs.ts";
 import { listForm, parse } from "../../workflow/parse.ts";
 import { runControl, type CommandResult, type ControlInput } from "../../workflow/apply.ts";
 import { refsIn, runText } from "../../workflow/read.ts";
-import { saying } from "../../workflow/said.ts";
+import { linkAskTurn, saying } from "../../workflow/said.ts";
+import { askQuestion } from "../../conversations/ask.ts";
+import { canTalk } from "./conversations.ts";
 import { t } from "../../i18n/index.ts";
 import type { ItemRef, Parsed } from "../../workflow/types.ts";
 
@@ -65,12 +67,27 @@ export async function itemCommand(db: Db, req: Req): Promise<CommandResult> {
   return await runItemText(db, req, repo, n, text, parsed, timeOf(asked));
 }
 
-/** Text written on one item through the command core, stored as the person's message in the item's chat. */
+/**
+ * The dashboard's `ask <question>` on one item: the question goes to Opus as the person's message (src/conversations/ask.ts), and the
+ * chat message it came in is linked to that turn, so the answer shows under it. Only those who may write in the chat ask.
+ */
+function dashboardAsk(db: Db, req: Req, repo: string, n: number): (question: string) => Promise<CommandResult> {
+  const one = (outcome: "run" | "refused", line: string): CommandResult => ({ items: [{ repo, number: n, outcome, line, workflowId: null }], lines: outcome === "run" ? [] : [line] });
+  return async (question) => {
+    if (!await canTalk(db, req.user, repo)) return one("refused", t("Only operators, and maintainers with write access to the repository, ask Opus."));
+    const r = await askQuestion(db, { login: req.user.login, operator: req.user.role === "operator" }, repo, n, question, { limit: true });
+    if ("refusal" in r) return one("refused", r.refusal);
+    await linkAskTurn(db, { repo, number: n, login: req.user.login, via: "dashboard", turnId: r.turnId });
+    return one("run", t("Asked Opus. The answer comes in the item's chat."));
+  };
+}
+
+/** Text written on one item through the command core, stored as the person's message in the item's chat; `ask <question>` goes to Opus. */
 export async function runItemText(db: Db, req: Req, repo: string, n: number, text: string, parsed: Parsed, asked: string | null): Promise<CommandResult> {
   const visible = await visibleFn(db, req);
   return await saying(db, { login: req.user.login, via: "dashboard", text, items: [{ repo, number: n }], by: { canWrite: actorOf(req).canWrite, role: req.user.role, visible } }, async () =>
     await runText(db, actorOf(req), "dashboard", { parsed, items: [{ repo, number: n }], visible, asked: ({ ref }) => (ref === `${repo}#${n}` ? asked : null) },
-      { text, own: [{ repo, number: n }], named: false, parse: { repo } }));
+      { text, own: [{ repo, number: n }], named: false, parse: { repo }, ask: dashboardAsk(db, req, repo, n) }));
 }
 
 export async function listCommand(db: Db, req: Req): Promise<CommandResult> {

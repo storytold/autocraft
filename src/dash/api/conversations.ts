@@ -4,8 +4,9 @@ import type { ConversationCard } from "../../../web/src/api/types.ts";
 import { actionRefusal, buttonLabel, cardEffect, cardLines, cardRepos, commandText, followupsOf, headline, isRegistry, readParams, type CardParams } from "../../conversations/cards.ts";
 import { queueReason } from "../../conversations/queue.ts";
 import { cardDigest, type CardRow } from "../../conversations/act.ts";
-import { addMessage, loadStale, withdrawTurn, type Stale, type StoreDeps } from "../../conversations/store.ts";
-import { ConversationError, countAskedTurns, loadQueue, type Queue } from "../../data/conversations/index.ts";
+import { loadStale, withdrawTurn, type Stale, type StoreDeps } from "../../conversations/store.ts";
+import { ASK_LIMITED, askLimited, askQuestion } from "../../conversations/ask.ts";
+import { ConversationError, loadQueue, type Queue } from "../../data/conversations/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { loadQuiet } from "../../data/security/index.ts";
@@ -15,14 +16,6 @@ import { githubIdentity } from "../../github/identity.ts";
 import { canActMany, permKey } from "../../data/access/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type { Db } from "../../db/index.ts";
-import { tierOfModel } from "../../remote/mode.ts";
-import { CLAUDE_PROMPTS } from "../../prompts/index.ts";
-import { isEnabled, pauseReason } from "../../runner/autopilot.ts";
-import { ownTaker } from "../../remote/takers.ts";
-
-const CONVERSATION_PROMPT_ID = "conversation.turn";
-/** The step that answers maintainers' messages (src/runner/steps.ts). */
-const MAINTAINER_STEP = "conversation-maintainer";
 
 const isOperator = (req: Req): boolean => req.user.role === "operator";
 
@@ -31,13 +24,12 @@ const isOperator = (req: Req): boolean => req.user.role === "operator";
  * live as the act rule reads it. A maintainer's turn runs on their own Task Runner. Talking writes nothing to GitHub, so the act
  * rule's app-identity condition does not apply.
  */
-export async function canTalk(db: Db, user: Pick<User, "role" | "canWrite">, repo: string): Promise<boolean> {
+export async function canTalk(_db: Db, user: Pick<User, "role" | "canWrite">, repo: string): Promise<boolean> {
   if (user.role === "operator") return true;
   return await mayRunRepo(user, repo);
 }
 
-/** The refusal of a maintainer's message to Opus while none of their Task Runners may take it (src/remote/takers.ts). */
-export const NO_OWN_RUNNER = "Your Task Runner must be connected and ready to ask Opus. You can still post without Opus.";
+export { NO_OWN_RUNNER } from "../../conversations/ask.ts";
 
 async function guard<T>(f: () => Promise<T>): Promise<T> {
   try {
@@ -126,37 +118,17 @@ function issueOf(p: CardParams): { title: string } | undefined {
   return followupsOf(p)[0] ?? (p.kind === "command" && !isRegistry(p.command) && p.command.word === "open_issue" ? p.command : undefined);
 }
 
-/** Why a maintainer's message to Opus would not be answered now, or null: the pipeline is off or draining, its step is paused, or none of their Task Runners is ready. */
-async function ownAskRefusal(db: Db, login: string, repo: string): Promise<string | null> {
-  if (!await isEnabled(db)) return "The pipeline is off, so Opus cannot answer now. You can still post without Opus.";
-  const paused = await pauseReason(db, MAINTAINER_STEP, Date.now(), { backoff: false });
-  if (paused) return `Opus cannot answer now: ${paused}. You can still post without Opus.`;
-  return await ownTaker(db, login, { prompt_id: CONVERSATION_PROMPT_ID, repos: [repo], tier: tierOfModel(CLAUDE_PROMPTS[CONVERSATION_PROMPT_ID].models[0]!) }) ? null : NO_OWN_RUNNER;
-}
-
-/** Questions a person may put to Opus per hour and per day. */
-export const ASK_LIMITS = { hour: 10, day: 50 } as const;
-
 /** Throws 429 when the user has put ASK_LIMITS questions to Opus in the last hour or day. */
 export async function assertAskRate(db: Db, login: string): Promise<void> {
-  const count = (ms: number) => countAskedTurns(db, login, new Date(Date.now() - ms).toISOString());
-  if (await count(3_600_000) >= ASK_LIMITS.hour || await count(86_400_000) >= ASK_LIMITS.day) throw new HttpError(429, "Too many questions to Opus. Try again later.");
+  if (await askLimited(db, login)) throw new HttpError(429, ASK_LIMITED);
 }
 
 /**
- * Puts a question to Opus on the sender's own runner, for a message the chat has stored already. Returns the
- * turn it created, or why the question was not asked (the message stays in the chat): a maintainer's refusal (ownAskRefusal) or an
- * open question that Opus has not answered.
+ * Puts a question to Opus on the sender's own runner, for a message the chat has stored already. Returns the turn it created, or why
+ * the question was not asked (the message stays in the chat): see askQuestion.
  */
 export async function askOpus(db: Db, req: Req, repo: string, n: number, body: string, deps?: StoreDeps): Promise<{ turnId: number } | { refusal: string }> {
-  const refused = isOperator(req) ? null : await ownAskRefusal(db, req.user.login, repo);
-  if (refused) return { refusal: refused };
-  try {
-    return { turnId: await addMessage(db, repo, n, { login: req.user.login, kind: isOperator(req) ? "operator" : "maintainer" }, body, deps, true) };
-  } catch (e) {
-    if (e instanceof ConversationError && e.status === 409) return { refusal: e.message };
-    throw e;
-  }
+  return await askQuestion(db, { login: req.user.login, operator: isOperator(req) }, repo, n, body, deps ? { deps } : {});
 }
 
 /** Withdraws the message on the item that waits for Opus, as the reader: an operator, or the person who wrote it. */

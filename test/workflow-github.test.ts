@@ -1,6 +1,7 @@
 // GitHub in a repo on the maintainer workflow: answers need the app's mention, strangers with write access get one "link your
 // account" answer a week, a quiet PR's status comment says nothing about findings or the recommendation, a status comment's new
-// question pings its asked people once, and an implementation's question is answered on its issue.
+// question pings its asked people once, an implementation's question is answered on its issue, and `ask <question>` is answered in
+// a reply once the asker's own Task Runner has answered it.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { safeEqual } from "../src/dash/server/crypto.ts";
@@ -19,6 +20,10 @@ import { roundsOf, startImplementation } from "./implement-rows.ts";
 import type { AppPermission } from "../src/remote/permission.ts";
 import { insertWorkflow, liveWorkflow, updateWorkflow } from "../src/workflow/store.ts";
 import { OPERATOR, T0, T1, world, type World } from "./world-db.ts";
+import { askedQuestion, commentQuestion, parse } from "../src/workflow/parse.ts";
+import { answerPending } from "../src/conversations/run.ts";
+import { setEnabled } from "../src/runner/autopilot.ts";
+import { fakeTaskRunner } from "./fake-runner.ts";
 
 const SLUG = "autocraft-bot";
 const SECRET = "hook-secret";
@@ -244,4 +249,49 @@ test("an implementation's question is answered by a comment on its issue, by opt
   assert.deepEqual(await answer(byNumber), ["o2"], "the named option answers");
   assert.deepEqual(await answer(byYes), ["o1"], "a yes answers with the recommended option");
   assert.deepEqual(await answer(byQuestion), [], "an option named in a question answers nothing");
+});
+
+test("ask <question> is a question, ask author stays the command, a bare question or command is no ask", () => {
+  assert.equal(askedQuestion("ask why does the preview lose alpha"), "why does the preview lose alpha");
+  assert.equal(askedQuestion(`@${SLUG} ask: is this in scope?`, { slug: SLUG }), "is this in scope?");
+  for (const text of ["ask author", "ask the author to wire the group editor in", "ask-author", "ask", "why does the preview lose alpha?", "merge"]) assert.equal(askedQuestion(text), null, text);
+  assert.equal(parse("ask the author to wire the group editor in").kind, "commands");
+  assert.equal(parse("merge").kind, "commands");
+  assert.equal(parse("why does the preview lose alpha?").kind, "ambiguous", "a bare question is left to the model reading");
+  assert.equal(commentQuestion(`Thanks!\n@${SLUG} ask does the export\nkeep 16-bit depth?`, SLUG), "does the export\nkeep 16-bit depth?");
+});
+
+test("a maintainer's @app ask queues a call bound to their Task Runner and the answer is posted as a reply when it returns", async () => {
+  const w = await newRepo();
+  const db = w.db;
+  await w.pr(1);
+  await setEnabled(db, true, "test");
+  await db.run(db.k.insertInto("main.access").values({ login: "maint", role: "maintainer", github_id: 202 }));
+  const ANSWER = "The preview encoder converts to RGB before it writes the PNG.";
+  const runner = await fakeTaskRunner(db, (call) => (call.promptId === "conversation.turn" ? ANSWER : undefined), "maint", "maintainer");
+  try {
+    await comment(w, `@${SLUG} ask why does the preview lose the alpha channel`, { login: "maint", id: 202 });
+    await drain(w);
+    const [asked] = await commands(w);
+    assert.equal(asked?.state, "asked", asked?.result ?? "");
+    assert.equal(asked?.reply, "none", "nothing is posted before the answer");
+
+    await answerPending(db, { kind: "maintainer", checkout: async () => null, usageRun: "t", log: () => {} });
+    const call = await db.get(db.k.selectFrom("main.remote_calls").select(["prompt_id", "for_login"]).where("prompt_id", "=", "conversation.turn"));
+    assert.equal(call?.for_login, "maint", "the call runs only on the asker's own Task Runner");
+
+    const posted: string[] = [];
+    const exec: Exec = async (cmd, args, opts) => {
+      if (cmd === "gh" && args.includes("comment")) { posted.push(String(opts?.input ?? "")); return { code: 0, stdout: "https://github.com/storytold/app/pull/1#issuecomment-1\n", stderr: "" }; }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    await drainCommands(db, { querier: w.gh.querier, permission: async () => PERM.write, slug: SLUG, exec, mint: async () => "token" });
+    assert.equal(posted.length, 1);
+    assert.ok(posted[0]!.includes("@maint") && posted[0]!.includes(ANSWER), posted[0]);
+    const [done] = await commands(w);
+    assert.equal(done?.state, "done");
+    assert.equal(done?.reply, "posted");
+  } finally {
+    await runner.stop();
+  }
 });

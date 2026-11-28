@@ -3,7 +3,7 @@ import { Fragment, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeftIcon, CaretRightIcon } from "@phosphor-icons/react";
 import { t } from "../../../../src/i18n/index.ts";
-import { COMMANDS, CONTROLS, ENTRY_LABEL, WEIGHT_HELP, type CommandDef } from "../../../../src/workflow/vocab.ts";
+import { COMMANDS, CONTROLS, ENTRY_LABEL, HELP_COMMANDS, WEIGHT_HELP, type HelpCommand } from "../../../../src/workflow/vocab.ts";
 import { blockerLabel, stepLabel, stepsFor, type StepName } from "../../../../src/workflow/status.ts";
 import type { Blocker } from "../../../../src/workflow/types.ts";
 import type { ViewProps } from "../../registry/types";
@@ -18,8 +18,8 @@ function useMention(): string {
   return data?.mention ?? "app";
 }
 
-const MAIN = COMMANDS.filter((c) => !c.more);
-const MORE = COMMANDS.filter((c) => c.more);
+const MAIN = HELP_COMMANDS.filter((c) => !c.more);
+const MORE = HELP_COMMANDS.filter((c) => c.more);
 const BLOCKERS: Blocker[] = ["failed-twice", "author-commits"];
 const ITEM = "photocraft#803";
 
@@ -128,21 +128,27 @@ function Start() {
   );
 }
 
-function Surfaces({ c }: { c: CommandDef }) {
+function Surfaces({ c }: { c: HelpCommand }) {
   const mention = useMention();
   const dt = "text-ink/70";
+  // ask is answered on GitHub and in the item's chat.
+  const ask = c.word === "ask";
   return (
     <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
       <dt className={dt}>GitHub</dt>
       <dd className="min-w-0 break-words">
         <Code>{`@${mention} ${c.example}`}</Code>
       </dd>
-      <dt className={dt}>Discord</dt>
-      <dd className="min-w-0 break-words">
-        <Code>{`@AutoCraft ${c.example} ${ITEM}`}</Code>
-      </dd>
-      <dt className={dt}>{t("Agent")}</dt>
-      <dd className="min-w-0 break-words">“{`${c.example}: ${ITEM}`}”</dd>
+      {!ask && (
+        <>
+          <dt className={dt}>Discord</dt>
+          <dd className="min-w-0 break-words">
+            <Code>{`@AutoCraft ${c.example} ${ITEM}`}</Code>
+          </dd>
+          <dt className={dt}>{t("Agent")}</dt>
+          <dd className="min-w-0 break-words">“{`${c.example}: ${ITEM}`}”</dd>
+        </>
+      )}
       <dt className={dt}>{t("App")}</dt>
       <dd className="min-w-0 break-words">{t("{word} in the item's chat", { word: c.example })}</dd>
     </dl>

@@ -10,7 +10,7 @@
 // A command for a list of items is each item's own command: the message on an item the list names holds the command words without
 // the list, so no item's chat carries the other items. A GitHub comment is stored as written, as it stands on GitHub.
 import * as access from "../data/access/index.ts";
-import { linkMessage, loadCommentMessage, recordMessages, setMessageRefusal } from "../data/chat/index.ts";
+import { linkMessage, linkNewestSaid, loadCommentMessage, recordMessages, setMessageRefusal } from "../data/chat/index.ts";
 import type { ChatVia } from "../data/chat/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
@@ -162,5 +162,16 @@ export async function linkingComment<T>(db: Db, commentId: number, login: string
   } finally {
     const m = await saidByComment(db, commentId);
     if (m) await linkSaid(db, [m], { login, via: "github", after });
+  }
+}
+
+/** Links the message a question came in to the Opus turn it was put as (src/conversations/ask.ts), so the chat shows the answer under it. Never throws. */
+export async function linkAskTurn(db: Db, o: { repo: string; number: number; login: string; via: ChatVia; turnId: number; commentId?: number }): Promise<void> {
+  try {
+    const m = o.commentId === undefined ? null : await loadCommentMessage(db, o.commentId);
+    if (m) await linkMessage(db, m.id, { turnId: o.turnId });
+    else await linkNewestSaid(db, { repo: o.repo, number: o.number, author: o.login, via: o.via, turnId: o.turnId });
+  } catch (e) {
+    console.error(`chat: question not linked: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
   }
 }
