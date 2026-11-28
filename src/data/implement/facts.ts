@@ -4,7 +4,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { openItem } from "../mirror/fragments.ts";
-import { startRetryOf } from "../../implement/start-retry.ts";
+import { ownRetryOf, startRetryOf } from "../../implement/start-retry.ts";
 import { ENDED, IMPL_COLS, num, ofRow, parse, roundOf, type ImplRow, type RoundRow } from "./rows.ts";
 import {
   LIVE_STATES,
@@ -59,7 +59,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
       .orderBy("t.id")) as Promise<AttemptRow[]>,
     q.all(k.selectFrom("main.implementation_rounds as r").innerJoin("main.implementations as im", "im.id", "r.implementation_id")
       .select(["r.id", "r.implementation_id", "r.kind", "r.call_id", "r.result", "r.at"])
-      .where("r.kind", "in", ["question", "answer", "guidance", "revise", "start-failed"]).where("im.state", "not in", ENDED)
+      .where("r.kind", "in", ["question", "answer", "guidance", "revise", "start-failed", "retry"]).where("im.state", "not in", ENDED)
       .where((eb: any) => eb.or([byNumber(eb), byPrNumber(eb)])).orderBy("r.id")) as Promise<RoundRow[]>,
     q.all(k.selectFrom("main.implementations as im").select(["im.repo", "im.number"]).where("im.state", "in", [...LIVE_STATES])
       .where((eb: any) => openItem(eb, "im.repo", "im.number")).$if(!!o.repos, (s: any) => s.where(kx.inList(db, "im.repo", o.repos!)))) as Promise<{ repo: string; number: number | string }[]>,
@@ -81,7 +81,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
     if (Number(r.b) === 1) {
       // Rows are in id order: the newest attempt that opened a PR is the one kept.
       const planned = plannedOf(r);
-      out.byPr.set(refKey(r.repo, Number(r.pr_number)), { issue: Number(r.number), attemptId: Number(r.id), state: r.state as ImplementationState, revisedHeads: revisedOf(Number(r.id)), ...(planned && { planned }) } satisfies PrAttempt);
+      out.byPr.set(refKey(r.repo, Number(r.pr_number)), { issue: Number(r.number), attemptId: Number(r.id), state: r.state as ImplementationState, revisedHeads: revisedOf(Number(r.id)), ownRetry: ownRetryOf(roundsOf.get(Number(r.id)) ?? []), ...(planned && { planned }) } satisfies PrAttempt);
     }
   }
   for (const r of attempts) {
@@ -109,6 +109,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
       reviseHeads: revises.flatMap((x) => { const v = x.result as Partial<ReviseRound> | null; return typeof v?.head === "string" && (v.review || v.ci) ? [v.head] : []; }),
       lastRevise: (revises.at(-1)?.result ?? null) as ReviseRound | null,
       startRetry: startRetryOf({ state: r.state as ImplementationState, rounds: rs }),
+      ownRetry: ownRetryOf(rs),
       textCounts: counts,
       prAttempts: (prAttempts.get(refKey(r.repo, Number(r.number))) ?? []).sort((x, y) => y.id - x.id),
     });
@@ -163,6 +164,33 @@ export async function loadImplementStamps(db: Db, keys: KeySource): Promise<Map<
   return out;
 }
 
+/**
+ * Per repo, the newest due time (ms) at or before `now` of AutoCraft's own retries of its live attempts: a retry after a stop of
+ * our own (start-retry.ts ownRetryOf) or a new start after a workspace that did not start (startRetryOf). It moves when a retry
+ * falls due, which the implement lane reads so a due retry runs although the lane's last job was idle. 1 statement.
+ */
+export async function loadDueOwnRetries(db: Db, now: number): Promise<Map<string, number>> {
+  const q = queryDb(db);
+  const k = q.k as any;
+  const rows = await q.all(k.selectFrom("main.implementation_rounds as r").innerJoin("main.implementations as im", "im.id", "r.implementation_id")
+    .select(["im.repo", "im.state", "r.id", "r.implementation_id", "r.kind", "r.call_id", "r.result", "r.at"])
+    .where("r.kind", "in", ["question", "answer", "guidance", "retry", "start-failed"]).where("im.state", "not in", ENDED)
+    .where((eb: any) => eb.exists(eb.selectFrom("main.implementation_rounds as x").select(eb.lit(1).as("one")).whereRef("x.implementation_id", "=", "im.id").where("x.kind", "in", ["retry", "start-failed"])))
+    .orderBy("r.id")) as (RoundRow & { repo: string; state: ImplementationState })[];
+  const byImpl = new Map<number, { repo: string; state: ImplementationState; rounds: ReturnType<typeof roundOf>[] }>();
+  for (const r of rows) {
+    const id = Number(r.implementation_id);
+    (byImpl.get(id) ?? byImpl.set(id, { repo: r.repo, state: r.state, rounds: [] }).get(id)!).rounds.push(roundOf(r));
+  }
+  const out = new Map<string, number>();
+  for (const { repo, state, rounds } of byImpl.values()) {
+    for (const due of [ownRetryOf(rounds)?.dueAt, startRetryOf({ state, rounds })?.dueAt]) {
+      if (due !== undefined && due <= now && due > (out.get(repo) ?? -1)) out.set(repo, due);
+    }
+  }
+  return out;
+}
+
 /** The repo of each implementation id, for the visibility check of a screenshot. */
 export async function loadImplementationRepos(db: Db, ids: number[]): Promise<Map<number, string>> {
   if (ids.length === 0) return new Map();
@@ -171,8 +199,11 @@ export async function loadImplementationRepos(db: Db, ids: number[]): Promise<Ma
   return new Map(rows.map((r) => [Number(r.id), r.repo]));
 }
 
-/** The newest `n` finished attempts per repo after the repo's `since` that ended in a PR or in `stuck`/`failed`, newest first. 1 statement. */
-export async function loadStuckStreaks(db: Db, sinceByRepo: Map<string, string>, n: number): Promise<Map<string, StuckStreakRow[]>> {
+/**
+ * The newest `n` finished attempts per repo after the repo's `since` that ended in a PR or in `stuck`/`failed`, newest first. An
+ * attempt whose newest question round is a stuck blocker with a cause in `skip` is left out. 1 statement.
+ */
+export async function loadStuckStreaks(db: Db, sinceByRepo: Map<string, string>, n: number, skip: readonly string[] = []): Promise<Map<string, StuckStreakRow[]>> {
   const out = new Map<string, StuckStreakRow[]>();
   if (sinceByRepo.size === 0 || n <= 0) return out;
   const q = queryDb(db);
@@ -180,10 +211,21 @@ export async function loadStuckStreaks(db: Db, sinceByRepo: Map<string, string>,
   const v = kx.valuesTable(db, [...sinceByRepo].map(([repo, since]) => ({ repo, since })), { repo: "text", since: "text" }, "w");
   const rows = await q.all(k.selectFrom(k.selectFrom("main.implementations as im").innerJoin(v, (j: any) => j.onRef("w.repo", "=", "im.repo"))
     .select((eb: any) => ["im.repo as repo", "im.number as number", "im.attempt as attempt", "im.state as state", "im.pr_number as pr_number",
+      eb.selectFrom("main.implementation_rounds as nq").select("nq.result").whereRef("nq.implementation_id", "=", "im.id").where("nq.kind", "=", "question").orderBy("nq.id", "desc").limit(1).as("question"),
       eb.fn.agg("row_number").over((o: any) => o.partitionBy("im.repo").orderBy("im.updated_at", "desc").orderBy("im.id", "desc")).as("rn")])
     .where((eb: any) => eb("im.updated_at", ">", eb.ref("w.since")))
-    .where((eb: any) => eb.or([eb("im.pr_number", "is not", null), eb("im.state", "in", ["stuck", "failed"])])).as("t"))
-    .select(["t.repo", "t.number", "t.attempt", "t.state", "t.pr_number"]).where("t.rn", "<=", n).orderBy("t.repo").orderBy("t.rn")) as { repo: string; number: number | string; attempt: number | string; state: ImplementationState; pr_number: number | string | null }[];
-  for (const r of rows) (out.get(r.repo) ?? out.set(r.repo, []).get(r.repo)!).push({ number: Number(r.number), attempt: Number(r.attempt), state: r.state, prNumber: num(r.pr_number) });
+    .where((eb: any) => eb.or([eb("im.pr_number", "is not", null), eb("im.state", "in", ["stuck", "failed"])]))
+    .$if(skip.length > 0, (s: any) => s.where((eb: any) => eb.not(eb.exists(eb.selectFrom("main.implementation_rounds as qr").select(eb.lit(1).as("one"))
+      .whereRef("qr.implementation_id", "=", "im.id").where("qr.kind", "=", "question")
+      .where(kx.inList(db, kx.jsonText(db, "qr.result", "$.cause"), skip))
+      .where((x: any) => x.not(x.exists(x.selectFrom("main.implementation_rounds as later").select(x.lit(1).as("one"))
+        .whereRef("later.implementation_id", "=", "im.id").where("later.kind", "=", "question").whereRef("later.id", ">", "qr.id"))))))))
+    .as("t"))
+    .select(["t.repo", "t.number", "t.attempt", "t.state", "t.pr_number", "t.question"]).where("t.rn", "<=", n).orderBy("t.repo").orderBy("t.rn")) as { repo: string; number: number | string; attempt: number | string; state: ImplementationState; pr_number: number | string | null; question: string | null }[];
+  for (const r of rows) {
+    const q = parse<{ stuck?: unknown; cause?: unknown; retried?: unknown }>(r.question);
+    const stuck = q?.stuck === true && typeof q.cause === "string" ? { cause: q.cause, retried: typeof q.retried === "number" ? q.retried : null } : null;
+    (out.get(r.repo) ?? out.set(r.repo, []).get(r.repo)!).push({ number: Number(r.number), attempt: Number(r.attempt), state: r.state, prNumber: num(r.pr_number), stuck });
+  }
   return out;
 }

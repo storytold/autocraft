@@ -4,7 +4,7 @@
 import type { ItemShown, HistoryCall, ImplementationCall, ImplementationCheckPart, ImplementationCheckRound, ImplementationQuestion, ItemImplementation, TimelineEntry } from "../../../web/src/api/types.ts";
 import type { CheckPart, CheckRound } from "../../implement/checks.ts";
 import type { TurnRound } from "../../implement/session.ts";
-import type { AskFailedRound, AnswerRound, Implementation, ImplementationRound, PlanReply, QuestionRound } from "../../data/implement/types.ts";
+import type { AskFailedRound, AnswerRound, Implementation, ImplementationRound, PlanReply, QuestionRound, RetryRound } from "../../data/implement/types.ts";
 import { loadItemImplementation, type ImplementationFacts } from "../../data/views/item-implementation.ts";
 import type { CommentOut } from "../../data/mirror/types.ts";
 import { clip, type Ctx } from "./trace.ts";
@@ -203,6 +203,16 @@ export function implementationLines(c: Ctx, d: ImplementationData | null, line: 
       const t = line(id, r.at, "harness", "AutoCraft", "job", "The workspace was made again");
       t.tone = "warn";
       if (c.staff && x?.reason) t.lines = [x.reason];
+      out.push(t);
+    } else if (r.kind === "retry") {
+      const x = r.result as Partial<RetryRound> | null;
+      if (x?.person) {
+        out.push(line(id, r.at, "harness", "AutoCraft", "job", "Tried again on a person's answer; the revision starts over on the change last pushed"));
+        continue;
+      }
+      const t = line(id, r.at, "harness", "AutoCraft", "job", "Stopped on a failure of AutoCraft's own; it goes on by itself after a wait");
+      t.tone = "warn";
+      if (c.staff && x?.detail) t.lines = [x.detail];
       out.push(t);
     } else if (r.kind === "ask-failed") {
       const x = r.result as Partial<AskFailedRound> | null;

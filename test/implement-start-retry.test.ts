@@ -1,21 +1,25 @@
-// A workspace that did not start before the plan call is AutoCraft's to retry, not a person's decision: the attempt waits on a
-// backoff and is planned again, and only the failure after the retries asks a maintainer. One that got stuck after a model call
-// still asks.
+// A stop on a failure of AutoCraft's own (a workspace that did not start, a lost session) is AutoCraft's to retry, not a person's
+// decision: the attempt waits on a backoff and goes on, it does not count toward the repo's Implement breaker, and only the stop
+// after the retries asks a maintainer. A stop on the item's own cause asks at once and counts.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { implementStep } from "../src/core/decide-item.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
 import type { ItemFacts } from "../src/core/plan.ts";
+import { loadTrip } from "../src/data/control/trips.ts";
 import { startFailed } from "../src/implement/plan.ts";
-import { IMPLEMENT_START_RETRIES } from "../src/implement/start-retry.ts";
-import { markStuck } from "../src/implement/stuck.ts";
+import { IMPLEMENT_RETRIES, IMPLEMENT_START_RETRIES } from "../src/implement/start-retry.ts";
+import { markStuck, STUCK_IN_A_ROW, tripIfStuckInARow } from "../src/implement/stuck.ts";
+import type { PlanReply } from "../src/implement/types.ts";
 import { currentImplementation, roundsOf, setImplementationState, startImplementation } from "./implement-rows.ts";
 import { OPERATOR, world } from "./world-db.ts";
 
 const ENV_ERROR = "2 kubernetes environments are enabled; implementations need exactly one";
+const LATER = 24 * 3600_000;
 
-test("a failed workspace start retries on a backoff without asking; after the retries, or after a model call, a maintainer is asked", async () => {
-  const w = await (await (await (await world()).repo()).issue(7)).issue(9);
+test("AutoCraft's own stops retry on a backoff without asking or counting toward the breaker; the item's own stops ask and count", async () => {
+  let w = await (await world()).repo();
+  for (const n of [7, 9, 11, 13, 15]) w = await w.issue(n);
   const db = w.db;
   // Facts as a queued issue in scope sees them, at `ms`.
   const step = async (n: number, ms?: number) => {
@@ -24,23 +28,54 @@ test("a failed workspace start retries on a backoff without asking; after the re
     return implementStep(queued);
   };
   const waitWho = (s: Awaited<ReturnType<typeof step>>) => (s && "wait" in s ? s.wait.who : null);
+  const asked = async (id: number) => (await roundsOf(db, id)).some((r) => r.kind === "question");
+  const tripped = async () => (await loadTrip(db, "implement:app"))?.active === true;
 
-  const impl = await startImplementation(db, { repo: "app", number: 7, queuedBy: OPERATOR, textHash: "h" });
-  await startFailed(db, impl, ENV_ERROR);
+  // A workspace that did not start: fast start retries, then the slower retries of a stop of our own.
+  const started = await startImplementation(db, { repo: "app", number: 7, queuedBy: OPERATOR, textHash: "h" });
+  await startFailed(db, started, ENV_ERROR);
   assert.equal((await currentImplementation(db, "app", 7))?.state, "planning");
-  assert.ok(!(await roundsOf(db, impl.id)).some((r) => r.kind === "question"), "nothing is asked");
-  assert.equal(waitWho(await step(7)), "system", "the retry waits on its backoff");
-  assert.deepEqual(await step(7, Date.now() + 24 * 3600_000), { bucket: "plan" }, "after the backoff the plan runs again");
+  assert.equal(waitWho(await step(7)), "system", "the start retry waits on its backoff");
+  assert.deepEqual(await step(7, Date.now() + LATER), { bucket: "plan" }, "after the backoff the plan runs again");
+  for (let i = 0; i < IMPLEMENT_START_RETRIES; i++) await startFailed(db, started, ENV_ERROR);
+  assert.equal((await currentImplementation(db, "app", 7))?.state, "planning", "the failure after the start retries is retried too");
+  assert.ok(!await asked(started.id), "nothing is asked");
+  assert.equal(waitWho(await step(7)), "system");
 
-  for (let i = 1; i < IMPLEMENT_START_RETRIES; i++) await startFailed(db, impl, ENV_ERROR);
-  assert.equal((await currentImplementation(db, "app", 7))?.state, "planning", "still retried within the bound");
-  await startFailed(db, impl, ENV_ERROR);
-  assert.equal((await currentImplementation(db, "app", 7))?.state, "stuck", "the failure after the retries is stuck");
-  assert.equal(waitWho(await step(7, Date.now() + 24 * 3600_000)), "person", "and asks a maintainer, also later");
+  // Failing checks are the item's own stop: asked at once, and counted toward the breaker.
+  const plan = { summary: "Return None for an empty slice" } as unknown as PlanReply;
+  const failing = async (n: number) => {
+    const impl = await startImplementation(db, { repo: "app", number: n, queuedBy: OPERATOR, textHash: "h" });
+    await setImplementationState(db, impl.id, "checking", { planCallId: 41, plan });
+    const end = await markStuck(db, (await currentImplementation(db, "app", n))!, "checks-failing", "2 findings");
+    assert.equal(end.retry, null);
+    assert.equal(waitWho(await step(n)), "person", "failing checks ask a maintainer");
+  };
+  await failing(11);
+  await failing(13);
+  assert.ok(!await tripped());
 
-  // A workspace lost after the plan call ran keeps asking.
-  const built = await startImplementation(db, { repo: "app", number: 9, queuedBy: OPERATOR, textHash: "h" });
-  await setImplementationState(db, built.id, "implementing", { planCallId: 41 });
-  await markStuck(db, (await currentImplementation(db, "app", 9))!, "workspace-lost", "workspace 4 is failed");
-  assert.equal(waitWho(await step(9)), "person");
+  // A session the Task Runner kept losing: the attempt starts the session over after the backoff, without asking.
+  const lost = await startImplementation(db, { repo: "app", number: 9, queuedBy: OPERATOR, textHash: "h" });
+  const stopAt = async (cause: "session-lost" | "no-report") => {
+    await setImplementationState(db, lost.id, "implementing", { planCallId: 41, plan, workspaceId: null });
+    return await markStuck(db, (await currentImplementation(db, "app", 9))!, cause, "the session started over 2 times");
+  };
+  for (let i = 1; i <= IMPLEMENT_RETRIES; i++) {
+    const end = await stopAt("session-lost");
+    assert.equal(end.retry?.n, i);
+    assert.equal((await currentImplementation(db, "app", 9))?.state, "planned", "the session starts over from the plan");
+    assert.ok(!await asked(lost.id), "nothing is asked");
+    assert.equal(waitWho(await step(9)), "system", "the retry waits on its backoff");
+    assert.deepEqual(await step(9, Date.now() + LATER), { bucket: "build" }, "after the backoff the build runs again");
+  }
+  assert.ok((await stopAt("no-report")).retry, "a failure that is not the Task Runner's has retries of its own");
+  assert.equal((await stopAt("session-lost")).retry, null, "the stop after the retries is not retried");
+  assert.equal((await currentImplementation(db, "app", 9))?.state, "stuck");
+  assert.equal(waitWho(await step(9, Date.now() + LATER)), "person", "it asks a maintainer");
+
+  // Our own stop, newer than the item's two, neither counts toward the breaker nor breaks the row.
+  assert.equal(await tripIfStuckInARow(db, "app"), false, "our own stop does not make a third in the row");
+  await failing(15);
+  assert.ok(await tripped(), `${STUCK_IN_A_ROW} stops on the item's own cause in a row trip the breaker`);
 });

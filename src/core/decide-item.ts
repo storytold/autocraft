@@ -6,7 +6,7 @@ import { isWork, unassignActions } from "./assignment.ts";
 import { IMPLEMENT_START_RETRIES, issueReviewDueAt } from "./backoff.ts";
 import { permitted } from "./authority.ts";
 import type { WaitCode } from "./codes.ts";
-import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, refusedWait, standingWait, TELLS, waitFields, type Wait } from "./decide.ts";
+import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, ownRetryWait, refusedWait, standingWait, TELLS, waitFields, type Wait } from "./decide.ts";
 import { REFEREE_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
 import { unsentAsk } from "./rules.ts";
 import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts } from "./plan.ts";
@@ -45,6 +45,8 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   }
   const retry = row!.startRetry;
   if (retry && f.now < retry.dueAt) return { wait: system("implement-start-retry", `a new workspace start at ${new Date(retry.dueAt).toISOString().slice(11, 16)} UTC (retry ${retry.failures} of ${IMPLEMENT_START_RETRIES})`) };
+  const own = row!.ownRetry;
+  if (own && f.now < own.dueAt) return { wait: ownRetryWait(own) };
   if (state === "planning") return due("plan");
   if (state === "asked") {
     if (row!.textChanged || row!.newCommentAfterQuestion || row!.decisionAnswered) return due("plan");

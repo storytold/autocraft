@@ -29,8 +29,9 @@ export type ImplementBucket = (typeof IMPLEMENT_BUCKETS)[number];
  * `answer`: a person answered a question or stuck recommendation (AnswerRound).
  * `revise`: a revision of our open PR starts (ReviseRound); the turns and checks after it belong to that revision.
  * `start-failed`: the plan bucket's workspace did not start, before its model call (StartFailedRound); AutoCraft starts it again itself.
+ * `retry`: the attempt stopped on a failure of AutoCraft's own and goes on by itself after a backoff (RetryRound), instead of asking.
  */
-export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question", "guidance", "workspace", "ask-failed", "revise", "answer", "start-failed"] as const;
+export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question", "guidance", "workspace", "ask-failed", "revise", "answer", "start-failed", "retry"] as const;
 export type RoundKind = (typeof ROUND_KINDS)[number];
 
 /** One `implementations` row. JSON columns are parsed; a column that does not parse reads as null. */
@@ -86,13 +87,24 @@ export type AnswerRound = { by: string; via: string; at: string; option?: string
 export type AskFailedRound = { planRound: number; error: string };
 /** A `start-failed` round: why the workspace did not start. */
 export type StartFailedRound = { error: string };
+/**
+ * A `retry` round: the stuck cause AutoCraft retries itself, its detail, whether a Task Runner lost the call, the states it went
+ * from and to, and `reset` for a revision that starts over on a tree reset to the change last pushed. `person`: the round of a
+ * person's Try again on a stuck revision (`by` answered), which resets the tree too; it is no retry of AutoCraft's own.
+ */
+export type RetryRound = { cause: string; detail: string | null; runner: boolean; from: string; to: string; reset?: boolean; person?: true; by?: string | null };
 export type PlanQuestion = { audience: QuestionAudience; text: string; options: { label: string; hint: string }[]; recommended: string | null };
 
 /**
  * The result of a `revise` round: the PR head it revises and why (the review's fixes, red CI or both), the commit our last
  * push made (the revision's push carries the change since it onto the PR's head), and the follow-up it sends the session.
+ * `verified`: the hash of the workspace diff the revision's first turn started from, set once it was checked to be the change
+ * last pushed (the attempt's `diffHash`); the push is refused without it. A copy of the round for a new revision leaves it out.
  */
-export type ReviseRound = { prNumber: number; head: string; from: string; review: boolean; ci: boolean; message: string };
+export type ReviseRound = { prNumber: number; head: string; from: string; review: boolean; ci: boolean; message: string; verified?: string };
+
+/** The `revise` round a new revision starts with, copied from an earlier one: without its start check (`verified`). */
+export const reviseCopy = (r: ReviseRound): ReviseRound => ({ prNumber: r.prNumber, head: r.head, from: r.from, review: r.review, ci: r.ci, message: r.message });
 
 /** The plan call's reply: ready to implement, or the questions that come first. */
 export type PlanReply = {
@@ -145,12 +157,15 @@ export type IssueAttempt = {
   lastRevise: ReviseRound | null;
   /** AutoCraft's own retry of a failed workspace start (src/implement/start-retry.ts): the failures in a row and when the next start is due; null when none is due. */
   startRetry: { failures: number; dueAt: number } | null;
+  /** AutoCraft's own retry of a stopped attempt (src/implement/start-retry.ts): its newest retry round's cause, its number and when it is due; null when none stands. */
+  ownRetry: OwnRetry | null;
   /** Attempts of the issue per text_hash; empty while its only attempt is neither failed nor stuck. */
   textCounts: Record<string, number>;
   /** Attempts with a PR, newest id first; the plan each was built from only with `withPlans`. */
   prAttempts: { id: number; prNumber: number; state: ImplementationState; createdAt: string; diffStat: string | null; plan?: PlanReply | null }[];
 };
-export type PrAttempt = { issue: number; attemptId: number; state: ImplementationState; revisedHeads: string[]; planned?: IssueAttempt["planned"] };
+export type PrAttempt = { issue: number; attemptId: number; state: ImplementationState; revisedHeads: string[]; ownRetry: OwnRetry | null; planned?: IssueAttempt["planned"] };
+export type OwnRetry = { cause: string; n: number; dueAt: number };
 export type ImplementFacts = {
   byIssue: Map<RefKey, IssueAttempt>;
   /** The latest attempt that opened each PR, ended ones too. */
@@ -160,7 +175,8 @@ export type ImplementFacts = {
 };
 export type ImplementationView = { impl: Implementation; attempts: number; rounds: ImplementationRound[] };
 export type ImplementStamp = { attempts: { id: number; state: ImplementationState; updatedAt: string }[]; rounds: { n: number; newest: string | null; length: number } };
-export type StuckStreakRow = { number: number; attempt: number; state: ImplementationState; prNumber: number | null };
+/** `stuck`: the stuck blocker the attempt's newest question round is, with its cause and AutoCraft's own retries before it; null when that round is none. */
+export type StuckStreakRow = { number: number; attempt: number; state: ImplementationState; prNumber: number | null; stuck: { cause: string; retried: number | null } | null };
 
 export type StartAttempt = { repo: string; number: number; queuedBy: string; textHash: string; baseSha?: string | null };
 export type AttemptStep = {

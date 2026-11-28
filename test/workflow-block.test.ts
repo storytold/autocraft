@@ -165,7 +165,7 @@ test("a stuck revision of an approved implementation stops the merge leg of its 
   const w = await implementation(true);
   await advanceWorkflows(w.db);
   assert.equal(await activeLegs(w, 8), 1);
-  await markStuck(w.db, (await currentAttempt(w.db, "app", 7))!.impl, "session-failed", null);
+  await markStuck(w.db, (await currentAttempt(w.db, "app", 7))!.impl, "blocked", null);
   await advanceWorkflows(w.db);
   const wf = (await liveWorkflow(w.db, "app", 7))!;
   assert.deepEqual([wf.state, wf.blocker, await activeLegs(w, 8)], ["blocked", "failed-twice", 0]);

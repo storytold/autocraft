@@ -43,12 +43,12 @@ import {
   awaitTurn, findingsMessage, LOST_REPLY_MESSAGE, needsDependency, queueTurn, realCalls, renderSession, REPORT_MESSAGE, sessionInput, settleOrphan,
   type CallDeps, type TurnPurpose, type TurnRound,
 } from "./session.ts";
-import { markStuck, type StuckCause } from "./stuck.ts";
+import { markStuck, stuckLine, type StuckCause } from "./stuck.ts";
 import { addRounds, attemptNow, currentAttempt, roundOf, setRound, writeStep, type Attempt, type NewRound } from "./attempt.ts";
 import { implTitle } from "./template.ts";
 import { IMPLEMENT_WORKSPACE_DEADLINE_SEC, implementEnv } from "./workspace.ts";
 import { fixesToMake } from "../core/review-blocking.ts";
-import type { Implementation, ImplementationRound, ReviseRound } from "./types.ts";
+import type { Implementation, ImplementationRound, RetryRound, ReviseRound } from "./types.ts";
 
 /** The audit login of the stage's writes. */
 const ACTOR = "implement";
@@ -99,11 +99,14 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const sha256 = (s: string): string => createHash("sha256").update(Buffer.from(s)).digest("hex");
 const json = (v: unknown): string => JSON.stringify(v, null, 1).replace(/</g, "\\u003c");
 
+/** `retry: false`: a stop of our own that a later run cannot get past, which asks at once (markStuck). */
 class Stuck extends Error {
   cause_: StuckCause;
-  constructor(cause: StuckCause, detail: string) {
+  retry: boolean;
+  constructor(cause: StuckCause, detail: string, o: { retry?: boolean } = {}) {
     super(detail);
     this.cause_ = cause;
+    this.retry = o.retry ?? true;
   }
 }
 
@@ -119,7 +122,8 @@ const checksOf = (rounds: ImplementationRound[]) => rounds.filter((r) => r.kind 
 const refusalKind = (r: ImplementationRound) => (r.kind === "refusal" ? (r.result as { kind?: string } | null)?.kind ?? null : null);
 const noVerdict = (c: CheckRound) => !c.findings.length && !c.needsDependency && (c.noVerdict ?? []).length > 0;
 
-type WorkspaceRound = { workspaceId: number; reason: string; from: number; restored: boolean };
+/** `reset`: the round marks the tree reset to the change last pushed, for a revision AutoCraft starts over after a stop of its own. */
+type WorkspaceRound = { workspaceId: number; reason: string; from: number; restored: boolean; reset?: true };
 
 // ---- the follow-up -----------------------------------------------------------------------------------------------------
 
@@ -166,8 +170,7 @@ async function reviseUnit(run: BuildRun, cur: Attempt, deps: ReviseDeps): Promis
     if (!(e instanceof Stuck)) throw e;
     const now = (await attemptNow(db, impl))?.impl ?? impl;
     if (now.state !== "revising" && now.state !== "pr-opened") return `${ref(impl)}: ${now.state} meanwhile (${e.cause_}: ${e.message})`;
-    await markStuck(db, now, e.cause_, e.message || null);
-    return `${ref(impl)}: revision of #${impl.prNumber} stuck (${e.cause_}${e.message ? `: ${e.message}` : ""})`;
+    return `${ref(impl)}: revision of #${impl.prNumber} ${stuckLine(e.cause_, await markStuck(db, now, e.cause_, e.message || null, { retry: e.retry }))}`;
   }
 }
 
@@ -188,9 +191,9 @@ async function start(run: BuildRun, deps: ReviseDeps, impl: Implementation, roun
   const due = f ? reviseOf(f) : null;
   if (!f?.head || !due) return `#${pr}: no revision is due at its head`;
   const head = f.head;
-  if (!impl.branch) throw new Stuck("push-failed", "the attempt has no branch");
+  if (!impl.branch) throw new Stuck("push-failed", "the attempt has no branch", { retry: false });
   const from = (await lastPush(db, impl, impl.branch))?.commit;
-  if (!from) throw new Stuck("push-failed", `no push of this implementation to ${impl.branch} is on record`);
+  if (!from) throw new Stuck("push-failed", `no push of this implementation to ${impl.branch} is on record`, { retry: false });
   let review: { reason: string; fixes: Fix[] } | null = null;
   if (due.review) {
     const at = [...(await loadReviewsAt(db, [{ repo: impl.repo, number: pr, head }])).values()][0];
@@ -270,7 +273,8 @@ async function readyWorkspace(run: BuildRun, deps: ReviseDeps, impl: Implementat
     }
     await sleep(READY_POLL_MS);
   }
-  await restore(run, deps, impl, wsId);
+  // A reset still to be made rebuilds the tree from the cache, so a checkpoint of the stopped turns is not restored first.
+  if (!resetPending(await roundsNow(db, impl))) await restore(run, deps, impl, wsId);
   return { wsId, base, impl };
 }
 
@@ -307,6 +311,82 @@ async function restore(run: BuildRun, deps: ReviseDeps, impl: Implementation, ws
   if (sha256(diff) !== impl.diffHash && !(storedAt && storedAt > startedAt)) throw new Stuck("workspace-lost", `the checkpoint of workspace ${w.from} is older than the change last pushed`);
   await setRound(db, impl.id, round.id, { ...w, restored: true });
   run.log(`${ref(impl)}: workspace ${wsId} restored from the checkpoint of workspace ${w.from}`);
+}
+
+/**
+ * Whether a reset of the tree to the change last pushed is still to be made: no `workspace` round with `reset` follows the newest
+ * `retry` round with `reset`, whatever lies between (a stuck question on a failed reset and its Try again among them).
+ */
+export function resetPending(rounds: readonly ImplementationRound[]): boolean {
+  const flagged = (r: ImplementationRound, kind: string) => r.kind === kind && (r.result as { reset?: unknown } | null)?.reset === true;
+  const at = rounds.findLastIndex((r) => flagged(r, "retry"));
+  return at >= 0 && !rounds.slice(at + 1).some((r) => flagged(r, "workspace"));
+}
+
+/**
+ * A revision AutoCraft starts over after a stop of its own (a `retry` round with `reset`): the tree goes back to the change last
+ * pushed before the revision's first turn, so the revise message reads against what is on the PR and nothing of the stopped
+ * turns stays. The change is rebuilt from the cache and checked to apply onto the workspace's base before the live tree is
+ * touched; its `workspace` round marks the reset, and the turns after it start a fresh session. A tree that cannot be rebuilt
+ * asks, and the reset stays due until one is made (resetPending), also after a Try again.
+ */
+async function resetToPushed(run: BuildRun, deps: ReviseDeps, impl: Implementation, wsId: number, base: string): Promise<void> {
+  const db = run.db;
+  const all = await roundsNow(db, impl);
+  if (!resetPending(all)) return;
+  const req = all.filter((r) => r.kind === "revise").at(-1)!.result as ReviseRound;
+  const lost = (why: string) => new Stuck("workspace-lost", `the tree could not be reset to the change last pushed: ${why}`, { retry: false });
+  if (!impl.baseSha || !impl.branch) throw lost("the attempt has no base commit or branch");
+  if (!SHA.test(base)) throw lost(`the workspace's base commit ${base} is not a commit id`);
+  const git = new Git(deps.exec, deps.root, impl.repo);
+  if (!await git.fetchBranch(ownerOf(impl.repo), impl.repo, await branchOf(db, impl.repo), impl.baseSha)) throw lost("the base commit is no longer in the repository");
+  const tree = await builtTree(git, deps.root, await pushesOf(db, impl, impl.branch), req.from);
+  if (!tree) throw lost(`the change as of our push ${short(req.from)} cannot be rebuilt`);
+  const diff = await git.must(["diff-tree", "-p", "--binary", "-r", "--no-renames", "--no-ext-diff", "--no-textconv", impl.baseSha, tree]);
+  const api = deps.api(db);
+  const ok = (r: Awaited<ReturnType<typeof execWs>>) => r.header?.kind === "status" && r.header.state === "exited" && r.header.exit === 0;
+  const bash = async (script: string, args: Record<string, unknown>) =>
+    await execWs(db, api, wsId, ["run", "300", "--", "bash", "-c", script, "reset", base, RESTORE_FILE], { tool: "checkpoint", args: { reset: true, ...args }, timeoutMs: 310_000 });
+  if (diff.trim()) {
+    const put = await execWs(db, api, wsId, ["put", RESTORE_FILE], { tool: "checkpoint", args: { reset: true, bytes: diff.length }, stdin: Buffer.from(diff), timeoutMs: 120_000 });
+    if (put.header?.kind !== "ok") throw lost(`the change could not be copied in: ${put.error ?? describeHeader(put.header)}`);
+    // Checked onto the base in an index of its own, so the live tree is left alone when it does not apply.
+    const check = await bash(`cd /work/src && export GIT_INDEX_FILE=/work/.ws/reset-check.index && git read-tree "$1" && git apply --cached --check --binary --whitespace=nowarn "$2"; s=$?; rm -f "$GIT_INDEX_FILE"; exit $s`, { check: true });
+    if (!ok(check)) throw lost(`the change does not apply onto the base (${check.error ?? describeHeader(check.header)})`);
+  }
+  // A hard reset to the base drops staged edits, staged new files and commits too; ignored build output stays.
+  const clean = await bash(`cd /work/src && git reset -q --hard "$1" && git clean -fdq`, { clean: true });
+  if (!ok(clean)) throw lost(clean.error ?? describeHeader(clean.header));
+  if (diff.trim()) {
+    const r = await bash(`cd /work/src && git apply --binary --whitespace=nowarn "$2"`, { apply: true });
+    if (!ok(r)) throw lost(`the change does not apply (${r.error ?? describeHeader(r.header)})`);
+  }
+  const d = await workspaceDiff(db, api, wsId);
+  if (!d.ok) throw new Error(`workspace ${wsId}: ${d.reason}`);
+  if (d.base !== impl.baseSha) throw lost(`the workspace is at ${short(d.base)}, not the attempt's base commit ${short(impl.baseSha)}`);
+  if (sha256(d.diff) !== impl.diffHash) throw lost("the tree is not the change last pushed");
+  await addRounds(db, impl.id, [{ kind: "workspace", result: { workspaceId: wsId, reason: "the tree was reset to the change last pushed", from: wsId, restored: true, reset: true } satisfies WorkspaceRound }]);
+  run.log(`${ref(impl)}: workspace ${wsId} reset to the change last pushed (${short(req.from)}); the revision starts over`);
+}
+
+/**
+ * The revision's start check, before its first turn: the workspace diff is the change last pushed (the attempt's `diffHash`)
+ * against the attempt's base commit, so no session revises, and no push carries, a tree without it. The check is kept on the
+ * `revise` round (`verified`), which the push requires. A tree that is not the change last pushed is a stop of our own, whose
+ * retry resets the tree; a workspace on another base asks.
+ */
+async function verifyStart(run: BuildRun, deps: ReviseDeps, impl: Implementation, wsId: number): Promise<void> {
+  const db = run.db;
+  const all = await roundsNow(db, impl);
+  if (turnsOf(epochOf(all)).length) return;
+  const round = all.filter((r) => r.kind === "revise").at(-1)!;
+  const d = await workspaceDiff(db, deps.api(db), wsId);
+  if (!d.ok) throw new Error(`workspace ${wsId}: ${d.reason}`);
+  if (d.base !== impl.baseSha) throw new Stuck("workspace-lost", `workspace ${wsId} is at ${short(d.base)}, not the attempt's base commit ${short(impl.baseSha ?? "")}`, { retry: false });
+  const hash = sha256(d.diff);
+  if (hash !== impl.diffHash) throw new Stuck("workspace-lost", `the tree of workspace ${wsId} is not the change last pushed, so the revision does not start on it`);
+  const req = round.result as ReviseRound;
+  if (req.verified !== hash) await setRound(db, impl.id, round.id, { ...req, verified: hash } satisfies ReviseRound);
 }
 
 /** The revision's latest `workspace` round, or null. */
@@ -354,7 +434,9 @@ async function nextStep(db: Db, impl: Implementation, base: string, req: ReviseR
   }
   const after = live.filter((x) => x.id > last.id);
   const refused = after.filter((x) => refusalKind(x) === "diff").at(-1);
-  const since = checksOf(after).map((x) => x.result as CheckRound);
+  // AutoCraft's own retry of checks without a verdict runs them afresh.
+  const retried = live.filter((x) => x.kind === "retry" && (x.result as Partial<RetryRound> | null)?.cause === "checks-no-verdict").at(-1);
+  const since = checksOf(after.filter((x) => !retried || x.id > retried.id)).map((x) => x.result as CheckRound);
   const c = since.at(-1);
   if (refused && (!c || refused.id > checksOf(after).at(-1)!.id)) return { turn: { purpose: "findings", stdin: undoMessage((refused.result as { problems?: string[] }).problems ?? []), parentId: last.callId! } };
   if (!c || (noVerdict(c) && since.length < 2)) return { checks: true };
@@ -374,6 +456,8 @@ async function revise(run: BuildRun, deps: ReviseDeps, impl: Implementation): Pr
   const db = run.db;
   const ws = await readyWorkspace(run, deps, impl);
   impl = ws.impl;
+  await resetToPushed(run, deps, impl, ws.wsId, ws.base);
+  await verifyStart(run, deps, impl, ws.wsId);
   const pod = deps.pod(db, ws.wsId, run.cancelled);
   for (let n = 0;;) {
     const all = await roundsNow(db, impl);
@@ -427,10 +511,12 @@ async function pushStep(run: BuildRun, deps: ReviseDeps, impl: Implementation, w
   const db = run.db;
   const d = await workspaceDiff(db, deps.api(db), ws.wsId);
   if (!d.ok) return await pushFailed(db, impl, d.reason, all);
-  if (d.base !== impl.baseSha) throw new Stuck("push-failed", `the workspace diff is against ${short(d.base)}, not the attempt's base commit ${short(impl.baseSha ?? "")}`);
+  if (d.base !== impl.baseSha) throw new Stuck("push-failed", `the workspace diff is against ${short(d.base)}, not the attempt's base commit ${short(impl.baseSha ?? "")}`, { retry: false });
+  // Only a revision that started from the change last pushed may push: its delta would otherwise undo that change.
+  if (!impl.diffHash || req.verified !== impl.diffHash) throw new Stuck("workspace-lost", "the revision did not start from a tree checked to hold the change last pushed");
   if (sha256(d.diff) !== checks.diffHash) {
     // The tree is not the one the last clean checks ran on: they run again on it, once.
-    if (refusalOf(all).some((x) => x === "recheck")) throw new Stuck("push-failed", "the workspace changed after the checks, twice");
+    if (refusalOf(all).some((x) => x === "recheck")) throw new Stuck("push-failed", "the workspace changed after the checks, twice", { retry: false });
     const recheck: NewRound = { kind: "refusal", result: { kind: "recheck", reason: "the workspace changed after the last clean checks" } };
     const [id] = await addRounds(db, impl.id, [recheck]);
     await checksRound(run, impl, ws, pod, [...all, roundOf(impl.id, id!, recheck, "")]);
@@ -445,7 +531,7 @@ async function pushStep(run: BuildRun, deps: ReviseDeps, impl: Implementation, w
       await addRounds(db, impl.id, [{ kind: "refusal", result: { kind: "diff", reason: r.reason, problems: r.problems } }]);
       return `the change was refused (${r.reason}); an undo turn is next`;
     }
-    if (!r.retry) throw new Stuck("push-failed", r.reason);
+    if (!r.retry) throw new Stuck("push-failed", r.reason, { retry: false });
     return await pushFailed(db, impl, r.reason, all);
   }
   const bytes = Buffer.from(d.diff);

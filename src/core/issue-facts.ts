@@ -171,6 +171,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
     const standing = standingIn(work, d.workflow.actors, r.repo, acts);
     const live = d.implement.liveByRepo.get(r.repo);
     if (a?.startRetry) refresh.soon(ref, a.startRetry.dueAt);
+    if (a?.ownRetry) refresh.soon(ref, a.ownRetry.dueAt);
     const ir = r.kind === "issue" ? d.issueReviews.get(ref) : undefined;
     if ((ir?.state === "queued" || (ir?.state === "reporter" && ir.reporterAnswered)) && ir.tries > 0 && ir.triedAt) refresh.soon(ref, issueReviewDueAt(ir));
     const unsent = ir && (ir.state === "posting" || ir.state === "ask") ? unsentAsk(ir.postTries, now) : null;
@@ -214,6 +215,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
           // The PR we just opened counts as open until a sync mirrors it.
           prOpen: a.attempt.prNumber !== null && (attemptPr?.state ?? "OPEN") === "OPEN",
           ...(a.startRetry ? { startRetry: a.startRetry } : {}),
+          ...(a.ownRetry ? { ownRetry: { n: a.ownRetry.n, dueAt: a.ownRetry.dueAt } } : {}),
         } : null,
         liveInRepo: (live?.size ?? 0) - (live?.has(ref) ? 1 : 0),
       },

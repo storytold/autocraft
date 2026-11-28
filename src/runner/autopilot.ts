@@ -65,6 +65,7 @@ import { prLease } from "../prepush/settle.ts";
 import { enqueueJobs, itemFpStep, loadLastJobPerStep, loadDeadlineStops, loadHeldLeaseKeys, loadLaneInputs, loadLaneState, markCancelQueued, pruneItemFps, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut, type StreakRow } from "../data/jobs/index.ts";
 import { loadTakerSignature } from "../data/runners/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
+import { loadDueOwnRetries } from "../data/implement/index.ts";
 import { loadRefereeFailureTimes } from "../data/triage/index.ts";
 import { failureDelayMs } from "../core/backoff.ts";
 import { STEP_STAGE, tripOf } from "../core/push-outcome.ts";
@@ -745,6 +746,9 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         .map((repo) => { const j = work.get(repo)!; return { step: "implement", params: { repo, number: j.number, bucket: j.bucket } }; });
     },
     topScore: async (db, ctx) => bestScore([...(await implementWork(db, ctx.tracked, await plansOf(db, ctx))).values()].map((j) => j.score)),
+    // AutoCraft's own retry of a stopped implementation falls due with no input changing: the lane runs again at its time, also
+    // after an idle job (start-retry.ts).
+    extra: async (db) => [...(await loadDueOwnRetries(db, Date.now()))].sort(([a], [b]) => a.localeCompare(b)).map(([repo, at]) => `${repo}=${at}`).join(","),
   },
   {
     // The issue reviews a maintainer asked for: one job per repo works every due issue of it.

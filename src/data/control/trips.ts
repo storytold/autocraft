@@ -150,6 +150,25 @@ export async function resumeTripsIf(db: Db, keys: string[], by: string, may: (t:
   });
 }
 
+/**
+ * Clears trips that lift by themselves (`by` is the bookkeeping login that lifted them): each only while it is still the trip
+ * that was read (active, same `tripped_at`), so a person's resume and a newer trip stay as they are. Returns the keys cleared.
+ */
+export async function liftTrips(db: Db, rowsIn: { key: string; trippedAt: string }[], by: string, at: string = new Date().toISOString()): Promise<string[]> {
+  if (!rowsIn.length) return [];
+  const q = queryDb(db);
+  return await db.write(async () => {
+    const out: string[] = [];
+    for (const r of rowsIn) {
+      const done = await q.all(q.k.updateTable("main.stage_trips").set({ active: 0, cleared_at: at, cleared_by: by })
+        .where("stage", "=", r.key).where("active", "=", 1).where("tripped_at", "=", r.trippedAt).returning(["stage", "reason"]));
+      await addAudit(db, done.map((d) => ({ login: by, action: "stage-resume", target: d.stage, details: { reason: d.reason }, at })));
+      out.push(...done.map((d) => d.stage));
+    }
+    return out;
+  });
+}
+
 /** Clears one breaker; throws `TripError` for a key that names no breaker, or for one that is not paused. */
 export async function resumeStage(db: Db, key: string, by: string): Promise<void> {
   if (key !== OUTSIDE_SURGE_KEY && !tripOf(key)) throw new TripError(`no such breaker: ${key}; breakers are <stage>:<repo> or <stage> with stage one of ${TRIP_STAGES.join(", ")}, or ${OUTSIDE_SURGE_KEY}`);
