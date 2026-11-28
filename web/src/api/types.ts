@@ -1036,8 +1036,8 @@ export interface PromptInfo {
   /** Claude without tools: the fixed text sent as `--system-prompt`; null when the call keeps the CLI's own system prompt (sandboxed) or is a Jev request. */
   system: string | null;
   placeholders: { name: string; meaning: string }[];
-  /** Jev only: every question with its type and criteria. */
-  questions: { id: string; type: string; instructions: string; criteria: Record<string, string> | null }[];
+  /** Jev only: each question as it runs; `lead` is the opening of its instructions (the untrusted-data sentence), which an edit keeps. */
+  questions: { id: string; type: string; lead: string; instructions: string; criteria: Record<string, string> | null }[];
   output: string;
   validation: string;
   /** Exactly what would be sent on stdin for `exampleItems` (made-up items). */
@@ -1082,7 +1082,7 @@ export interface PromptEditState {
   following: boolean;
   /** The active edit was made against an older release default than the running release's. */
   newerDefault: boolean;
-  /** The active edit no longer fits the release's locked blocks or placeholders, so the release's text runs. */
+  /** The active edit no longer fits the release's locked blocks or placeholders (Jev: its question keys or criteria labels), so the release's text runs. */
   structureChanged: boolean;
   /** The signed-in user may save, roll back and switch this prompt to the release default. */
   mayEdit: boolean;

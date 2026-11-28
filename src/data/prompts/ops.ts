@@ -5,7 +5,7 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { addAudit } from "../control/audit.ts";
 import { checkEdit, normaliseBody, noteProblems, type ActiveRevision, type Problem } from "../../prompts/checks.ts";
-import { BASE_SCOPE, CLAUDE_PROMPTS, GUIDANCE_PROMPT_ID, JEV_PROMPTS, bodyVersion, codeBody, codeDefault, type ClaudePromptId, type JevPromptId } from "../../prompts/index.ts";
+import { BASE_SCOPE, CLAUDE_PROMPTS, GUIDANCE_PROMPT_ID, JEV_PROMPTS, bodyVersion, codeBody, codeDefault, jevBodyVersion, type ClaudePromptId, type JevPromptId } from "../../prompts/index.ts";
 import { mergeEdit } from "../../prompts/locks.ts";
 import { sha256Hex } from "../../prompts/sha256.ts";
 import { invalidatePrompts } from "./active.ts";
@@ -21,10 +21,14 @@ export const RELEASE_AUTHOR = "release";
 const isGuidance = (id: string): boolean => id === GUIDANCE_PROMPT_ID;
 const isBasePrompt = (id: string): id is ClaudePromptId | JevPromptId => id in CLAUDE_PROMPTS || id in JEV_PROMPTS;
 
-/** The version a revision's body runs at now: a Claude edit with the code's locked blocks (the code's text when it no longer fits), guidance by its own hash. */
+/**
+ * The version a revision's body runs at now: a Claude edit with the code's locked blocks, a Jev edit with the code's keys
+ * and labels (the code's own when an edit no longer fits), guidance by its own hash.
+ */
 function versionOf(id: string, body: string, follows: boolean): string {
   if (isGuidance(id)) return body ? sha256Hex(body).slice(0, 6) : "";
-  if (follows || !(id in CLAUDE_PROMPTS)) return codeDefault(id as ClaudePromptId | JevPromptId).version;
+  if (follows) return codeDefault(id as ClaudePromptId | JevPromptId).version;
+  if (id in JEV_PROMPTS) return jevBodyVersion(id as JevPromptId, body);
   const code = codeBody(id as ClaudePromptId);
   return bodyVersion(mergeEdit(code, body) ?? code);
 }
@@ -72,7 +76,7 @@ async function written(db: Db, fn: () => Promise<SaveResult>): Promise<SaveResul
 }
 
 /**
- * Stores an edit of a Claude prompt (scope "base") or of a repository's guidance (repo.guidance, scope = the repo) as the new
+ * Stores an edit of a Claude or Jev prompt (scope "base") or of a repository's guidance (repo.guidance, scope = the repo) as the new
  * active revision. `baseRev`: the active revision the editor started from (null or 1 for a prompt that has no rows yet).
  */
 export async function saveEdit(db: Db, edit: { id: string; scope: string; body: string; note: string; by: string; baseRev: number | null }): Promise<SaveResult> {

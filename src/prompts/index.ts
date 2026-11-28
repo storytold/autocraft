@@ -12,6 +12,7 @@ import { LABELS, LABEL_MEANING, RULES, UNTRUSTED_NOTE } from "../classify/rules.
 import { CHECK_MAX_CALLS, CHECK_MAX_WALL_MS, CHECK_OUTPUT_LINES, LINT_MAX_ROUNDS } from "../core/rules.ts";
 import { ENTRY_LIMIT, REVIEW_BODY_LIMIT, TOTAL_LIMIT, VERDICTS } from "../review/parse.ts";
 import { markHarness, stripMarks } from "./harness.ts";
+import { applyJevBody, jevBodyOf, jevLead } from "./jev-body.ts";
 import { mergeEdit, segments, stripLocks } from "./locks.ts";
 import { dataStart, lockTemplate, type LockSpec } from "./template-locks.ts";
 import { sha256Hex } from "./sha256.ts";
@@ -1951,27 +1952,23 @@ export function resolvedTemplate(id: ClaudePromptId): ResolvedTemplate {
   return { text, version: shortHash(id, withoutSlot(text)), rev: row?.rev ?? null, edited, ...(fallback && { fallback }) };
 }
 
+/** A Jev prompt's code request with the text of a stored body (src/prompts/jev-body.ts); null when the body no longer fits the code's keys and labels. */
+export function jevRequestWith(id: JevPromptId, body: string): JevRequest | null {
+  const code = jevPromptOf(id).request;
+  const questions = applyJevBody(code.questions, body);
+  return questions && { ...code, questions };
+}
+
 /**
- * A Jev prompt's request as it runs now: the code's request, with the instructions and criteria text of an active edit for
- * the questions and labels the code has (keys, types and labels always the code's). Unedited, it is the code's own object.
+ * A Jev prompt's request as it runs now: the code's request, or with the instructions and criteria text of an active edit
+ * (keys, types, labels and each question's opening sentence always the code's). An edit that no longer fits the code's
+ * keys and labels leaves the code's request running. Unedited, it is the code's own object.
  */
 export function jevRequestOf(id: JevPromptId): JevRequest {
   const code = jevPromptOf(id).request;
   const row = source.base(id);
   if (!row || row.follows) return code;
-  let stored: unknown;
-  try { stored = JSON.parse(row.body); } catch { return code; }
-  const qs = (stored as { questions?: unknown } | null)?.questions;
-  if (!qs || typeof qs !== "object") return code;
-  const text = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
-  const questions = Object.fromEntries(Object.entries(code.questions).map(([k, q]) => {
-    const e = (qs as Record<string, { instructions?: unknown; criteria?: unknown } | undefined>)[k];
-    if (!e || typeof e !== "object") return [k, q];
-    const ec = e.criteria && typeof e.criteria === "object" ? e.criteria as Record<string, unknown> : {};
-    const criteria = q.criteria && Object.fromEntries(Object.entries(q.criteria).map(([l, c]) => [l, text(ec[l]) ? ec[l] : c]));
-    return [k, { ...q, instructions: text(e.instructions) ? e.instructions : q.instructions, ...(criteria && { criteria }) }];
-  }));
-  return { ...code, questions };
+  return jevRequestWith(id, row.body) ?? code;
 }
 
 /**
@@ -1990,15 +1987,17 @@ export const codeEditState = (id: string): PromptEditState => ({
   guidanceSlot: (GUIDANCE_PROMPTS as readonly string[]).includes(id), sameAs: SAME_TEMPLATE[id as ClaudePromptId] ?? null,
 });
 
+/** The version a Jev prompt records when `body` runs: the hash of its request (as jevVersionOf), the code's when the body does not fit. */
+export const jevBodyVersion = (id: JevPromptId, body: string): string => sha256Hex(JSON.stringify(jevRequestWith(id, body) ?? jevPromptOf(id).request)).slice(0, 10);
+
 /** Whether a prompt id is an interactive one that runs the stored revision of another prompt (its edits are saved on that one). */
 export const sameTemplateOf = (id: ClaudePromptId): ClaudePromptId | null => SAME_TEMPLATE[id] ?? null;
 
 /** The version a Claude prompt records when `body` (its text form) runs: a hash of the text without the guidance slot. */
 export const bodyVersion = (body: string): string => sha256Hex(withoutSlot(stripLocks(body))).slice(0, 10);
 
-/** The text form of a Jev prompt's editable text: the instructions and criteria of each question (shape owned by the Jev form). */
-export const jevBody = (req: JevRequest): string =>
-  JSON.stringify({ questions: Object.fromEntries(Object.entries(req.questions).map(([k, q]) => [k, { instructions: q.instructions, ...(q.criteria && { criteria: q.criteria }) }])) });
+/** The text form of a Jev prompt's editable text: each question's instructions after its opening sentence, and its criteria. */
+export const jevBody = (req: JevRequest): string => jevBodyOf(req.questions);
 
 /** A prompt's code default as a revision holds it: its body and the version it runs at. */
 export function codeDefault(id: ClaudePromptId | JevPromptId): { body: string; version: string } {
@@ -2441,7 +2440,7 @@ function info(p: ClaudePrompt | JevPrompt, edit: PromptEditState): PromptInfo {
     template: JSON.stringify(jevRequestOf(p.id as JevPromptId), null, 2),
     segments: [],
     system: null,
-    questions: Object.entries(jevRequestOf(p.id as JevPromptId).questions).map(([id, q]) => ({ id, type: q.type, instructions: q.instructions, criteria: q.criteria ?? null })),
+    questions: Object.entries(jevRequestOf(p.id as JevPromptId).questions).map(([id, q]) => ({ id, type: q.type, lead: jevLead(p.request.questions[id]!.instructions), instructions: q.instructions, criteria: q.criteria ?? null })),
     example: p.id === "areas.jev" ? renderAreaJev(SAMPLE_AREA_ITEM, SAMPLE_AREAS) : p.id === "lint.reference.jev" ? renderReferenceJev(SAMPLE_REFERENCE_LINT[0]!.text) : renderJev(p.id as JevPromptId, pair ? groupPairs(SAMPLE_DUPE_PAIRS)[0]! : item),
     exampleItems: pair ? [groupPairs(SAMPLE_DUPE_PAIRS)[0]!.ref] : p.id === "areas.jev" ? [refOf(SAMPLE_AREA_ITEM)] : p.id === "lint.reference.jev" ? [SAMPLE_REFERENCE_LINT[0]!.ref] : [`${item.repo}#${item.number}`],
   };

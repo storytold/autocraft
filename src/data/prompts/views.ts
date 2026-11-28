@@ -4,7 +4,7 @@ import type { PromptCheckReply, PromptEditState, PromptRevisionInfo, PromptSaveR
 import type { Db } from "../../db/index.ts";
 import { checkEdit, normaliseBody } from "../../prompts/checks.ts";
 import { lineDiff, type DiffLine } from "../../prompts/diff.ts";
-import { BASE_SCOPE, CLAUDE_PROMPTS, GUIDANCE_PROMPTS, GUIDANCE_PROMPT_ID, JEV_PROMPTS, bodyVersion, codeBody, codeDefault, codeEditState, sameTemplateOf, type ClaudePromptId, type JevPromptId } from "../../prompts/index.ts";
+import { BASE_SCOPE, CLAUDE_PROMPTS, GUIDANCE_PROMPTS, GUIDANCE_PROMPT_ID, JEV_PROMPTS, bodyVersion, codeBody, codeDefault, codeEditState, jevRequestWith, sameTemplateOf, type ClaudePromptId, type JevPromptId } from "../../prompts/index.ts";
 import { mergeEdit, stripLocks } from "../../prompts/locks.ts";
 import { sha256Hex } from "../../prompts/sha256.ts";
 import { activeRow } from "./active.ts";
@@ -15,8 +15,8 @@ import type { PromptRevision } from "./types.ts";
 export const isClaudePrompt = (id: string): id is ClaudePromptId => Object.hasOwn(CLAUDE_PROMPTS, id);
 export const isJevPrompt = (id: string): id is JevPromptId => Object.hasOwn(JEV_PROMPTS, id);
 
-/** A prompt that is changed as text: a Claude prompt that runs its own text (an interactive one is changed on the prompt it repeats). Jev prompts are changed with the Jev form. */
-export const isTextEditable = (id: string): boolean => isClaudePrompt(id) && sameTemplateOf(id) === null;
+/** A prompt that may be edited: a Claude prompt that runs its own text (an interactive one is changed on the prompt it repeats), or a Jev prompt (checkJevEdit). */
+export const isEditable = (id: string): boolean => (isClaudePrompt(id) && sameTemplateOf(id) === null) || isJevPrompt(id);
 
 export const revisionInfo = (r: PromptRevision): PromptRevisionInfo =>
   ({ rev: r.rev, kind: r.kind, version: r.version, author: r.author, at: r.at, note: r.note, fromRev: r.fromRev, active: r.active });
@@ -31,8 +31,8 @@ export function editState(id: string, mayEdit: boolean): PromptEditState {
     rev: row?.rev ?? null,
     following: !edited,
     newerDefault: edited && (isClaudePrompt(target) || isJevPrompt(target)) && row.defaultHash !== codeDefault(target).version,
-    structureChanged: edited && isClaudePrompt(target) && mergeEdit(codeBody(target), row.body) === null,
-    mayEdit: mayEdit && isTextEditable(id),
+    structureChanged: edited && (isClaudePrompt(target) ? mergeEdit(codeBody(target), row.body) === null : isJevPrompt(target) && jevRequestWith(target, row.body) === null),
+    mayEdit: mayEdit && isEditable(id),
   };
 }
 
