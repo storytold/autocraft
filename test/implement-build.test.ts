@@ -15,6 +15,8 @@ import { currentImplementation, implementationById, roundsOf, setImplementationS
 import type { PlanReply, SessionReport } from "../src/implement/types.ts";
 import { textHash } from "../src/core/open-prs.ts";
 import { OPERATOR, world } from "./world-db.ts";
+import { insertWorkflow } from "../src/workflow/store.ts";
+import { sessionInput } from "../src/implement/session.ts";
 
 const BASE = "b".repeat(40);
 const PLAN: PlanReply = {
@@ -176,4 +178,16 @@ test("a no verdict that passes on the rerun is clean, and cargo fmt that is not 
   const checks = (await roundsOf(s.db, s.impl.id)).filter((r) => r.kind === "checks").map((r) => r.result as { clean: boolean; noVerdict: string[] });
   assert.deepEqual(checks.map((c) => c.clean), [false, true]);
   assert.match(checks[0]!.noVerdict[0]!, /cargo fmt gave no verdict/);
+});
+
+test("the first session is given the plan's parts except the ones a maintainer dropped", async () => {
+  const { db, impl } = await setup();
+  const parts = ["Guard first()", "Rename the helper", "Add a test"].map((title) => ({ title, files: [`src/${title.length}.rs`] }));
+  await setImplementationState(db, impl.id, "planned", { plan: { ...PLAN, workflow: { parts, recommendation: null } } });
+  await insertWorkflow(db, {
+    repo: "app", number: 7, kind: "issue", entry: "implement", state: "running", startedBy: "op", startedAt: "2026-11-04T08:00:00.000Z", startedVia: "dashboard",
+    plan: parts.map((p, i) => ({ n: i + 1, title: p.title, source: "implement" as const, files: p.files, state: i === 1 ? "dropped" as const : "planned" as const })),
+  });
+  const input = await sessionInput(db, (await implementationById(db, impl.id))!, BASE);
+  assert.deepEqual(input.plan.parts?.map((p) => [p.n, p.title]), [[1, "Guard first()"], [3, "Add a test"]]);
 });

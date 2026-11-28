@@ -23,7 +23,9 @@ export type SessionInput = {
   sha: string;
   /** Written by outsiders. */
   issue: { title: string; body: string; author: string | null };
-  plan: { kind: string; summary: string; plan: string; acceptance: string[]; tests: string[]; app: string | null; risks: string[] };
+  plan: { kind: string; summary: string; plan: string; acceptance: string[]; tests: string[]; app: string | null; risks: string[];
+    /** The plan's numbered parts a maintainer did not drop, with the numbers they have in the question; absent when the plan names none. */
+    parts?: { n: number; title: string; files: string[] }[] };
   /** Operators' and write maintainers' guidance: a Try again note, thread posts the plan was given. */
   guidance: string[];
   /** A session that starts over on an earlier one's changes (its session was lost): what is in the tree and what the checks found. */
