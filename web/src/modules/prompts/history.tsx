@@ -24,16 +24,9 @@ export function PromptHistory({ p }: { p: PromptInfo }) {
   );
 }
 
-/** The release default the active edit was made against: the newest revision before it that ran the release's text. */
-function useEditBase(p: PromptInfo): number | null {
-  const { data } = useQuery(historyKey(p.id), (a) => a.prompt.history(p.id), { enabled: p.edit.newerDefault });
-  const active = p.edit.rev;
-  return data?.revisions.find((r) => active !== null && r.rev < active && (r.kind === "release" || r.kind === "use-release"))?.rev ?? null;
-}
-
 export function ReleaseNotice({ p }: { p: PromptInfo }) {
   const api = useApi();
-  const from = useEditBase(p);
+  const from = p.edit.baseRev;
   const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   const diff = useQuery(`prompt-diff:${p.id}:${from}:release`, async (a) => (await a.prompt.diff(p.id, from!, "release")).diff, { enabled: open && from !== null });

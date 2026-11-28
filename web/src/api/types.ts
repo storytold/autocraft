@@ -1084,6 +1084,8 @@ export interface PromptEditState {
   following: boolean;
   /** The active edit was made against an older release default than the running release's. */
   newerDefault: boolean;
+  /** With a newer default: the revision that ran the release default the active edit was made against; null otherwise, or when that default is not stored. */
+  baseRev: number | null;
   /** The active edit no longer fits the release's locked blocks or placeholders (Jev: its question keys or criteria labels), so the release's text runs. */
   structureChanged: boolean;
   /** The signed-in user may save, roll back and switch this prompt to the release default. */

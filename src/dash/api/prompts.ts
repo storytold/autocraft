@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { PromptCheckReply, PromptDiffReply, PromptGuidanceList, PromptHistory, PromptInfo, PromptSaveBody, PromptSaveReply, PromptsReport, RepoGuidance } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
 import {
-  PromptViewError, activeRow, checkSave, editState, ensurePrompts, isClaudePrompt, isJevPrompt, listRevisions, promptDiff, repoGuidance, revisionInfo,
+  PromptViewError, activeRow, checkSave, editStates, ensurePrompts, isClaudePrompt, isJevPrompt, listRevisions, promptDiff, repoGuidance, revisionInfo,
   rollback, saveEdit, saveReply, useRelease, type SaveResult,
 } from "../../data/prompts/index.ts";
 import { BASE_SCOPE, GUIDANCE_PROMPTS, GUIDANCE_PROMPT_ID, promptInfo, promptsReport } from "../../prompts/index.ts";
@@ -108,15 +108,13 @@ function replyOf(r: SaveResult): PromptSaveReply {
 /** GET /api/prompts: every prompt with its edit state for the caller. */
 export async function prompts(db: Db, req: Req): Promise<PromptsReport> {
   await ensurePrompts(db);
-  const may = await mayEditBasePrompts(db, req.user);
-  return promptsReport(COMMIT, (id) => editState(id, may));
+  return promptsReport(COMMIT, await editStates(db, await mayEditBasePrompts(db, req.user)));
 }
 
 /** GET /api/prompts/:id */
 export async function prompt(db: Db, req: Req): Promise<PromptInfo> {
   await ensurePrompts(db);
-  const may = await mayEditBasePrompts(db, req.user);
-  const p = promptInfo(req.params.id!, (id) => editState(id, may));
+  const p = promptInfo(req.params.id!, await editStates(db, await mayEditBasePrompts(db, req.user)));
   if (!p) throw new HttpError(404, `${req.params.id} is not a prompt of the Prompts page`);
   return p;
 }

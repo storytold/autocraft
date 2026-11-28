@@ -20,7 +20,10 @@ export const isEditable = (id: string): boolean => (isClaudePrompt(id) && sameTe
 export const revisionInfo = (r: PromptRevision): PromptRevisionInfo =>
   ({ rev: r.rev, kind: r.kind, version: r.version, author: r.author, at: r.at, note: r.note, fromRev: r.fromRev, active: r.active });
 
-/** A prompt's edit state from the revisions last ensured (ensurePrompts); `mayEdit`: the user may change the instance-wide prompts. */
+/**
+ * A prompt's edit state from the revisions last ensured (ensurePrompts); `mayEdit`: the user may change the instance-wide prompts.
+ * The cache holds only active rows, so `baseRev` is null here; editStates reads it from the database.
+ */
 export function editState(id: string, mayEdit: boolean): PromptEditState {
   const target = isClaudePrompt(id) ? sameTemplateOf(id) ?? id : id;
   const row = activeRow(target, BASE_SCOPE);
@@ -31,6 +34,7 @@ export function editState(id: string, mayEdit: boolean): PromptEditState {
     author: row?.author ?? null,
     following: !edited,
     newerDefault: edited && (isClaudePrompt(target) || isJevPrompt(target)) && row.defaultHash !== codeDefault(target).version,
+    baseRev: null,
     structureChanged: edited && (isClaudePrompt(target) ? mergeEdit(codeBody(target), row.body) === null : isJevPrompt(target) && jevRequestWith(target, row.body) === null),
     mayEdit: mayEdit && isEditable(id),
   };

@@ -1984,7 +1984,7 @@ export function runningBody(id: ClaudePromptId): string {
 
 /** The edit state of a prompt that has no stored revision and that nobody may edit: the release default runs. */
 export const codeEditState = (id: string): PromptEditState => ({
-  rev: null, author: null, following: true, newerDefault: false, structureChanged: false, mayEdit: false,
+  rev: null, author: null, following: true, newerDefault: false, baseRev: null, structureChanged: false, mayEdit: false,
   guidanceSlot: (GUIDANCE_PROMPTS as readonly string[]).includes(id), sameAs: SAME_TEMPLATE[id as ClaudePromptId] ?? null,
 });
 
