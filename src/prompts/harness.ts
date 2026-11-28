@@ -59,6 +59,24 @@ export function markHarness(text: string): string {
 }
 
 /**
+ * The ranges [from, to) of trusted prompt text that markHarness replaces (harness phrases, MCP tool names, fixed sandbox
+ * paths), in order, overlapping ones joined. A prompt keeps them in locked blocks, so an edit cannot change their wording.
+ */
+export function harnessSpans(text: string): [number, number][] {
+  const spans: [number, number][] = [];
+  for (const p of PHRASES) for (let i = text.indexOf(p.claude); i >= 0; i = text.indexOf(p.claude, i + p.claude.length)) spans.push([i, i + p.claude.length]);
+  for (const re of [MCP_TOOL, SANDBOX_PATH]) for (const m of text.matchAll(re)) spans.push([m.index, m.index + m[0].length]);
+  spans.sort((a, b) => a[0] - b[0]);
+  const out: [number, number][] = [];
+  for (const s of spans) {
+    const last = out.at(-1);
+    if (last && s[0] < last[1]) last[1] = Math.max(last[1], s[1]);
+    else out.push([s[0], s[1]]);
+  }
+  return out;
+}
+
+/**
  * The text a harness reads: every marker replaced by that harness's wording, and each marked sandbox path by the same path
  * below `root` (or the path itself without one); anything else between marks is left alone.
  */
