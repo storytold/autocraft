@@ -1123,11 +1123,11 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
 
   /**
    * Closes the PR of each batch of the repo that ended in the last day while its PR stayed open: a close that failed, here or in a
-   * control, is tried again. Only PRs the stored checks do not already show closed or merged are read; closing is the same guarded write.
+   * control, is tried again; a batch a person closed is left alone, so a PR they reopen stays open. Only PRs the stored checks do not already show closed or merged are read; closing is the same guarded write.
    */
   async function sweepEnded(): Promise<void> {
     const inFlight = new Set((await loadBatchRun(db, repo)).active.flatMap((b) => (b.pr_number === null ? [] : [b.pr_number])));
-    const ended = (await loadEndedWithPr(db, repo, new Date(d.now().getTime() - SWEEP_MS).toISOString())).filter((b) => !inFlight.has(b.pr_number!));
+    const ended = (await loadEndedWithPr(db, repo, new Date(d.now().getTime() - SWEEP_MS).toISOString())).filter((b) => !inFlight.has(b.pr_number!) && b.summary !== CLOSED_BY_PERSON);
     if (!ended.length) return;
     const stored = await loadChecks(db, [...new Set(ended.map((b) => b.pr_number!))].map((number) => ({ repo, number })));
     const unsure = ended.filter((b) => (stored.get(refOf(b.pr_number!))?.state ?? "OPEN") === "OPEN");

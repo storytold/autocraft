@@ -348,12 +348,14 @@ export const STEPS: StepDef[] = [
       // share bounds what it starts). The day's usage counts this job's items as far as they were written; the rest of what it landed
       // is taken off here.
       const { limitRow, usageToday } = await import("./autopilot.ts");
-      const { loadJobs } = await import("../data/jobs/queue.ts");
+      const { loadJobs } = await import("../data/jobs/index.ts");
+      // A resumed job's row already holds its earlier runs' items; only what this run wrote counts against what it landed.
+      const writtenNow = async () => Number((await loadJobs(ctx.db, [ctx.job.id])).get(ctx.job.id)?.items ?? 0);
+      const itemsBefore = await writtenNow();
       const dayLeft = async (landed: number): Promise<number> => {
         const perDay = (await limitRow(ctx.db, "merge")).perDay;
         if (perDay === null) return Infinity;
-        const written = Number((await loadJobs(ctx.db, [ctx.job.id])).get(ctx.job.id)?.items ?? 0);
-        return perDay - await usageToday(ctx.db, "merge") - Math.max(0, landed - written);
+        return perDay - await usageToday(ctx.db, "merge") - Math.max(0, landed - (await writtenNow() - itemsBefore));
       };
       const b = await runBatches(ctx.db, { repo, limit, onMerged: ctx.handled, by: byOfJob(ctx.job.requestedBy), dayLeft }, ctx.log);
       ctx.usageRun(b.runId);
