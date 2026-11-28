@@ -25,6 +25,7 @@ import { T0, T1, untilQuiet, world, type World } from "./world-db.ts";
 import { currentAttempt, writeStep } from "../src/implement/attempt.ts";
 import { openQuestion } from "../src/implement/questions.ts";
 import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
+import { recordEvents, saveWorkflows } from "../src/data/workflow/index.ts";
 import { applyStuckAnswer, markStuck } from "../src/implement/stuck.ts";
 import { resumeRetiredStops } from "../src/workflow/retired-stops.ts";
 import { actor, approvedReview, asked, ASKS, fixup, implementationOpened, implementIssue, keep, labelOf, later, leg8, legState, MAINT, nextStep, ownPush, pause, review, review8, say, ticks } from "./workflow-advance-world.ts";
@@ -389,6 +390,38 @@ test("a started review whose hold finds the PR incomplete asks its author at onc
   assert.ok(decidePr((await loadPrFact(db, "app", 2))!).actions.some((a) => a.kind === "review" && a.head === "sha9"), "the author's push is reviewed");
 });
 
+test("a hold review never asks the author by itself when it has no blocking class, was read again after the person went on, or the author is a bot: the person gets the question", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  const send = async (text: string, n: number) => { const r = (await runCommand(db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: n }] })).items[0]!; assert.equal(r.outcome, "run", JSON.stringify(r)); };
+  const asks = async () => (await db.all(db.k.selectFrom("main.workflow_actions").select("number"))).map((r) => Number(r.number));
+  const blocking = { class: "off-purpose", why: "Most of the promised UI is missing." };
+  // 2: a review stored before holds were classed; 3: a blocking hold, which asks; 4: a bot's PR.
+  const cases: [number, string, object | null][] = [[2, "octo-dev", null], [3, "octo-dev", { hold: blocking }], [4, "dependabot[bot]", { hold: blocking }]];
+  for (const [n, author, wf] of cases) {
+    await w.pr(n, { label: "feature", author });
+    await send("review", n);
+    await db.run(db.k.insertInto("main.opus_reviews").values({
+      repo: "app", number: n, head_oid: `sha${n}`, run_id: "rv", at: new Date().toISOString(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r",
+      workflow: wf && JSON.stringify({ outside_purpose: null, recommendation: null, ...wf }),
+    }));
+  }
+  await advanceWorkflows(db);
+  const states = async () => await Promise.all([2, 3, 4].map(async (n) => { const wf = (await liveWorkflow(db, "app", n))!; return [wf.state, wf.rec?.author ?? (wf.rec?.backlog ? "backlog" : null)]; }));
+  assert.deepEqual(await states(), [["recommending", "scope"], ["waiting", null], ["recommending", "backlog"]]);
+  assert.deepEqual(await asks(), [3]);
+  // The person went on after that review (an answer, as when a question's cause went): the same review, read again, comes back as the
+  // question instead of asking again.
+  await db.run(db.k.deleteFrom("main.workflow_actions"));
+  const wf3 = (await liveWorkflow(db, "app", 3))!;
+  const at = new Date(Date.now() + 1_000).toISOString();
+  await saveWorkflows(db, [{ id: wf3.id, patch: { state: "running", blocker: null, blockerParams: null }, at }]);
+  await recordEvents(db, [{ workflowId: wf3.id, repo: "app", number: 3, login: MAINT, via: "dashboard", kind: "answered", line: "yes", at }]);
+  await advanceWorkflows(db);
+  assert.deepEqual((await states())[1], ["recommending", "ask"]);
+  assert.deepEqual(await asks(), []);
+});
+
 /** PR 2, conflicting with its base branch, started with `start`, and a hold review at sha2 with one fix and no recommendation. */
 async function heldConflicting(start: string): Promise<World> {
   const w = await approvedReview();
@@ -627,10 +660,10 @@ test("one workflow's change that cannot be stored loses no other's, and the pass
     try { await advanceWorkflows(db, () => {}, () => { woken++; }); } finally { db.write = write; }
     return (await Promise.all([2, 3].map((n) => liveWorkflow(db, "app", n)))).map((x) => x!.state).sort();
   };
-  // A hold with no recommendation of its own asks the author: the workflow waits for them.
-  assert.deepEqual(await pass(), ["running", "waiting"]);
+  // A hold with no recommendation and no class of its own comes back to the person first.
+  assert.deepEqual(await pass(), ["recommending", "running"]);
   assert.ok(woken > 0);
-  assert.deepEqual(await pass(), ["waiting", "waiting"]);
+  assert.deepEqual(await pass(), ["recommending", "recommending"]);
   assert.equal(woken, 0);
 });
 

@@ -73,7 +73,7 @@ export const COMMANDS: readonly CommandDef[] = [
     example: "fix the export normals, then merge",
   },
   {
-    word: "ask-author", usage: "ask author [<your words for the author>]", aliases: ["ask the author", "wait for the author", "wait for author", "waiting on the author", "waiting on author", "waiting for the author", "waiting for author", "awaiting author", "awaiting the author"], entry: null,
+    word: "ask-author", usage: "ask author [<your words for the author>]", aliases: ["ask the author"], entry: null,
     short: tk("Ask the pull request's author to finish or fix it, and wait for their push."),
     does: tk("Posts one comment to the author with what the review found and the fixes it lists, and your own words when you add them. AutoCraft runs nothing on the pull request until the author pushes; it then reviews the new commits. A comment by the author without a push keeps it waiting. Any command replaces the wait."),
     back: tk("When the review of the author's new commits is done, with one recommendation. If the merge is approved: only at a blocker."),

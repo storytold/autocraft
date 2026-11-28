@@ -18,8 +18,9 @@ import { loadImplementFacts, type ImplementFacts } from "../data/implement/index
 import { loadIssueReviews, type IssueReviewRow } from "../data/issuereview/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadReviewRows, type PremergeRow, type ReviewRow } from "../data/review/index.ts";
-import { adoptLegs, fixupRequestsAt, listWorkflows, loadFixupRequests, moveFixupRequests, loadActions, loadGoOnAt, loadLegs, moveWorkflows, recordEvents, retryActions, type GoneOn, type Preapproval, type WorkflowPatch, type WorkflowRead } from "../data/workflow/index.ts";
+import { adoptLegs, fixupRequestsAt, listWorkflows, loadFixupRequests, moveFixupRequests, loadActions, loadGoOnAt, loadLegs, moveWorkflows, recordEvents, retryActions, saveWorkflows, type GoneOn, type Preapproval, type WorkflowPatch, type WorkflowRead } from "../data/workflow/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
+import { loadOwnLogins } from "../data/access/index.ts";
 import { loadLaneRuns, saveWorkflowFailures, type LaneRun, type WorkflowFailure } from "../data/jobs/index.ts";
 import { isFenced } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
@@ -46,9 +47,9 @@ import { asksNobody } from "./asked.ts";
 import { headKey, premergeOf, recheckRuleRow, startAutoStops } from "./auto-stop.ts";
 import { blockWorkflow } from "./block.ts";
 import { checkedOtherHead, codeOf, detectBlocker, fixesFirst, LANE_STEPS, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
-import { again as fixAgain, authorAskFor, EffectError, queueAuthorAsk, type Instruction } from "./effects.ts";
+import { again as fixAgain, authorAskFor, authorUnaskable, EffectError, queueAuthorAsk, type Instruction } from "./effects.ts";
 import { premergeParts } from "./premerge.ts";
-import { afterPush, atBlocker, conflictOf, droppedOf, onConflict, planOf, textFor, type ReviewView } from "./recommend.ts";
+import { afterPush, atBlocker, conflictOf, droppedOf, onConflict, planOf, textFor, withoutAuthor, type ReviewView } from "./recommend.ts";
 import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
 import { issueRecommendation, recommendsImplement } from "./issue-review.ts";
 import { listText, ROUND_STEP, stepsFor, type StepName } from "./status.ts";
@@ -93,7 +94,9 @@ async function showFailures(db: Db, failed: Map<number, FailedCheck>, log: (line
 
 /** What the pass loaded for every live workflow, keyed `repo#number` (of the item, or of its PR). */
 type Pass = {
-  items: Map<string, { state: string; head_oid: string | null; closed_at: string | null; author?: string | null }>;
+  items: Map<string, { state: string; head_oid: string | null; closed_at: string | null; author?: string | null; author_type?: string | null; mergeable?: string | null; base_ref?: string | null }>;
+  /** AutoCraft's own logins, lower case: it never asks itself as a PR's author. */
+  own: ReadonlySet<string>;
   implement: ImplementFacts;
   /** Before anything was read: what a question made in this pass shows happened by then. */
   at: string;
@@ -120,6 +123,8 @@ type Writes = {
   closed: { w: ItemWorkflow; line: string; at: string; retry: number[] }[];
   /** The comments to PR authors that the review's recommendation asked for, queued once the workflow waits for them. */
   asks: { w: ItemWorkflow; pr: { repo: string; number: number }; ask: AuthorAsk }[];
+  /** The person's fix-ups queued at a head our own push moved on from, carried to the new head with the workflow's write (carryFixups). */
+  carry: { w: ItemWorkflow; repo: string; number: number; from: string; to: string }[];
 };
 
 const key = (repo: string, n: number): string => `${repo}#${n}`;
@@ -297,9 +302,9 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     for (const w of live) if (!due.includes(w)) wake(failed.get(w.id)!.until);
     const errors = new Map<number, unknown>();
     const issues = live.filter((w) => w.kind === "issue").map((w) => ({ repo: w.repo, number: w.number }));
-    const [implement, goOn, issueReviews] = await db.together(() => Promise.all([
+    const [implement, goOn, issueReviews, own] = await db.together(() => Promise.all([
       loadImplementFacts(db, issues, { withPlans: true }), loadGoOnAt(db, live),
-      loadIssueReviews(db, live.filter((w) => w.kind === "issue" && w.entry === "review").map((w) => w.id)),
+      loadIssueReviews(db, live.filter((w) => w.kind === "issue" && w.entry === "review").map((w) => w.id)), loadOwnLogins(db),
     ]));
     const prRefs = [...new Map(live.flatMap((w) => {
       const number = w.kind === "pr" ? w.number : candidatePr(implement.byIssue.get(key(w.repo, w.number)), w);
@@ -323,9 +328,9 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const laneRuns = new Map<string, LaneRun[]>();
     for (const r of await loadLaneRuns(db, prRefs, earliest, Object.keys(LANE_STEPS))) (laneRuns.get(key(r.repo, r.number)) ?? laneRuns.set(key(r.repo, r.number), []).get(key(r.repo, r.number))!).push(r);
     const pass: Pass = {
-      at, items, implement, goOn, legs, reviews, patches, moves, facts, premerge, issues: issueFacts, laneRuns, issueReviews,
+      at, items, implement, goOn, legs, reviews, patches, moves, facts, premerge, issues: issueFacts, laneRuns, issueReviews, own,
     };
-    const writes: Writes = { workflows: [], adopt: [], stored: new Set(), closed: [], asks: [] };
+    const writes: Writes = { workflows: [], adopt: [], stored: new Set(), closed: [], asks: [], carry: [] };
     const moved: Moved[] = [];
     for (const w of due) {
       try {
@@ -360,6 +365,7 @@ async function storeWrites(db: Db, writes: Writes, due: ItemWorkflow[], log: (li
     const asks = o.asks.filter((a) => ids.has(a.w.id));
     for (const a of asks) await queueAuthorAsk(db, a.w.id, a.pr, a.ask);
     await recordEvents(db, asks.map((a) => ({ workflowId: a.w.id, repo: a.w.repo, number: a.w.number, login: ACTOR, via: "cli" as const, kind: "set" as const, line: t("The review asks the author: {line}", { line: a.ask.line }), at: a.ask.at })));
+    for (const c of o.carry) if (ids.has(c.w.id)) await carryFixups(db, c.repo, c.number, c.from, c.to);
     return ids;
   });
   try {
@@ -373,6 +379,7 @@ async function storeWrites(db: Db, writes: Writes, due: ItemWorkflow[], log: (li
       try {
         const ids = await store({
           workflows: writes.workflows.filter((r) => r.id === w.id), adopt: writes.adopt.filter((r) => r.workflowId === w.id), stored: writes.stored, closed: writes.closed.filter((c) => c.w.id === w.id), asks: writes.asks.filter((a) => a.w.id === w.id),
+          carry: writes.carry.filter((c) => c.w.id === w.id),
         });
         for (const id of ids) written.add(id);
       } catch (err) {
@@ -382,6 +389,29 @@ async function storeWrites(db: Db, writes: Writes, due: ItemWorkflow[], log: (li
     }
     return written;
   }
+}
+
+/**
+ * The workflow that waits for its author with `ask`, whose comment AutoCraft did not post (`why`): it comes back to the person at the
+ * ask's head, so it never waits for a comment nobody got. `again`: a yes asks the author again (the post failed or the PR moved); else
+ * the author cannot be asked and a yes puts it in the backlog. Written only while the workflow still waits with that ask; true when written.
+ */
+export async function authorNotAsked(db: Db, workflowId: number, ask: AuthorAsk, why: string, again: boolean, at: string): Promise<boolean> {
+  return await db.write(async () => {
+    const w = (await listWorkflows(db, { ids: [workflowId], live: true }))[0];
+    if (!w || authorAsk(w)?.at !== ask.at) return false;
+    const drop = w.plan.filter((p) => p.state === "dropped").map((p) => p.n);
+    const rec: Recommendation = again
+      ? { text: t("AutoCraft did not ask the author: {why}. Ask the author to address the review's findings.", { why }), parts: { fix: [], drop }, merges: false, author: "scope" }
+      : { text: t("AutoCraft does not ask the author: {why}. Put it in the backlog.", { why }), parts: { fix: [], drop }, merges: false, backlog: true };
+    const approved = w.approvedBy !== null;
+    await saveWorkflows(db, [{
+      id: w.id, at,
+      patch: { state: approved ? "blocked" : "recommending", rec, recAt: at, recHead: ask.head, blocker: approved ? "other" : null, blockerParams: approved ? { reason: why } : null },
+    }]);
+    await recordEvents(db, [{ workflowId: w.id, repo: w.repo, number: w.number, login: ACTOR, via: "cli", kind: approved ? "blocked" : "set", line: rec.text, at }]);
+    return true;
+  });
 }
 
 /**
@@ -604,7 +634,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   } else if (baseHead !== head) {
     if (ownChain(pass, ref, baseHead, head)) {
       Object.assign(patch, { baseHead: head, acceptedHead: head });
-      if (!w.approvedBy) await carryFixups(db, w.repo, target, baseHead, head);
+      if (!w.approvedBy) writes.carry.push({ w, repo: w.repo, number: target, from: baseHead, to: head });
     }
     else authorPush = { from: baseHead, to: head };
   }
@@ -784,10 +814,17 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
         rec = { ...rec, text: t("{text} The implementation also changes {files}, which no part of its plan names.", { text: rec.text, files: listText(beyond.slice(0, 10)) }) };
         patch.baseHead = head;
       }
-      // The review finds the PR incomplete or wrong and recommends asking its author: AutoCraft does that at once, and the item waits for their push.
-      if (rec.author === "ask" && w.kind === "pr" && says && says.head === head && w.startedBy !== RULE_STARTER) {
+      // A bot, AutoCraft itself or a quiet PR's author is never asked: a yes puts the item in the backlog instead.
+      const unaskable = rec.author && w.kind === "pr" ? authorUnaskable({ login: pr.author, type: pr.author_type, quiet: !!f?.quiet, own: pass.own }) : null;
+      if (unaskable) rec = withoutAuthor(rec, unaskable, says?.public_summary ?? null);
+      // The review finds the PR incomplete or wrong and recommends asking its author: AutoCraft does that at once, and the item waits for
+      // their push. Only a review made since the person last started or answered (or one that asks in its own words) asks by itself: an
+      // older review of the same head, read again after a resume or a closed question, comes back as the question.
+      const fresh = says?.workflow?.recommendation?.author === true || (says !== null && says.at > since);
+      if (rec.author === "ask" && w.kind === "pr" && says && says.head === head && w.startedBy !== RULE_STARTER && fresh) {
         const login = pr.author ?? null;
-        const asked = authorAskFor({ login, head, review: says, plan, words: null, by: w.takenBy ?? w.startedBy, at: pass.at, auto: true });
+        const conflict = pr.mergeable === "CONFLICTING" ? pr.base_ref ?? null : null;
+        const asked = authorAskFor({ login, head, review: says, plan, words: null, by: w.takenBy ?? w.startedBy, at: pass.at, conflict, auto: true });
         writes.asks.push({ w, pr: { repo: w.repo, number: target }, ask: asked });
         return write({ ...patch, state: "waiting", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: { author: asked } });
       }

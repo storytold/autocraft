@@ -453,7 +453,11 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.gateRed = true;
     base.cifix = cifixOf(head);
   }
-  /** The conflict with the base branch at the queue head; a hold has it too, since an approval or a person's fix-up merges the base into it (decide.ts conflictWanted). */
+  /**
+   * The conflict with the base branch at the queue head. A held PR has it only while someone works it (a live workflow, or a person's
+   * fix-up queued at its head), since an approval or that fix-up merges the base into it (decide.ts conflictWanted); a hold nobody
+   * started keeps the facts it always had.
+   */
   const conflictFacts = (): void => {
     if (base.mergeable !== "CONFLICTING" || !i.base_ref) return;
     const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff, uncapped: owned !== null }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved && !base.quiet }, now);
@@ -461,7 +465,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
   };
   if (!take) {
-    if (verdict === "hold" && state === "OPEN") conflictFacts();
+    if (verdict === "hold" && state === "OPEN" && (wfFact || base.operator?.fix)) conflictFacts();
     return base;
   }
 

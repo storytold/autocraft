@@ -218,7 +218,7 @@ function Commands() {
           ))}
         </ul>
         <p>
-          <Code>land it</Code>, <Code>park it</Code>, <Code>carry on</Code>, <Code>wait for the author</Code> {t("mean merge, backlog, resume and ask author.")}
+          <Code>land it</Code>, <Code>park it</Code>, <Code>carry on</Code>, <Code>ask the author</Code> {t("mean merge, backlog, resume and ask author.")}
         </p>
         <p>{t("These don't run:")}</p>
         <ul className="flex flex-col gap-2">

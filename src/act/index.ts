@@ -19,7 +19,11 @@ import { addAudit, loadTrackedRepos } from "../data/control/index.ts";
 import { applyLocal } from "../data/mirror/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
 import { listWorkflows, loadActions, loadActionsDue, saveActions, type ActionState, type DueAction } from "../data/workflow/index.ts";
-import { authorAsk } from "../workflow/types.ts";
+import { authorAsk, type AuthorAsk } from "../workflow/types.ts";
+import { authorUnaskableOf } from "../workflow/effects.ts";
+import { authorNotAsked } from "../workflow/advance.ts";
+import { chainsOwn } from "../core/evidence.ts";
+import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import type { Exec } from "../fixup/git.ts";
@@ -237,31 +241,41 @@ async function closeOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (
 
 /**
  * Posts the comment of a workflow's author ask (src/workflow/effects.ts queueAuthorAsk) as the app: only while the workflow still waits
- * for the author at the head it was asked at, and the PR is open there. A person's command is its approval; an ask the review made acts
- * for the person who started the work.
+ * for the author at the head it was asked at (or our own pushes on top of it), and the PR is open there. A person's command is its
+ * approval; an ask the review made acts for the person who started the work (core/gates.ts). An ask that ends without its comment, while
+ * the workflow still waits with it, brings the workflow back to the person with the reason (authorNotAsked): it never waits for a
+ * comment nobody got. A bot, AutoCraft itself or a quiet PR's author is never asked.
  */
 async function askOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (line: string) => void; started: () => void }): Promise<Ended> {
   const { deps: d, log } = o;
   const at = () => d.now().toISOString();
   const say = (text: string) => jobItem(db, a.repo, a.number, text, log);
-  const end = async (reason: string): Promise<Ended> => {
+  const pr = { repo: a.repo, number: a.number };
+  /** `back`: the ask the workflow still waits with, which comes back to the person; `again`: their yes asks the author again. */
+  const end = async (reason: string, back: AuthorAsk | null, again = true): Promise<Ended> => {
     await saveActions(db, [{ id: a.id, state: "skipped", reason, at: at() }], { from: ["pending"] });
     await say(`author not asked: ${reason}`);
+    if (back && await authorNotAsked(db, a.workflow_id, back, reason, again, at())) await say("the question comes back to the person");
     return { kind: "skipped", reason };
   };
   o.started();
   const ask = authorAsk((await listWorkflows(db, { ids: [a.workflow_id] }))[0] ?? null);
-  if (!ask || ask.head !== a.head) return await end("the work no longer waits for the author there");
+  if (!ask || ask.head !== a.head) return await end("the work no longer waits for the author there", null);
+  const no = await authorUnaskableOf(db, pr);
+  if (no) return await end(no, ask, false);
   try {
     const live = await readLive(d.querier, a.repo, a.number);
-    if (!live) return await end("GitHub returned no such item");
-    if (live.state !== "OPEN") return await end(`already ${live.state.toLowerCase()} on GitHub`);
-    if (live.head !== a.head) return await end(`the pull request changed after the ask (${short(a.head)} → ${short(live.head)})`);
-    const g = await guardItem(db, { repo: a.repo, number: a.number }, { kind: "act", bucket: "close", id: a.id }, o.by, a.by);
+    if (!live) return await end("GitHub returned no such item", ask);
+    // A merged or closed PR ends its workflow (src/workflow/advance.ts): nothing comes back.
+    if (live.state !== "OPEN") return await end(`already ${live.state.toLowerCase()} on GitHub`, null);
+    if (live.head !== a.head && !(a.head && live.head && chainsOwn((await loadOwnPushes(db, [pr])).get(`${a.repo}#${a.number}`) ?? [], a.head, live.head))) {
+      return await end(`the pull request changed after the ask (${short(a.head)} → ${short(live.head)})`, ask);
+    }
+    const g = await guardItem(db, pr, { kind: "act", bucket: "close", id: a.id }, o.by, a.by);
     if ("refused" in g) { await say(`author not asked yet: ${g.refused}`); return { kind: "left" }; }
-    if (authorAsk((await listWorkflows(db, { ids: [a.workflow_id] }))[0] ?? null)?.at !== ask.at) return await end("the ask changed");
+    if (authorAsk((await listWorkflows(db, { ids: [a.workflow_id] }))[0] ?? null)?.at !== ask.at) return await end("the ask changed", null);
     const w: Writer = { db, login: ACTOR, ...d.app };
-    const url = await commentOn(w, g, d.querier, "act-comment", { repo: a.repo, number: a.number, id: live.id }, ask.auto ? { by: "fixed" } : { by: "fixed-operator" }, ask.text, { action: a.id, workflow: a.workflow_id, by: a.by });
+    const url = await commentOn(w, g, d.querier, "act-comment", { ...pr, id: live.id }, ask.auto ? { by: "fixed" } : { by: "fixed-operator" }, ask.text, { action: a.id, workflow: a.workflow_id, by: a.by, head: a.head });
     await saveActions(db, [{ id: a.id, state: "done", reason: null, commentUrl: url, at: at() }], { from: ["pending"] });
     await say("asked the author");
     return { kind: "done" };
@@ -273,6 +287,7 @@ async function askOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (li
     const shown = last ? `stopped after ${attempts} failed tries: ${why}` : why;
     await saveActions(db, [{ id: a.id, state: last ? "failed" : "pending", reason: shown, attempts, at: at() }], { from: ["pending"] });
     await say(`author not asked: ${shown}`);
+    if (last && await authorNotAsked(db, a.workflow_id, ask, shown, true, at())) await say("the question comes back to the person");
     return { kind: "failed", reason: shown };
   }
 }

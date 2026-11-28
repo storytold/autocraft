@@ -11,6 +11,9 @@ import { loadChecks, loadItems, loadRepoCiSignals, loadRepos } from "../data/mir
 import { queueIssueReviews } from "../data/issuereview/index.ts";
 import { withdrawItemCalls, withdrawUnownedItemCalls } from "../data/runners/index.ts";
 import { adoptLegs, endFixupRequests, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadLegs, queueActions, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
+import { loadOwnLogins } from "../data/access/index.ts";
+import { loadQuiet } from "../data/security/quiet.ts";
+import { isBotLogin } from "../review/bots.ts";
 import { loadReviewsAt, type ReviewRow } from "../data/review/index.ts";
 import { headRef } from "../data/review/rows.ts";
 import { authorAskComment } from "../act/templates.ts";
@@ -330,17 +333,38 @@ export async function queueClose(c: Ctx, workflowId: number, item: Target, close
 const ASK_LINE_CHARS = 160;
 
 /**
+ * Why AutoCraft does not ask the PR's author, or null when it may: GitHub names none, the author is a bot or AutoCraft itself, or the PR
+ * is quiet (a security fix nothing is posted about). `own`: AutoCraft's own logins, lower case (loadOwnLogins).
+ */
+export function authorUnaskable(o: { login: string | null | undefined; type?: string | null; quiet: boolean; own: ReadonlySet<string> }): string | null {
+  if (o.quiet) return t("nothing is posted about this pull request");
+  if (!o.login) return t("GitHub names no author of this pull request");
+  if (o.type === "Bot" || isBotLogin(o.login)) return t("its author is a bot");
+  if (o.own.has(o.login.toLowerCase())) return t("AutoCraft opened it");
+  return null;
+}
+
+/** Why AutoCraft does not ask the author of the PR (authorUnaskable), read from the mirror; null when it may. */
+export async function authorUnaskableOf(db: Db, pr: { repo: string; number: number }): Promise<string | null> {
+  const [items, quiet, own] = await db.together(() => Promise.all([loadItems(db, [pr], "pr"), loadQuiet(db, [`${pr.repo}#${pr.number}`]), loadOwnLogins(db)]));
+  const i = items.get(`${pr.repo}#${pr.number}`);
+  return authorUnaskable({ login: i?.author, type: i?.author_type, quiet: quiet.size > 0, own });
+}
+
+/**
  * What AutoCraft asks a PR's author (`login`) for, at `head`: the comment, built from the review of that head (its public summary, and its
  * fixes nobody dropped from `plan`, by title and file) and the person's own `words`, and the line the status shows. Text that points at
- * the private reference is left out. `auto`: the review's recommendation asks, with no person's question first.
+ * the private reference is left out; the rest of the review's text is what passed its reply checks when it was parsed
+ * (review/opus-parse.ts publicTexts), so no model call is needed here. `conflict`: the base branch the PR conflicts with, which the
+ * comment asks the author to merge in or rebase on. `auto`: the review's recommendation asks, with no person's question first.
  */
-export function authorAskFor(o: { login: string | null; head: string; review: ReviewRow | null; plan: readonly PlanPart[]; words: string | null; by: string; at: string; auto?: boolean }): AuthorAsk {
+export function authorAskFor(o: { login: string | null; head: string; review: ReviewRow | null; plan: readonly PlanPart[]; words: string | null; by: string; at: string; conflict?: string | null; auto?: boolean }): AuthorAsk {
   const dropped = new Set(o.plan.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase()));
   const clean = (x: string | null | undefined): string | null => (x?.trim() && !REFERENCE_LEAK.test(x) ? x.trim() : null);
   const summary = clean(o.review?.public_summary);
   const fixes = (o.review?.fixes ?? []).flatMap((f) => (f.title && clean(f.title) && !dropped.has(f.title.toLowerCase()) ? [{ title: f.title, file: REFERENCE_LEAK.test(f.file) ? "" : f.file }] : []));
   const words = o.words?.trim() || null;
-  const text = authorAskComment({ login: o.login, summary, fixes, words, from: words && !o.auto ? o.by : null });
+  const text = authorAskComment({ login: o.login, summary, fixes, words, from: words && !o.auto ? o.by : null, conflict: o.conflict ?? null });
   const line = clipText(firstSentence(words ?? summary ?? fixes[0]?.title ?? t("finish the pull request")).replace(/\s+/g, " "), ASK_LINE_CHARS);
   return { login: o.login, head: o.head, text, line, by: o.by, at: o.at, ...(o.auto ? { auto: true as const } : {}) };
 }
@@ -350,9 +374,15 @@ export async function authorAskOf(c: Ctx, words: string | null, plan: readonly P
   const { db, item } = c;
   if (item.kind !== "pr") throw new EffectError(t("ask author is for pull requests."));
   if (!item.head) throw new EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: `${item.repo}#${item.number}` }));
-  const [items, reviews] = await db.together(() => Promise.all([loadItems(db, [{ repo: item.repo, number: item.number }], "pr"), loadReviewsAt(db, [{ repo: item.repo, number: item.number, head: item.head! }])]));
-  const login = items.get(`${item.repo}#${item.number}`)?.author ?? null;
-  return authorAskFor({ login, head: item.head, review: reviews.get(headRef(item.repo, item.number, item.head)) ?? null, plan, words, by: c.by, at: c.at });
+  const ref = `${item.repo}#${item.number}`;
+  const [items, reviews, quiet, own] = await db.together(() => Promise.all([
+    loadItems(db, [{ repo: item.repo, number: item.number }], "pr"), loadReviewsAt(db, [{ repo: item.repo, number: item.number, head: item.head! }]), loadQuiet(db, [ref]), loadOwnLogins(db),
+  ]));
+  const i = items.get(ref);
+  const no = authorUnaskable({ login: i?.author, type: i?.author_type, quiet: quiet.size > 0, own });
+  if (no) throw new EffectError(t("AutoCraft does not ask the author of {ref}: {why}.", { ref, why: no }));
+  const conflict = i?.mergeable === "CONFLICTING" ? i.base_ref : null;
+  return authorAskFor({ login: i?.author ?? null, head: item.head, review: reviews.get(headRef(item.repo, item.number, item.head)) ?? null, plan, words, by: c.by, at: c.at, conflict });
 }
 
 /**

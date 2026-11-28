@@ -22,6 +22,8 @@ export type WorkflowFact = {
   droppedFindings?: { title: string; head: string | null }[];
   /** The lower-case titles of `droppedFindings` that still overrule the pre-merge review at the PR's head (the PR facts set it, src/core/facts.ts). */
   overruled?: string[];
+  /** The PR's workflow waits for its author (src/workflow/types.ts authorAsk): `auto` when the review asked, `person` when a person did. */
+  authorAsk?: "auto" | "person";
 };
 /** Live workflows of PRs, by the PR. */
 export type PrWorkflows = Map<RefKey, ItemWorkflow>;

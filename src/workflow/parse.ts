@@ -386,17 +386,22 @@ const AUTHOR_MARK = "\u0004";
 /** The words of the ask-author command, longest first. */
 const ASK_AUTHOR_RE = new RegExp(`(?<![\\w-])(?:${any(["ask author", ...COMMANDS.filter((c) => c.word === "ask-author").flatMap((c) => [c.word, ...c.aliases])])})(?![\\w-])`, "i");
 
+/** Words after ask author that doubt the command itself ("ask the author? not sure", "ask author, maybe"): they are not words for the author. */
+const DOUBT_START = /^(?:\?|(?:maybe|perhaps|possibly|probably|unless|if|or|not sure|unsure|i guess|i think)(?![\w-]))/i;
+
 /**
  * The first ask-author command and the person's words for the author after it ("ask the author to wire in the group editor, then merge"),
  * up to where the next command starts: they come out of the text, and the command stays with a marker in their place. A leading
- * "to", "for" or "that" is not theirs.
+ * "to", "for" or "that" is not theirs. Words that start with a question mark or a hedge stay in the text, so the message reads as ambiguous.
  */
 function pullAuthorWords(text: string): { text: string; words: string | null } {
   const m = ASK_AUTHOR_RE.exec(text);
   if (!m) return { text, words: null };
   const tail = text.slice(m.index + m[0].length);
   const end = INSTRUCTION_END.exec(tail);
-  const words = (end ? tail.slice(0, end.index) : tail).replace(/^\s*:?\s*/, "").replace(/^(?:to|for|that)\s+/i, "").replace(/[\s,;.!]+$/, "").trim();
+  const raw = end ? tail.slice(0, end.index) : tail;
+  if (DOUBT_START.test(raw.replace(/^[\s,;:]+/, ""))) return { text, words: null };
+  const words = raw.replace(/^\s*:?\s*/, "").replace(/^(?:to|for|that)\s+/i, "").replace(/[\s,;.!]+$/, "").trim();
   return { text: `${text.slice(0, m.index)}ask-author${words ? ` ${AUTHOR_MARK}` : ""}${end ? tail.slice(end.index) : ""}`, words: words || null };
 }
 

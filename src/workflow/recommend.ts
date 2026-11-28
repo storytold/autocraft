@@ -162,9 +162,9 @@ function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Reco
 
 /**
  * A hold that plans no fix, where the review gave no recommendation of its own. One that waits for the other items it names goes to the
- * backlog: nothing of the PR's own can settle it. Otherwise its author finishes it: a hold whose problem blocks the merge (`hold`, a
- * regression, the PR not doing what it says, security, data loss) asks the author at once; one that blocks nothing an approval would
- * merge may be a question of scope, so a person answers first. A bare fix makes the fix-up build what the review found (withFinding).
+ * backlog: nothing of the PR's own can settle it. Otherwise its author finishes it: a hold the review classed as blocking the merge
+ * (`hold`: a regression, the PR not doing what it says, security, data loss) asks the author at once; one that blocks nothing an
+ * approval would merge may be a question of scope, and one with no class says neither, so a person answers first. A bare fix makes the fix-up build what the review found (withFinding).
  */
 function held(finding: string | null, blockedBy: readonly string[], hold: Blocking | null | undefined, drop: number[]): Recommendation {
   const said = finding?.trim() ? asSentence(clipText(finding.trim(), FINDING_CHARS)) : null;
@@ -172,7 +172,8 @@ function held(finding: string | null, blockedBy: readonly string[], hold: Blocki
   if (blockedBy.length) {
     return { text: holds(t("It waits for {items}. Put it in the backlog.", { items: listText(blockedBy.map((r) => `\`${r}\``)) })), parts: { fix: [], drop }, merges: false, backlog: true };
   }
-  return { text: holds(textFor({ author: true })), parts: { fix: [], drop }, merges: false, author: hold?.class === null ? "scope" : "ask" };
+  // Only a hold the review classed as blocking asks at once; one stored before reviews classed holds (no class) asks a person first.
+  return { text: holds(textFor({ author: true })), parts: { fix: [], drop }, merges: false, author: hold != null && hold.class !== null ? "ask" : "scope" };
 }
 
 /** Characters of a review's finding a bare fix hands the fix-up (the instructions take at most INSTRUCTIONS_MAX). */
@@ -182,6 +183,16 @@ const FINDING_FIX_CHARS = 1200;
 function withFinding(rec: Recommendation, finding: string | null): Recommendation {
   const text = finding?.trim();
   return text && !rec.parts.fix.length && !rec.close ? { ...rec, finding: clipText(text, FINDING_FIX_CHARS) } : rec;
+}
+
+/**
+ * A recommendation to ask the author, where AutoCraft does not ask them (`why`, effects.ts authorUnaskable): a yes puts the item in the
+ * backlog, and the sentence keeps what the review found.
+ */
+export function withoutAuthor(rec: Recommendation, why: string, finding: string | null): Recommendation {
+  const said = finding?.trim() ? asSentence(clipText(finding.trim(), FINDING_CHARS)) : null;
+  const then = t("AutoCraft does not ask the author, since {why}. Put it in the backlog.", { why });
+  return { text: said ? t("The review found: {finding} {then}", { finding: said, then }) : then, parts: { fix: [], drop: rec.parts.drop }, merges: false, backlog: true };
 }
 
 /** A question that takes the place of one the author pushed past. */
