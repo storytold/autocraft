@@ -167,7 +167,9 @@ type Outcome = "opened" | "skipped" | "failed" | "waiting" | "linting" | "issue"
  * linting with a stored patch, goes to issue-opening when no patch was made and its check fails only in test code
  * (testCodeFailure), or stays as it is while the head is still running or the lint task is.
  */
-async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: SessionLedger, sessions: boolean): Promise<Outcome> {
+/** `session`: the fix session environment when the fix is made in the repo's main-fix session; absent: the patch path. */
+async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: SessionLedger, session: StepEnv | undefined): Promise<Outcome> {
+  const sessions = session !== undefined;
   const at = (): string => c.now().toISOString();
   const head = rows[0]!.headSha;
   const set = async (list: FixRow[], state: "nothing-to-do" | "fix-failed", reason: string): Promise<"skipped" | "failed"> => {
@@ -241,8 +243,11 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
       for (const r of live) await c.setState(r, "linting", null, at(), { patch, files: JSON.stringify(files), lintTask: task, lintRound: round, lintState: state, session, sessionTurn });
     };
 
-    /** `sessionTurn`: the fix session turn that wrote the change. `wait`: the fix session cannot work now; nothing is recorded or counted. */
-    type Made = { ok: true; patch: string; files: string[]; changed: number; shown: CifixPr["files"]; model: string; applied: Awaited<ReturnType<typeof treeOf>>; sessionTurn?: number } | { ok: false; reason: string; wait?: true };
+    /**
+     * `sessionTurn`: the fix session turn that wrote the change. `wait`: the fix session cannot work now; nothing is recorded or counted.
+     * `moved`: the session's tree left the head while its change was read; uncounted, and the rows end (movedTree).
+     */
+    type Made = { ok: true; patch: string; files: string[]; changed: number; shown: CifixPr["files"]; model: string; applied: Awaited<ReturnType<typeof treeOf>>; sessionTurn?: number } | { ok: false; reason: string; wait?: true; moved?: true };
     const culpritQuiet = async (): Promise<boolean> => !!now.culpritPr && (await loadQuiet(c.db, [`${c.repo}#${now.culpritPr}`])).size > 0;
     const runId = `main-fix-${c.repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
     const reviewReason = `The default branch fails the check${names.length > 1 ? "s" : ""} ${names.join(", ")} at this head. The patch must make ${names.length > 1 ? "them" : "it"} pass without changing what the code is meant to do.`;
@@ -274,13 +279,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
      */
     const fromSession = async (round: number, lint?: { patch: string; findings: string[]; sessionTurn: number | null }): Promise<Made> => {
       const wait = (reason: string): Made => ({ ok: false, reason, wait: true });
-      if (!c.fix.session) return wait("fix sessions are on for main-fix, but this job has no fix session environment");
-      let env: StepEnv;
-      try {
-        env = { ...c.fix.session(c.db, c.log), pollReady: false };
-      } catch (e) {
-        return wait(String((e as Error).message ?? e));
-      }
+      const env: StepEnv = { ...session!, pollReady: false };
       const scripts = await buildScriptsAt(git, head);
       const failure = { head, checks };
       const allowed = cifixFiles(failure, "", scripts);
@@ -305,6 +304,9 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
       }
       c.log(`  ${c.repo}: fix session ${out.session.id}: ${out.turns.length} turns, ${out.kind}`);
       if (out.kind === "wait") return wait(out.reason);
+      // The change was read from a tree seeded from another commit than the head (another attempt reseeded it): it is not used, the
+      // round is not counted, and the rows end so that the model is not run again on this head.
+      if (out.kind === "ok" && out.baseSha !== head) return { ok: false, reason: `the fix session's tree moved to ${out.baseSha.slice(0, 8) || "no commit"} while the change at ${head.slice(0, 8)} was read`, moved: true };
       count();
       switch (out.kind) {
         case "ended":
@@ -313,7 +315,6 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
         case "empty": return { ok: false, reason: "the session reported a fix and changed nothing" };
         case "refused": return { ok: false, reason: out.problems.join("; ") };
         case "ok": {
-          if (out.baseSha !== head) return wait(`the fix session's tree is at ${out.baseSha.slice(0, 8) || "no commit"}, not the head ${head.slice(0, 8)}`);
           const tree = await treeOf(out.gate.patch);
           if (!tree.ok) return { ok: false, reason: tree.reason };
           const checkout = (await c.fix.checkout?.(c.repo, now.branch, head)) ?? undefined;
@@ -322,6 +323,12 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
           return { ok: true, patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed, shown: [], model: SESSION_MODEL, applied: tree, sessionTurn: out.turnId };
         }
       }
+    };
+
+    /** A change read off a moved tree: nothing to do when main moved on meanwhile, else the head's fix ends as failed with the reason. */
+    const movedTree = async (reason: string): Promise<"skipped" | "failed"> => {
+      const again = await c.current();
+      return !again || again.state !== "red" || again.headSha !== head ? await done("nothing-to-do", "main changed while the fix was made") : await done("fix-failed", reason);
     };
 
     let patch: string, patchFiles: string[], changed: number, shown: CifixPr["files"] = [], model = PATCH_MODEL;
@@ -358,6 +365,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
           dropSessions(w.session);
           made = await fromSession(w.round + 1, { patch: w.patch, findings: texts, sessionTurn: w.sessionTurn });
           if (!made.ok && made.wait) { c.log(`  ${c.repo}: waiting: ${scrubReason(oneLine(made.reason), c.fix.root)}`); return "waiting"; }
+          if (!made.ok && made.moved) return await movedTree(made.reason);
         } else {
           count();
           ses = sessionAsk(w.session, "", texts, new Date(at()));
@@ -378,6 +386,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
       const ses: SessionAsk = {};
       const made = sessions ? await fromSession(1) : await generate(null, 1, ses);
       if (!made.ok && made.wait) { c.log(`  ${c.repo}: waiting: ${scrubReason(oneLine(made.reason), c.fix.root)}`); return "waiting"; }
+      if (!made.ok && made.moved) return await movedTree(made.reason);
       if (!made.ok) return await noPatch(made.reason);
       ({ patch, files: patchFiles, changed, shown, model, applied } = made);
       // Like every model patch, this one is linted before it is pushed; the collect step on a later run folds in the formatting or sends findings back.
@@ -441,14 +450,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
  * The step on the repo's main-fix session ended (it did not wait): the session's pod is parked, unless a change a turn of that session
  * wrote is stored and waits for its lint task, whose findings go back to the session.
  */
-async function endStepPod(c: Ctx): Promise<void> {
-  if (!c.fix.session) return;
-  let env: StepEnv;
-  try {
-    env = c.fix.session(c.db, c.log);
-  } catch {
-    return;
-  }
+async function endStepPod(c: Ctx, env: StepEnv): Promise<void> {
   const pending = async (s: FixSession): Promise<boolean> => {
     const turns = (await loadMainFixes(c.db, { repo: c.repo, states: ["linting"], verdict: "code" })).flatMap((r) => (r.lintTask !== null && r.sessionTurn != null ? [r.sessionTurn] : []));
     return turns.length > 0 && [...(await loadTurns(c.db, turns)).values()].some((t) => t.sessionId === s.id);
@@ -463,8 +465,17 @@ export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ open
   const byHead = new Map<string, FixRow[]>();
   const ledger = new SessionLedger();
   for (const r of rows) (byHead.get(r.headSha) ?? byHead.set(r.headSha, []).get(r.headSha)!).push(r);
-  // Read once per job: a switch flipped meanwhile applies from the next job.
-  const sessions = await fixSessionsOn(c.db, "main-fix", c.repo);
+  // Read once per job: a switch flipped meanwhile applies from the next job. A job that cannot reach a fix session's workspace makes
+  // the fix on the patch path and says so.
+  let session: StepEnv | undefined;
+  if (await fixSessionsOn(c.db, "main-fix", c.repo)) {
+    try {
+      if (!c.fix.session) throw new Error("this job has no fix session environment");
+      session = c.fix.session(c.db, c.log);
+    } catch (e) {
+      c.log(`  ${c.repo}: fix sessions are on for main-fix, but ${scrubReason(oneLine(String((e as Error).message ?? e)), c.fix.root)}; the fix is made on the patch path`);
+    }
+  }
   try {
     await sweepSessions(c.db, c.now());
     let stopLogged = false;
@@ -483,9 +494,9 @@ export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ open
         if (!now.length) return;
         // Rows that turned red after the patch was stored wait until it is collected.
         const stored = now.filter((r) => r.state === "linting");
-        const o = await attempt(c, stored.length ? stored : now, () => onHandled?.(), ledger, sessions);
+        const o = await attempt(c, stored.length ? stored : now, () => onHandled?.(), ledger, session);
         if (o !== "waiting") out[o]++;
-        if (sessions && o !== "waiting") await endStepPod(c);
+        if (session && o !== "waiting") await endStepPod(c, session);
       } finally { await release(); }
     }), poolRoom(c.db, () => [c.repo], () => []), { max: POOL_MAX.mainfix });
   } finally {

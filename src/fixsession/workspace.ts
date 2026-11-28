@@ -100,7 +100,8 @@ export type WorkspaceReady = {
 export async function fixWorkspaceReading(db: Db, kind: Exclude<FixSessionKind, "security"> = "pr"): Promise<string> {
   const k = await loadEnvs(db, { kind: "kubernetes" });
   const envs = k.filter((e) => e.enabled && !envSettings(e).warmWriter).map((e) => `${e.id}${e.confidential ? "*" : ""}`).sort();
-  return `${await loadFixWorkspaceWaits(db, kind)}|${envs.join(",")}|${envsChangedAt(k) ?? ""}`;
+  // Fix red main does not wait for its workspace in the job (pollReady false), so its reading lists a parked one too.
+  return `${await loadFixWorkspaceWaits(db, kind, { parked: kind === "mainfix" })}|${envs.join(",")}|${envsChangedAt(k) ?? ""}`;
 }
 
 /** When a person last changed a kubernetes environment (made, enabled, disabled or edited one), or null when there is none. */

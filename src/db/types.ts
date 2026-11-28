@@ -1014,6 +1014,7 @@ export interface FixSessionTurns {
   diff_hash: string | null;
   created_at: string;
   settled_at: string | null;
+  quiet: Generated<number>;
 }
 
 export interface FixSessions {
@@ -3397,7 +3398,7 @@ export const COLUMNS = {
   fast_track: ["id", "repo", "number", "added_by", "added_at", "weight"],
   final_reviews: ["repo", "number", "head_oid", "run_id", "at", "model", "verdict", "reason", "fixes", "risks", "sure", "mode", "base_head", "seen_at", "disc_hash"],
   fix_attempts: ["repo", "number", "main_sha", "text_hash", "state", "round", "files", "crate", "crate_dir", "patch", "test_patch", "head_task_id", "base_task_id", "retries", "push_tries", "summary", "pr_url", "reason", "created_at", "updated_at", "size", "format_diff"],
-  fix_session_turns: ["id", "session_id", "step", "purpose", "head", "call_id", "parent_id", "outcome", "report", "error", "turns", "cost_usd", "tool_calls", "shell_ms", "diff_hash", "created_at", "settled_at"],
+  fix_session_turns: ["id", "session_id", "step", "purpose", "head", "call_id", "parent_id", "outcome", "report", "error", "turns", "cost_usd", "tool_calls", "shell_ms", "diff_hash", "created_at", "settled_at", "quiet"],
   fix_sessions: ["id", "kind", "repo", "number", "workspace_id", "head", "last_call_id", "model", "turns", "cost_usd", "state", "end_reason", "created_at", "updated_at", "ended_at"],
   fixups: ["repo", "number", "from_head", "to_head", "state", "reason", "files", "attempt", "created_at", "source", "patch", "lint_task", "lint_round", "lint_state", "carry_decision", "operator_fix", "changes", "session", "session_turn"],
   flow_summary: ["repo", "counts", "counted_at", "stale", "decisions_sig"],

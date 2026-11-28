@@ -1537,7 +1537,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS fix_sessions_live ON fix_sessions(kind, repo, 
 CREATE TABLE IF NOT EXISTS fix_session_turns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,
-  step TEXT NOT NULL,                 -- fixup | maintainer | cifix | conflict | security
+  step TEXT NOT NULL,                 -- fixup | maintainer | cifix | conflict | security | main-fix
   purpose TEXT NOT NULL,              -- start | step | findings | lint | undo | report | fresh
   head TEXT,                          -- the commit the turn's workspace base held
   call_id INTEGER,                    -- remote_calls.id
@@ -1551,7 +1551,8 @@ CREATE TABLE IF NOT EXISTS fix_session_turns (
   shell_ms INTEGER,
   diff_hash TEXT,                     -- of the diff collected from the workspace after the turn
   created_at TEXT NOT NULL,
-  settled_at TEXT
+  settled_at TEXT,
+  quiet INTEGER NOT NULL DEFAULT 0    -- 1: the turn's task was a quiet one (a security fix not yet published)
 );
 CREATE INDEX IF NOT EXISTS fix_session_turns_of ON fix_session_turns(session_id, id);
 

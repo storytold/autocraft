@@ -49,10 +49,12 @@ export type FixTurn = {
   /** The call's model turns. */
   turns: number | null; costUsd: number | null; toolCalls: number | null; shellMs: number | null;
   diffHash: string | null;
+  /** The turn's task was a quiet one (a security fix not yet published). */
+  quiet: boolean;
   createdAt: string; settledAt: string | null;
 };
 
-export type NewFixTurn = { sessionId: number; step: FixTurnStep; purpose: FixTurnPurpose; head?: string | null; callId?: number | null; parentId?: number | null };
+export type NewFixTurn = { sessionId: number; step: FixTurnStep; purpose: FixTurnPurpose; head?: string | null; callId?: number | null; parentId?: number | null; quiet?: boolean };
 
 /** How a turn ended; fields left out stay as they are. */
 export type FixTurnSettle = {

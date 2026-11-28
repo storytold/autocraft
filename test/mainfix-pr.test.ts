@@ -90,7 +90,7 @@ async function world(o: { source?: string; log?: string; reply?: string | null }
       checkout: async () => join(dir, "checkout"),
     },
   };
-  const step = () => runMainFix(db, { repo: "app" }, () => {}, deps);
+  const step = (log: (line: string) => void = () => {}) => runMainFix(db, { repo: "app" }, log, deps);
   return { db, head, step, asked, log, deps, work, fork };
 }
 
@@ -196,4 +196,15 @@ test("with main-fix in fix_sessions the fix is a session turn in a workspace at 
   await off.step();
   assert.equal(off.asked.length, 1, "off: the patch path");
   assert.equal((await off.db.all(off.db.k.selectFrom("fix_sessions").select("id"))).length, 0);
+
+  // On, but the job cannot reach a fix session's workspace: the patch path makes the fix, and the job log says so.
+  const away = await world();
+  await setFixSessions(away.db, { steps: ["main-fix"], repos: null }, "op");
+  away.deps.fix!.session = () => { throw new Error("this runner is not in the cluster"); };
+  const lines: string[] = [];
+  await away.step((l) => lines.push(l));
+  assert.equal(away.asked.length, 1, "no fix session environment: the patch path");
+  assert.equal((await stateOf(away.db)).state, "linting");
+  assert.ok(lines.some((l) => /fix sessions are on for main-fix, but this runner is not in the cluster; the fix is made on the patch path/.test(l)), lines.join("\n"));
+  assert.equal((await away.db.all(away.db.k.selectFrom("fix_sessions").select("id"))).length, 0);
 });

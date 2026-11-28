@@ -26,7 +26,7 @@ const turnOf = (r: Raw): FixTurn => ({
   id: Number(r.id), sessionId: Number(r.session_id), step: r.step as FixTurnStep, purpose: r.purpose as FixTurnPurpose, head: r.head ?? null,
   callId: num(r.call_id), parentId: num(r.parent_id), outcome: r.outcome as FixTurnOutcome, report: parse(r.report ?? null), error: r.error ?? null,
   turns: num(r.turns), costUsd: num(r.cost_usd), toolCalls: num(r.tool_calls), shellMs: num(r.shell_ms), diffHash: r.diff_hash ?? null,
-  createdAt: r.created_at, settledAt: r.settled_at ?? null,
+  quiet: Number(r.quiet ?? 0) === 1, createdAt: r.created_at, settledAt: r.settled_at ?? null,
 });
 
 /** The live session of an item, or null. 1 statement. */
@@ -41,13 +41,15 @@ export async function loadLiveFixSession(db: Db, kind: FixSessionKind, repo: str
  * another commit than its session's head as `id:state@commit`, a session without a workspace as `s<id>:none`, and one whose pod found
  * no room as `s<id>:capacity`, the same over every such try. While a session waits for room, each environment's last time a workspace
  * gave up its pod (parked, ended, or failed other than for room) follows as `env=time`: room may have come free. A step that waited
- * runs again when this moves (fixWorkspaceReading). 1 statement, 2 while a session waits for room.
+ * runs again when this moves (fixWorkspaceReading). With `parked`, a parked workspace is listed too: a step that does not wait for its
+ * workspace in the job resumes a parked one and ends, and the resume may finish before the planner's next pass, so the reading must
+ * have held the parked state for the ready one to move it. 1 statement, 2 while a session waits for room.
  */
-export async function loadFixWorkspaceWaits(db: Db, kind: FixSessionKind): Promise<string> {
+export async function loadFixWorkspaceWaits(db: Db, kind: FixSessionKind, o: { parked?: boolean } = {}): Promise<string> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.fix_sessions as fs").leftJoin("main.workspaces as w", "w.id", "fs.workspace_id")
     .select(["fs.id as sid", "fs.head", "w.id", "w.state", "w.base_sha", "w.fail_kind", "w.env_id"]).where("fs.kind", "=", kind).where("fs.state", "=", "live")
-    .where((eb) => eb.or([eb("w.id", "is", null), eb("w.state", "not in", ["ready", "parked"]), eb.and([eb("fs.head", "is not", null), eb("w.base_sha", "<>", eb.ref("fs.head"))])])).orderBy("fs.id"));
+    .where((eb) => eb.or([eb("w.id", "is", null), eb("w.state", "not in", o.parked ? ["ready"] : ["ready", "parked"]), eb.and([eb("fs.head", "is not", null), eb("w.base_sha", "<>", eb.ref("fs.head"))])])).orderBy("fs.id"));
   const out: string[] = [];
   const short = new Set<string>();
   for (const r of rows as Raw[]) {
@@ -174,7 +176,7 @@ export async function addFixTurn(db: Db, t: NewFixTurn, at: string): Promise<num
   const q = queryDb(db);
   return await db.write(async () => {
     const r = await q.get(q.k.insertInto("main.fix_session_turns").values({
-      session_id: t.sessionId, step: t.step, purpose: t.purpose, head: t.head ?? null, call_id: t.callId ?? null, parent_id: t.parentId ?? null, created_at: at,
+      session_id: t.sessionId, step: t.step, purpose: t.purpose, head: t.head ?? null, call_id: t.callId ?? null, parent_id: t.parentId ?? null, quiet: t.quiet ? 1 : 0, created_at: at,
     }).returning("id"));
     await q.run(q.k.updateTable("main.fix_sessions").set({ updated_at: at }).where("id", "=", t.sessionId));
     return Number(r!.id);
