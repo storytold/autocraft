@@ -14,7 +14,7 @@ import { loadCallPrompt, loadCallUsage } from "../data/runners/index.ts";
 import { awaitTurn, queueTurn, realCalls, settleOrphan, type CallDeps, type RoundStore, type TurnResult } from "../build/session-turns.ts";
 import { resumePrompt, type WorkspaceCallRequest } from "../build/workspace-call.ts";
 import { WORK_ROOT } from "../build/workspace-tool-specs.ts";
-import { describeHeader, execWs } from "../build/workspaces.ts";
+import { describeHeader, execWs, getWorkspace } from "../build/workspaces.ts";
 import { runChecks, statOf, workspacePod, type CheckRound, type Pod } from "../implement/checks.ts";
 import { workspaceDiff } from "../implement/diff.ts";
 import { CLAUDE_PROMPTS, claudeParts } from "../prompts/index.ts";
@@ -186,7 +186,11 @@ export type StepResult =
   | { kind: "empty"; report: SecurityReport; callId: number }
   | { kind: "refused"; problems: string[]; report: SecurityReport; callId: number; diff: string | null }
   /** `base`: the workspace's base commit, which the diff is against (the tree of `spec.head`). */
-  | { kind: "ok"; gate: GateOk; diff: string; base: string; diffHash: string; report: SecurityReport; callId: number; turnId: number };
+  /**
+   * `baseSha`: the commit the workspace's tree was seeded from when the diff was read (empty when its row is gone); a caller that
+   * applies onto another head treats the change as made on a branch that moved.
+   */
+  | { kind: "ok"; gate: GateOk; diff: string; base: string; baseSha: string; diffHash: string; report: SecurityReport; callId: number; turnId: number };
 export type StepOutcome = StepResult & { session: FixSession; workspaceId: number | null; turns: FixTurnResult[]; checks: CheckRound[] };
 
 /** The default branch's AGENTS.md of `repo` from the docs cache, or null. */
@@ -427,7 +431,7 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
     }
     if (diff === "") return done({ kind: "empty", report, callId }, ws.workspaceId);
     const g = diff === null ? { ok: false as const, problems: [(d as { reason: string }).reason] } : await runGate(spec.gate(pod), diff, report);
-    if (g.ok) return done({ kind: "ok", gate: g, diff: diff!, base: ws.baseCommit, diffHash, report, callId, turnId: cur.id }, ws.workspaceId);
+    if (g.ok) return done({ kind: "ok", gate: g, diff: diff!, base: ws.baseCommit, baseSha: (await getWorkspace(db, ws.workspaceId))?.base_sha ?? "", diffHash, report, callId, turnId: cur.id }, ws.workspaceId);
     env.log(`fix session ${s.id}: the ${spec.step} gates refused the change: ${g.problems.join("; ")}`);
     if (undone) return done({ kind: "refused", problems: g.problems, report, callId, diff }, ws.workspaceId);
     undone = true;

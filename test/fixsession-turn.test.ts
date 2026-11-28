@@ -175,6 +175,7 @@ test("a refused fix-up edit left in the pod never reaches the next step: the CI 
   assert.equal(cifix.kind, "ok", cifix.kind === "refused" ? cifix.problems.join("; ") : cifix.kind);
   assert.ok(cifix.kind === "ok");
   assert.deepEqual(cifix.gate.files, [LIB]);
+  assert.equal(cifix.baseSha, s.head, "the change was made on the head it goes onto");
   assert.doesNotMatch(cifix.diff, /util\.rs|AGENTS/);
   assert.equal(s.queued.at(-1)!.parentId, 5000 + before + 2, "the CI fix continues the session of the fix-up's last turn");
   assert.ok(existsSync(join(root, "repo-docs/AGENTS.txt")), "the default branch's AGENTS.md is in the workspace, outside the tree");

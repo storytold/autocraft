@@ -697,6 +697,12 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
         case "empty": await fail("failed", "the session reported a fix and changed nothing"); break;
         case "refused": await fail("refused", out.problems.join("; ")); break;
         case "ok": {
+          if (out.baseSha !== head) {
+            // The change was made on another commit than the one it would be pushed onto: nothing is recorded, and the next job runs the step again.
+            summary.skipped.push(ref);
+            log(`  ${ref}: skipped: the fix session's tree is at ${short(out.baseSha) || "no commit"}, not the head ${short(head)}`);
+            break;
+          }
           const v: Fix = { patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed };
           const check = async (patch: string): Promise<string | null> => {
             const checkout = (await d.checkout?.(repo, c.number, head)) ?? undefined;
