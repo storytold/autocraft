@@ -6,7 +6,9 @@
 //          (repo, check, culprit) is opened under the repo's approval, with the check, the run link and a scrubbed log excerpt: the
 //          row is `issue-opening` before the create, later red heads of the streak reuse its number, and a create whose outcome was
 //          lost is looked up in the audit and on GitHub before another one is made.
-//   code   a compile, test, lint or format failure: recorded as needs-fix for the fix PR step (`onCodeVerdict`).
+//   code   a compile, test, lint or format failure: recorded as needs-fix for the fix PR step (`onCodeVerdict`). When every place
+//          the log names is test code, which a CI fix may not change, the fix PR step turns the rows into `issue-opening` and
+//          the red streak's issue (as for infra) names the failing test instead.
 // A failure log GitHub does not serve yet is recorded as an `unread` row at the head and read again once per main CI poll interval
 // for an hour, then hourly, while the head is the repo's newest and red (also a fix PR's re-read of the log); a log GitHub no longer
 // has, one with no job of the check, or one still unreadable after a day ends the head as `unreadable`, which needs a person.
@@ -54,7 +56,7 @@ export const ACTOR = "main-fix";
 const PROMPT = CLAUDE_PROMPTS["mainfix.classify"];
 const PATCH = CLAUDE_PROMPTS["cifix.patch"];
 const CHECK = CLAUDE_PROMPTS["fixup.check"];
-/** The model named in the note of an issue opened for an infrastructure failure: it wrote the reason. */
+/** The model named in the note of an issue opened for an infrastructure failure: it wrote the reason. A failing-test issue is template text. */
 const NOTE_MODEL = "haiku";
 /** After a rerun the head may stay red this long without a new reading before the rerun counts as failed. */
 const RERUN_WAIT_MS = 10 * 60_000;
@@ -276,13 +278,17 @@ export async function mainFixClock(db: Db, now: number): Promise<string> {
 export const mainFixDue = async (db: Db, repo: string): Promise<boolean> => (await mainFixDueRepos(db, [repo])).length > 0;
 
 const issueTarget = (r: Pick<FixRow, "repo" | "headSha">): string => `${r.repo}:${r.headSha.slice(0, 8)}`;
-const issueTitle = (check: string): string => `Main CI fails: ${cleanLine(check, 100)}`;
+/** An issue row of a code verdict is a failure only in test code (the fix PR step's testCodeFailure); the others are infra. */
+const issueTitle = (r: Pick<FixRow, "check" | "verdict">): string => `Main CI fails: ${cleanLine(r.check, 100)}${r.verdict === "code" ? " (failing test)" : ""}`;
 
 /** The issue's text. Fixed layout; the check name, reason and log excerpt are scrubbed, without URLs or mentions. */
-export function issueBody(r: Pick<FixRow, "repo" | "headSha" | "check" | "reason" | "runId" | "excerpt">): string {
+export function issueBody(r: Pick<FixRow, "repo" | "headSha" | "check" | "verdict" | "reason" | "runId" | "excerpt">): string {
   const run = r.runId ? `\nRun: https://github.com/${slugOf(r.repo)}/actions/runs/${r.runId}` : "";
   const log = (r.excerpt ?? "").replace(/```/g, "'''").trim();
-  return `The CI of the default branch fails at ${r.headSha.slice(0, 8)}.\n\nFailing check: \`${cleanLine(r.check, 100).replace(/`/g, "'")}\`${run}\n\nThe log reads as a failure outside the code (a refused request, a missing secret, a quota or an outage)${r.reason ? `: ${r.reason}` : "."}${log ? `\n\nLog excerpt:\n\n\`\`\`\n${log}\n\`\`\`` : ""}`;
+  const why = r.verdict === "code"
+    ? `No fix PR was opened${r.reason ? `: ${r.reason}` : ": the failure is in test code"}. A CI fix never changes tests, lints or CI config.`
+    : `The log reads as a failure outside the code (a refused request, a missing secret, a quota or an outage)${r.reason ? `: ${r.reason}` : "."}`;
+  return `The CI of the default branch fails at ${r.headSha.slice(0, 8)}.\n\nFailing check: \`${cleanLine(r.check, 100).replace(/`/g, "'")}\`${run}\n\n${why}${log ? `\n\nLog excerpt:\n\n\`\`\`\n${log}\n\`\`\`` : ""}`;
 }
 
 const excerptOf = (c: CiFailure["checks"][number]): string => {
@@ -480,7 +486,7 @@ async function openInfraIssue(db: Db, repo: string, check: string, cur: Current,
   const g = await guardRepo(db, repo, "main-fix", by);
   if ("refused" in g) { log(`  ${repo}: issue for ${check} not opened: ${g.refused}`); return await end("issue-failed", {}, oneLine(g.refused, 100)); }
   try {
-    const made = await createIssue({ db, login: ACTOR }, g, deps.exec, { repo, target: issueTarget(newest), title: issueTitle(check), body: issueBody(newest) }, { by: "model", kind: "issue", model: NOTE_MODEL }, { check });
+    const made = await createIssue({ db, login: ACTOR }, g, deps.exec, { repo, target: issueTarget(newest), title: issueTitle(newest), body: issueBody(newest) }, newest.verdict === "code" ? { by: "fixed" } : { by: "model", kind: "issue", model: NOTE_MODEL }, { check });
     await end("issue-opened", { issueNumber: made.number });
     s.issues++;
     log(`  ${repo}: opened ${made.url}`);
@@ -535,7 +541,6 @@ export async function runMainFix(db: Db, params: { repo: string; onHandled?: (n:
       }
     }
   }
-  const unsettled = await openInfraIssues(db, repo, cur, deps, log, s, by);
   if (deps.fix) {
     const asHead = (c: Current | null) => (c ? { headSha: c.headSha, branch: c.branch, state: c.state, redSince: c.redSince, culprit: c.culprit, culpritPr: c.culpritPr } : null);
     const r = await openFixPrs({
@@ -545,6 +550,8 @@ export async function runMainFix(db: Db, params: { repo: string; onHandled?: (n:
     }, bump);
     s.prs = r.opened;
   }
+  // After the fix PR step, which turns a failure only in test code into an issue row.
+  const unsettled = await openInfraIssues(db, repo, cur, deps, log, s, by);
   log(`main-fix ${repo}: classified ${s.classified}, reran ${s.reran}, needs fix ${s.needsFix}, issues ${s.issues}, fix PRs ${s.prs}${s.note ? `; ${s.note}` : ""}`);
   // The job fails: the failure backoff spaces the next look (a paced write's message is skipped by it, so the next pass runs it again).
   if (unsettled.length) throw new Error(unsettled.join("; "));

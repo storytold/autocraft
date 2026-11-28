@@ -165,19 +165,36 @@ export function gitFormatDiff(text: string): string {
 }
 
 const DIFF_FILE = /^diff --git a\/(\S+) b\/\S+$/gm;
-const LOCATION = /^\s*--> ([\w./-]+\.rs):\d+/;
+const LOCATION = /^\s*--> ([\w./-]+\.rs):(\d+)/;
 const ERROR_LINE = /^\s*error(\[E\d+\])?: /;
+// `thread 'a::tests::b' (437684) panicked at src/a.rs:12:5:` (the thread id is printed by newer toolchains).
+const PANIC = /^\s*thread '([^'\n]*)'(?: \(\d+\))? panicked at ([\w./-]+\.rs):(\d+):\d+:\s*$/;
+const TEST_NAME = /^[A-Za-z_][\w]*(::[A-Za-z_][\w]*)*$/;
 
-/** Files named on the compiler location line (`--> path:line`) directly after an `error` line. The log is untrusted, so no other mention counts. */
-export function errorFiles(log: string): string[] {
+/** A place in the repository a failure log names: a compile error or a panic, with the thread's test name for a panic. */
+export type FailureLocation = { file: string; line: number; test: string | null };
+
+/**
+ * The places the log names, compile errors first: the compiler location line (`--> path:line`) directly after an `error`
+ * line, then Rust panic lines (`thread '...' panicked at path:line:col:`) with a path inside the repository. The log is
+ * untrusted, so no other mention counts and a test name is kept only when it is a Rust path.
+ */
+export function failureLocations(log: string): FailureLocation[] {
   const lines = log.split("\n");
-  const out: string[] = [];
+  const errors: FailureLocation[] = [], panics: FailureLocation[] = [];
   lines.forEach((l, i) => {
-    if (i === 0 || !ERROR_LINE.test(lines[i - 1]!)) return;
-    const m = LOCATION.exec(l);
-    if (m && !out.includes(m[1]!)) out.push(m[1]!);
+    const m = i > 0 && ERROR_LINE.test(lines[i - 1]!) ? LOCATION.exec(l) : null;
+    if (m) { errors.push({ file: m[1]!, line: Number(m[2]), test: null }); return; }
+    const p = PANIC.exec(l);
+    if (p && !p[2]!.startsWith("/") && !p[2]!.split("/").includes("..")) panics.push({ file: p[2]!, line: Number(p[3]), test: TEST_NAME.test(p[1]!) && p[1] !== "main" ? p[1]! : null });
   });
-  return out;
+  const seen = new Set<string>();
+  return errors.concat(panics).filter((x) => !seen.has(`${x.file}:${x.line}`) && !!seen.add(`${x.file}:${x.line}`));
+}
+
+/** The files of failureLocations, in its order. */
+export function errorFiles(log: string): string[] {
+  return [...new Set(failureLocations(log).map((x) => x.file))];
 }
 
 type Fix = { patch: string; files: string[]; changed: number };
@@ -303,7 +320,7 @@ export async function patchFromFailure(db: Db, d: Pick<CifixDeps, "ask" | "check
   const { git, ref, title, repo, head, failure } = r;
   const text = failure.checks.flatMap((x) => x.steps.map((s) => s.tail)).join("\n");
   const scripts = await buildScriptsAt(git, head);
-  // Files a compiler error points at come first, then the files the diff changes; nothing else is editable. Test files are not editable by a CI fix.
+  // Files a compiler error or a panic points at come first, then the files the diff changes; nothing else is editable. Test files are not editable by a CI fix.
   const cited = errorFiles(text);
   const named = [...new Set(cited.concat([...r.diffText.matchAll(DIFF_FILE)].map((m) => m[1]!)))]
     .filter((p) => editable(p, scripts) && !TEST_PATH.test(p)).slice(0, MAX_FILES);

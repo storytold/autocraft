@@ -39,6 +39,10 @@ export async function autocraftTexts(db: Db, heads: { repo: string; headSha: str
     if (f === "pr-opened") {
       const n = fixes.get(`${h.repo}@${h.headSha}`)?.prNumber;
       out.set(k, n ? `${TEXT[f]} #${n}` : TEXT[f]);
+    } else if (f === "issue-opening" || f === "issue-opened" || f === "issue-failed") {
+      const e = fixes.get(`${h.repo}@${h.headSha}`);
+      const text = f === "issue-opened" && e?.issueNumber ? `${TEXT[f]} #${e.issueNumber}` : TEXT[f];
+      out.set(k, e?.testIssue ? `a test fails: ${text}` : text);
     } else if (f === "unreadable") {
       const why = fixes.get(`${h.repo}@${h.headSha}`)?.unreadable;
       out.set(k, why ? `needs a person: ${why}` : TEXT[f]);

@@ -160,6 +160,21 @@ export function guardPatch(diff: string, sides: Map<string, { before: string; af
   return null;
 }
 
+/**
+ * Whether line `line` (1-based) of `path` is test code: a test file (TEST_PATH), a Rust file that is test-only
+ * (`#![cfg(test)]`), or a line inside an item a test attribute guards (`#[cfg(test)]`, `#[test]`, `#[tokio::test]`; not
+ * `cfg(not(test))` or `cfg(any(test, ...))`). False when `src` cannot be read as Rust.
+ */
+export function isTestLine(path: string, src: string, line: number): boolean {
+  if (TEST_PATH.test(path)) return true;
+  if (!path.endsWith(".rs")) return false;
+  const code = codeTokens(src);
+  const attrs = code && attributes(code);
+  if (!attrs) return false;
+  const onlyTest = (a: Attr): boolean => a.last === "test" || (isTestCfg(a) && !a.idents.has("not") && !a.idents.has("any"));
+  return attrs.some((a) => onlyTest(a) && (a.inner || (a.item !== null && line >= a.item.from && line <= a.item.to)));
+}
+
 /** Pairs of punctuation characters that form one operator; written apart (`- >`) they are other tokens. Other neighbours (`=&`, `{ }`) may be respaced freely. */
 const COMPOUND = new Set(["->", "=>", "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=", "..", "::", "..=", "...", "<<=", ">>="]);
 const RUST_SPACE = /[ \t\n\r\v\f\u0085\u200e\u200f\u2028\u2029]/;

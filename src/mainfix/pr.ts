@@ -4,6 +4,7 @@
 // stored on the rows (state `linting`) with its lint task and the step ends; a later run collects the result: formatting is
 // folded in, findings go back to the model (at most LINT_MAX_ROUNDS lint rounds). The clean commit is pushed to the
 // pipeline account's fork on `autocraft/main-ci-<check>-<sha7>` and a PR is opened against the default branch.
+// A failure only in test code, which a CI fix may not change, gets the red streak's issue instead (testCodeFailure).
 // The log, the files and other PRs are untrusted data; nothing from them is run here.
 import { ownPrSelect } from "../github/adopt.ts";
 import { leaseItem } from "../runner/leases.ts";
@@ -11,10 +12,11 @@ import { CLI_BY, type By } from "../core/gates.ts";
 import { guardRepo } from "../core/guard.ts";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { errorFiles, patchFromFailure, type CifixDeps } from "../cifix/index.ts";
+import { errorFiles, failureLocations, patchFromFailure, type CifixDeps } from "../cifix/index.ts";
+import { isTestLine } from "../cifix/guard.ts";
 import { loadQuiet } from "../data/security/index.ts";
 import { readFailure } from "../cifix/logs.ts";
-import type { CifixPr } from "../cifix/types.ts";
+import type { CiFailure, CifixPr } from "../cifix/types.ts";
 import { forkOf } from "../github/fork.ts";
 import { outsideShown } from "../fixup/excerpt.ts";
 import { Git, type Exec } from "../fixup/git.ts";
@@ -123,12 +125,29 @@ async function coveringPr(c: Ctx, checks: string[], files: string[], since: stri
   return null;
 }
 
-type Outcome = "opened" | "skipped" | "failed" | "waiting" | "linting";
+/**
+ * Why the failure is one no CI fix may repair, or null: every place the failed checks' logs name (compile errors and panics,
+ * failureLocations) is test code at `head` (isTestLine). Null too when the logs name no place or a file cannot be read.
+ */
+export async function testCodeFailure(git: Git, head: string, checks: CiFailure["checks"]): Promise<string | null> {
+  const seen = new Set<string>();
+  const places = checks.flatMap((x) => failureLocations(x.steps.map((s) => s.tail).join("\n"))).filter((p) => !seen.has(`${p.file}:${p.line}`) && !!seen.add(`${p.file}:${p.line}`));
+  if (!places.length) return null;
+  for (const p of places) {
+    const f = await git.file(head, p.file);
+    if (!f.ok || !isTestLine(p.file, f.content, p.line)) return null;
+  }
+  const one = (p: (typeof places)[number]): string => (p.test ? `test ${p.test} fails at ${p.file}:${p.line}` : `test code fails at ${p.file}:${p.line}`);
+  return `${one(places[0]!)}${places.length > 1 ? ` (and ${places.length - 1} more)` : ""}, which a CI fix may not change`;
+}
+
+type Outcome = "opened" | "skipped" | "failed" | "waiting" | "linting" | "issue";
 
 /**
  * One attempt for the rows of one head: one patch and one PR for all of them. The rows are `needs-fix` (a new patch) or
  * `linting` (a stored patch whose lint task is collected). Each row ends in nothing-to-do, pr-opened or fix-failed, goes to
- * linting with a stored patch, or stays as it is while the head is still running or the lint task is.
+ * linting with a stored patch, goes to issue-opening when the failure is only in test code (testCodeFailure), or stays as it
+ * is while the head is still running or the lint task is.
  */
 async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: SessionLedger): Promise<Outcome> {
   const at = (): string => c.now().toISOString();
@@ -167,10 +186,20 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
     const w = stored ? { patch: live[0]!.patch ?? "", files: JSON.parse(live[0]!.files ?? "[]") as string[], task: live[0]!.lintTask, round: live[0]!.lintRound ?? 1, state: live[0]!.lintState, session: live[0]!.session } : null;
     const res = w ? await readLint(c.db, w.task ?? -1) : null;
     if (res?.kind === "pending") return "waiting";
-    if (!stored) count();
     const git = new Git(c.exec, c.fix.root, c.repo);
     mkdirSync(c.fix.root, { recursive: true });
     if (!(await git.fetchBranch(ownerOf(c.repo), c.repo, now.branch, head))) return await set(live, "fix-failed", "the head commit is no longer in the repository");
+    if (!stored) {
+      // A failure only in test code is a person's to fix: the red streak's issue (openInfraIssues) says so, and no patch is tried.
+      const found = await testCodeFailure(git, head, checks);
+      const inTests = found && scrubReason(oneLine(found), c.fix.root);
+      if (inTests) {
+        for (const r of live) await c.setState(r, "issue-opening", inTests, at());
+        c.log(`  ${c.repo}: ${live.map((r) => r.check).join(", ")}: ${inTests}; opening an issue`);
+        return "issue";
+      }
+      count();
+    }
     const ref = `${c.repo}@${head.slice(0, 8)}`;
     const names = live.map((r) => r.check);
     const title = prTitle(names);
@@ -267,7 +296,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
     const commit = await git.commit(applied.tree, head, commitMessage(title, patchFiles), { name: author.name, email: author.email });
     const changes = await git.rawChanges(head, commit);
     const touched = changes.map((x) => x[3]!).sort().join("\n");
-    if (changes.some((x) => x[2] !== "M" || x[0] !== x[1] || (x[0] !== "100644" && x[0] !== "100755")) || touched !== [...files].sort().join("\n"))
+    if (changes.some((x) => x[2] !== "M" || x[0] !== x[1] || (x[0] !== "100644" && x[0] !== "100755")) || touched !== [...patchFiles].sort().join("\n"))
       return await set(live, "fix-failed", "the commit would change files or modes outside the validated diff");
     const outside = outsideShown(shown, await git.diffText(head, commit));
     if (outside) return await set(live, "fix-failed", outside);
@@ -308,8 +337,8 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
 }
 
 /** Takes the repo's `needs-fix` and `linting` rows head by head; `onHandled` is called once per head that reaches the model work. */
-export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ opened: number; skipped: number; failed: number; linting: number }> {
-  const out = { opened: 0, skipped: 0, failed: 0, linting: 0 };
+export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ opened: number; skipped: number; failed: number; linting: number; issue: number }> {
+  const out = { opened: 0, skipped: 0, failed: 0, linting: 0, issue: 0 };
   const rows = await loadMainFixes(c.db, { repo: c.repo, states: ["needs-fix", "linting"], verdict: "code" });
   const byHead = new Map<string, FixRow[]>();
   const ledger = new SessionLedger();
