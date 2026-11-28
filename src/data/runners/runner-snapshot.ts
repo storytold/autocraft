@@ -4,7 +4,7 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { loadPermissionDenials } from "../access/index.ts";
-import { loadTrackedRepos } from "../control/index.ts";
+import { loadStepApprovals, loadTrackedRepos } from "../control/index.ts";
 import { loadStartedWork } from "../workflow/index.ts";
 import { loadQueue } from "./calls-read.ts";
 import { withdrawCalls } from "./calls-queue.ts";
@@ -22,19 +22,24 @@ export type SnapshotDeps = {
   started: (db: Db, now: number) => Promise<{ live: { repo: string; number: number; entry: string; startedBy: string; approvedBy: string | null; state: string; takenBy?: string[] }[]; prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null; takenBy?: string[] }[]; merged?: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[] }>;
   /** Non-write permission checks of every login with a live runner credential, by "login\nrepo", with when each was checked. */
   denials: (db: Db, logins: { runners: true }, now: number) => Promise<Map<string, { checkedAt: string }>>;
+  /** The repos approved for Fix red main with who approved each; left out, the control module's rows. */
+  mainFix?: (db: Db) => Promise<{ repo: string; by: string }[]>;
 };
-const REAL: SnapshotDeps = { started: loadStartedWork, denials: loadPermissionDenials };
+const mainFixApprovers = async (db: Db): Promise<{ repo: string; by: string }[]> =>
+  [...await loadStepApprovals(db, "all", ["mainfix"])].flatMap(([repo, a]) => (a.mainfix ? [{ repo, by: a.mainfix.by }] : []));
+const REAL: SnapshotDeps = { started: loadStartedWork, denials: loadPermissionDenials, mainFix: mainFixApprovers };
 
-/** The workflow module's started-work rows in the shape the pure builder reads. */
-const startedOf = (w: Awaited<ReturnType<SnapshotDeps["started"]>>): StartedWork => ({
+/** The workflow module's started-work rows and the Fix red main approvals in the shape the pure builder reads. */
+const startedOf = (w: Awaited<ReturnType<SnapshotDeps["started"]>>, mainfix: { repo: string; by: string }[] = []): StartedWork => ({
   live: w.live.map((r) => ({ repo: r.repo, number: r.number, entry: r.entry, state: r.state, started_by: r.startedBy, approved_by: r.approvedBy, ...(r.takenBy && { taken_by: r.takenBy }) })),
   prs: w.prs.map((r) => ({ repo: r.repo, prNumber: r.pr, started_by: r.startedBy, approved_by: r.approvedBy, ...(r.takenBy && { taken_by: r.takenBy }) })),
   merged: (w.merged ?? []).map((r) => ({ repo: r.repo, prNumber: r.pr, started_by: r.startedBy, approved_by: r.approvedBy })),
+  mainfix,
 });
 
 /**
  * Every live Task Runner credential with its status, the settings of their users, live cool-offs, lease counts, permission denials and
- * started work, in one wave whatever the number of runners, repos and calls (`access` reads the denials of live runner logins itself).
+ * started work (with the Fix red main approvals), in one wave whatever the number of runners, repos and calls (`access` reads the denials of live runner logins itself).
  * Cached 2 s per `Db` (`snapshot-cache.ts`), dropped by the writers of runner state.
  */
 export function loadRunnerSnapshot(db: Db, now: number, deps?: SnapshotDeps): Promise<RunnerSnapshot> {
@@ -45,7 +50,7 @@ export function loadRunnerSnapshot(db: Db, now: number, deps?: SnapshotDeps): Pr
 async function readSnapshot(db: Db, now: number, deps: SnapshotDeps): Promise<RunnerSnapshot> {
   const q = queryDb(db);
   const iso = new Date(now).toISOString();
-  const [creds, settingRows, cooled, leases, started, denials] = await db.together(() => Promise.all([
+  const [creds, settingRows, cooled, leases, started, denials, mainfix] = await db.together(() => Promise.all([
     q.all(runnerCredentials(db, now).orderBy("t.id")),
     q.all(q.k.selectFrom("main.user_settings").select(["login", "key", "value"]).where(kx.inList(db, "key", USER_SETTING_KEYS))
       .where("login", "in", (eb) => eb.selectFrom("main.mcp_tokens").select("login").where("kind", "=", "runner").where("expires_at", ">", iso))),
@@ -56,6 +61,7 @@ async function readSnapshot(db: Db, now: number, deps: SnapshotDeps): Promise<Ru
       .where("c.state", "=", kx.literal("leased")).groupBy(["c.token_id", "c.user_login", "c.own_lane"])),
     deps.started(db, now),
     deps.denials(db, { runners: true }, now),
+    (deps.mainFix ?? mainFixApprovers)(db),
   ]));
   const logins = [...new Set(creds.map((r) => r.login))];
 
@@ -85,7 +91,7 @@ async function readSnapshot(db: Db, now: number, deps: SnapshotDeps): Promise<Ru
   return {
     at: now, runners, settings: settingsByLogin(settingRows, logins),
     cooled: new Map(cooled.map((c) => [c.login.toLowerCase(), { until: new Date(Number(c.until)).toISOString(), reason: c.reason ?? DROP_REASON }] as const)),
-    denied: new Set(denials.keys()), leasedByLogin, started: startedOf(started),
+    denied: new Set(denials.keys()), leasedByLogin, started: startedOf(started, mainfix),
   };
 }
 
