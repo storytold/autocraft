@@ -33,6 +33,10 @@ import {
   type SecurityFixCheckInput, type SecurityFixInput,
 } from "./rules.ts";
 import { advance, clearRounds, rawFinding, recordFixCall, scanRow } from "./store.ts";
+import { sessionRound, settleSecuritySession, type FailedRound } from "./session.ts";
+import { fixSessionsOn } from "../fixsession/switch.ts";
+import { fixSessionEnv } from "../fixsession/workspace.ts";
+import { defaultSessionDeps, type FixSessionDeps } from "../fixup/session.ts";
 import { runsSince, usageRunId } from "./real.ts";
 import type { ScanTestState } from "../../web/src/api/types.ts";
 import type { Db } from "../db/index.ts";
@@ -59,6 +63,8 @@ export type FixDeps = {
    */
   ask: (id: "security.fix" | "security.fixcheck", input: SecurityFixInput | SecurityFixCheckInput, o: { checkout?: string; tool?: CheckTool; agent: string; run: string; session?: SessionAsk }) => Promise<{ text: string | null; cost: number | null; resumed?: boolean; kept?: KeptSession }>;
   who: (repo: string) => Promise<{ login: string; email: string }>;
+  /** What a security fix session's turns run on (fix_sessions on for security): the cluster; null when this runner is not in it. */
+  fixSession?: (db: Db) => FixSessionDeps | null;
   cancelled: () => Promise<boolean>;
   log: (line: string) => void;
 };
@@ -116,22 +122,31 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
   const row = await rawFinding(db, repo, n);
   if (!row || row.state !== "fixing") return `finding ${n}: not fixing`;
   const { log } = d;
-  // The model's checks and the round's builds run only in a confidential build environment: without one ready, the fix
-  // waits before any model call, and advanceSecurityFixes queues the next job once one is.
+  // Read once per job: a switch flipped meanwhile applies from the next job.
+  const sessions = await fixSessionsOn(db, "security", repo);
+  const deps = sessions ? (d.fixSession ?? defaultSessionDeps)(db) : null;
+  // The model's checks and the round's builds run only in a confidential build environment, and a fix session's workspace only in
+  // a confidential kubernetes one: without them, the fix waits before any model call, and advanceSecurityFixes queues the next job
+  // once they are there.
   if (!(await roundRows(db, repo, n)).some((r) => r.state === "building")) {
-    if (await loadConfidentialReadyAt(db) === null) {
+    if (await loadConfidentialReadyAt(db) === null || (sessions && typeof await fixSessionEnv(db, "security") !== "string")) {
       await sec.setFindingEnvWait(db, sec.findingKey(repo, n), new Date().toISOString());
       log(`${repo} finding ${n}: waiting for a confidential build environment`);
       return `${repo} finding ${n}: waiting for a confidential build environment`;
     }
     if (row.env_wait_at) await sec.setFindingEnvWait(db, sec.findingKey(repo, n), null);
   }
+  /** No fix: the finding goes back to `new`, and its fix session ends with its workspace. */
+  const noFix = async (why: string): Promise<string> => {
+    await settleSecuritySession(db, deps, repo, n, "end", "no fix", log);
+    return await giveUp(db, repo, n, why, log);
+  };
   // The model session of the last fix call, continued by the next round while the prompt cache is warm; its store is deleted when the job ends.
   const ledger = new SessionLedger();
   try {
     const scan = await scanRow(db, row.scan_id);
     const sha = scan?.commit_sha ?? "";
-    if (!SHA.test(sha)) return await giveUp(db, repo, n, "the scan has no pinned commit", log);
+    if (!SHA.test(sha)) return await noFix("the scan has no pinned commit");
     const git = new Git(d.exec, d.root, repo);
     const branch = await branchOf(db, repo);
     await git.init();
@@ -143,13 +158,13 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
         if ((await roundRows(db, repo, n)).some((r) => r.state === "building")) { log(`${repo} finding ${n}: fetch failed (${oneLine((e as Error).message, 120)}); the round stays building`); return `${repo} finding ${n}: fetch failed; collected on the next pass`; }
         throw e;
       }
-      if (!have) return await giveUp(db, repo, n, "the pinned commit is no longer in the repository", log);
+      if (!have) return await noFix("the pinned commit is no longer in the repository");
     }
     const refs = JSON.parse(row.refs) as { path: string; line: number; claim: string }[];
     const cr = await cachedCrates(repo, sha, d.fetchCrates);
-    if (!cr.ok) return await giveUp(db, repo, n, `no crate list: ${cr.error}`, log);
+    if (!cr.ok) return await noFix(`no crate list: ${cr.error}`);
     const crate = cr.rust ? crateOf(cr.crates, refs[0]?.path ?? "") : null;
-    if (!crate || !/^[A-Za-z0-9_./-]+$/.test(crate.dir) || crate.dir.split("/").includes("..")) return await giveUp(db, repo, n, "the fix step covers Rust crates only, and the finding is not in one", log);
+    if (!crate || !/^[A-Za-z0-9_./-]+$/.test(crate.dir) || crate.dir.split("/").includes("..")) return await noFix("the fix step covers Rust crates only, and the finding is not in one");
     const listed = (await git.must(["ls-tree", "-r", "--name-only", sha, "--", crate.dir === "." ? "" : crate.dir].filter((x) => x !== ""))).split("\n").filter(Boolean);
     // Build scripts are resolved from the manifests of the scanned commit, so one with a custom name is never editable.
     const scripts = await buildScriptsAt(git, sha);
@@ -157,8 +172,12 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
     const testName = securityTestName(repo, n);
     const testPath = regressionPath(crate.dir, testName);
     const verification = row.verification ? JSON.parse(row.verification) as { proposedTest?: string | null } : null;
-    const checkout = (await d.checkout(repo, branch, sha)) ?? undefined;
-    const base = { repo: securityRepo(repo), number: FIX_RUN_BASE + n, project: repo, commit: sha, ...(checkout && { repo_dir: REPO_PATH }) };
+    // The read-only checkout serves the patch path's calls and the review; made once, when a call first needs it, so a fix session's
+    // round (which reads its own workspace) makes none.
+    let checkoutP: Promise<string | undefined> | undefined;
+    const checkoutOf = (): Promise<string | undefined> => (checkoutP ??= d.checkout(repo, branch, sha).then((c) => c ?? undefined));
+    const core = { repo: securityRepo(repo), number: FIX_RUN_BASE + n, project: repo, commit: sha };
+    const baseOf = async () => ({ ...core, ...((await checkoutOf()) && { repo_dir: REPO_PATH }) });
     const finding = { title: row.title, severity: row.severity, refs, reach: row.reach, impact: row.impact, area: row.area };
     const run = usageRunId(row.scan_id);
     // The scan's own test of the finding, once it has been run (feature scan-tests); no row, no key.
@@ -185,7 +204,7 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
         } finally { rmSync(scratch2, { recursive: true, force: true }); }
       }
       if (patch.length > CHECK_PATCH_CAP) return { ok: false, why: `the patch is over the ${CHECK_PATCH_CAP} character limit for the review` };
-      const review = await reviewPatch(db, d, { ...base, finding: { title: row.title, refs, reach: row.reach, impact: row.impact }, patch, test_path: testPath }, { checkout, scanId: row.scan_id, n, run });
+      const review = await reviewPatch(db, d, { ...await baseOf(), finding: { title: row.title, refs, reach: row.reach, impact: row.impact }, patch, test_path: testPath }, { checkout: await checkoutOf(), scanId: row.scan_id, n, run });
       if (!review.ok) return { ok: false, why: review.reason };
       const who = await d.who(repo);
       const files = [...v.files, testPath];
@@ -205,16 +224,25 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
         await clearRounds(db, repo, n);
         return ok;
       });
+      await settleSecuritySession(db, deps, repo, n, "end", "ready", log);
       return { ok: true, summary: moved ? `${repo} finding ${n}: fix ready (${files.length} files, round ${r.round})` : `finding ${n}: left fixing while the fix was written` };
     };
     let previous: SecurityFixInput["previous"];
+    /** In a fix session: the failed round's whole change and the turn that wrote it, which the next round's session goes on from. */
+    let prevRound: { patch: string; turn: number | null } | null = null;
     let kept: { session: KeptSession; at: number } | undefined;
     let startRound = 1;
     let passed: { row: RoundRow; formatDiff: string | null } | null = null;
     // A round whose build tasks were queued by an earlier job: collect it first.
     const open = await roundRows(db, repo, n);
     const last = open.at(-1);
-    if (last && last.state !== "building") await clearRounds(db, repo, n);
+    if (last && last.state === "failed" && sessions) {
+      // A fix session's round failed, and the job that read it then waited for the session's workspace: the next round goes on from it.
+      const why = last.failure ?? "the round failed";
+      previous = { patch: last.patch.slice(0, 60_000), failure: why };
+      prevRound = { patch: last.patch, turn: last.session_turn };
+      startRound = last.round + 1;
+    } else if (last && last.state !== "building") await clearRounds(db, repo, n);
     else if (last) {
       const ids: [number, number] = [last.head_task, last.base_task];
       let read: RoundRead = await readRound(db, ids, last.retried === 1);
@@ -239,16 +267,22 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
         const why = read.kind === "fail" ? read.reason : "the round did not finish";
         await sec.markRounds(db, [{ repo, number: n, round: last.round, set: { state: "failed", failure: why } }]);
         previous = { patch: last.patch.slice(0, 60_000), failure: why };
+        prevRound = { patch: last.patch, turn: last.session_turn };
         startRound = last.round + 1;
         log(`${repo} finding ${n}: round ${last.round} failed: ${oneLine(why, 160)}`);
       }
     }
     let lastWhy = previous?.failure ?? "no round ran";
+    /** A round of this job that failed before its builds and has no row: written as a failed row when the job ends on a wait. */
+    let unsaved: { round: number; why: string } | null = null;
     for (let round = startRound; round <= FIX_ROUNDS; round++) {
-      if (await d.cancelled()) return await giveUp(db, repo, n, "the fix was cancelled", log);
-      const failRound = (why: string, patch?: string): void => {
+      if (await d.cancelled()) return await noFix("the fix was cancelled");
+      /** `patch`: the round's change (empty: none, so a fix session's next round starts clean), with `turn`, the session turn that wrote it. */
+      const failRound = (why: string, patch?: string, turn: number | null = null): void => {
         lastWhy = why;
         previous = { patch: (patch ?? previous?.patch ?? "").slice(0, 60_000), failure: why };
+        if (patch !== undefined) prevRound = patch ? { patch, turn } : null;
+        unsaved = { round, why };
         log(`${repo} finding ${n}: round ${round} failed: ${oneLine(why, 160)}`);
       };
       if (passed) {
@@ -257,51 +291,90 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
         const r = await finalize(done.row, done.formatDiff);
         if (r.ok) return r.summary;
         await sec.markRounds(db, [{ repo, number: n, round: done.row.round, set: { state: "failed", failure: r.why } }]);
-        failRound(r.why, done.row.patch);
+        failRound(r.why, done.row.patch, done.row.session_turn);
+        unsaved = null;
         continue;
       }
-      const input: SecurityFixInput = { ...base, finding, crate: { name: crate.name, dir: crate.dir }, test_path: testPath, proposed_test: verification?.proposedTest ?? null, ...(scanTest && { scan_test: scanTest }), ...(previous && { previous }) };
-      const tool = new CheckTool({ db, step: "fix-check", repo, number: null, recordRepo: securityRepo(repo), head: sha, base: sha, applies: applyCheck(git, d.root, sha, (p) => refusal(validateFixPatch(p, allowed, testPath, crate.dir, testName, scripts))) });
+      const first: SecurityFixInput = { ...core, finding, crate: { name: crate.name, dir: crate.dir }, test_path: testPath, proposed_test: verification?.proposedTest ?? null, ...(scanTest && { scan_test: scanTest }) };
       const started = new Date().toISOString();
-      // A later round continues the earlier session within the window; `input` (with `previous`) is the new call it falls back to.
-      const ses: SessionAsk = kept && previous && Date.now() - kept.at <= RESUME_WINDOW_MS ? { resume: { session: kept.session, message: resumeFixMessage(previous.failure) } } : {};
-      const tried = ses.resume !== undefined;
-      let reply: Awaited<ReturnType<FixDeps["ask"]>>;
-      try { reply = await d.ask(ASK_STEPS.fix, input, { checkout, tool, agent: `security-fix-${n}`, run, session: ses }); } finally { await tool.close(); }
-      const resumed = tried && reply.resumed === true;
-      ledger.hold(reply.kept);
-      kept = reply.kept ? { session: reply.kept, at: Date.now() } : undefined;
-      if (kept) touchStore(kept.session.dir);
-      await recordFixCall(db, row.scan_id, n, "fix", started, reply.text !== null, reply.cost, resumed);
-      log(`${repo} finding ${n}: round ${round} ${resumed ? "continued the earlier session" : tried ? "started a new session (the earlier one could not be continued)" : "started a new session"}${reply.cost !== null ? `, cost $${reply.cost.toFixed(2)}` : ""}`);
-      if (reply.text === null) { failRound("the model gave no answer"); continue; }
-      const parsed = parseFixReply(reply.text);
-      if (!parsed) { failRound("the reply did not follow the form: TITLE line, SUMMARY line, the marker line and the diff"); continue; }
-      const quiet = quietProblem(parsed.title, parsed.summary) ?? (patchGiveaway(parsed.patch) ? `the diff adds the word "${patchGiveaway(parsed.patch)}"; name things for what the code does` : null);
-      if (quiet) { failRound(quiet, parsed.patch); continue; }
-      const v = validateFixPatch(parsed.patch, allowed, testPath, crate.dir, testName, scripts);
-      if (!v.ok) { failRound(v.reason, parsed.patch); continue; }
+      let got: { title: string; summary: string; patch: string; testPatch: string; turn: number | null; kept: Kept };
+      if (sessions) {
+        // The round is a turn of the finding's fix session; a failed round goes back to it as a message.
+        if (!deps) return await noFix("fix sessions are on for security fixes, but this runner is not in the cluster, so it cannot reach a fix session's workspace");
+        const failed: FailedRound | undefined = previous && { reason: previous.failure, patch: prevRound?.patch ?? null, sessionTurn: prevRound?.turn ?? null };
+        const sr = await sessionRound({
+          db, deps, log, repo, n, sha, input: first, item: { repo: core.repo, number: core.number },
+          gate: { step: "security", allowed, testPath, crateDir: crate.dir, testName, scripts }, ...(failed && { failed }), cancelled: d.cancelled,
+        });
+        if (sr.kind === "stuck") return await noFix(sr.reason);
+        if (sr.kind === "wait") {
+          if (await d.cancelled()) return await noFix("the fix was cancelled");
+          // Nothing ran to an end. The round this job failed is kept as a failed row, so the next job (advanceSecurityFixes queues it
+          // once the session's workspace moves on) goes on from it, with its reason, change and round count.
+          const f = unsaved as { round: number; why: string } | null;
+          if (f) {
+            await sec.saveRound(db, {
+              repo, number: n, round: f.round, patch: prevRound?.patch ?? "", test_patch: "", title: "", summary: "", head_task: 0, base_task: 0, retried: 0,
+              session: null, session_turn: prevRound?.turn ?? null, state: "failed", failure: f.why, created_at: new Date().toISOString(),
+            });
+          }
+          await sec.setFindingEnvWait(db, sec.findingKey(repo, n), new Date().toISOString());
+          log(`${repo} finding ${n}: waiting: ${oneLine(sr.reason, 200)}`);
+          return `${repo} finding ${n}: waiting: ${oneLine(sr.reason, 120)}`;
+        }
+        await recordFixCall(db, row.scan_id, n, "fix", started, sr.kind === "ok", sr.cost, sr.resumed);
+        log(`${repo} finding ${n}: round ${round} ${sr.resumed ? "continued the fix session" : "started a fix session"}, cost $${sr.cost.toFixed(2)}`);
+        // A refused or empty change leaves nothing to go on from: the next round starts clean.
+        if (sr.kind === "failed") { failRound(sr.why, ""); continue; }
+        got = { title: sr.title, summary: sr.summary, patch: sr.patch, testPatch: sr.testPatch, turn: sr.turnId, kept: {} };
+      } else {
+        const input: SecurityFixInput = { ...first, ...await baseOf(), ...(previous && { previous }) };
+        const tool = new CheckTool({ db, step: "fix-check", repo, number: null, recordRepo: securityRepo(repo), head: sha, base: sha, applies: applyCheck(git, d.root, sha, (p) => refusal(validateFixPatch(p, allowed, testPath, crate.dir, testName, scripts))) });
+        // A later round continues the earlier session within the window; `input` (with `previous`) is the new call it falls back to.
+        const ses: SessionAsk = kept && previous && Date.now() - kept.at <= RESUME_WINDOW_MS ? { resume: { session: kept.session, message: resumeFixMessage(previous.failure) } } : {};
+        const tried = ses.resume !== undefined;
+        let reply: Awaited<ReturnType<FixDeps["ask"]>>;
+        try { reply = await d.ask(ASK_STEPS.fix, input, { checkout: await checkoutOf(), tool, agent: `security-fix-${n}`, run, session: ses }); } finally { await tool.close(); }
+        const resumed = tried && reply.resumed === true;
+        ledger.hold(reply.kept);
+        kept = reply.kept ? { session: reply.kept, at: Date.now() } : undefined;
+        if (kept) touchStore(kept.session.dir);
+        await recordFixCall(db, row.scan_id, n, "fix", started, reply.text !== null, reply.cost, resumed);
+        log(`${repo} finding ${n}: round ${round} ${resumed ? "continued the earlier session" : tried ? "started a new session (the earlier one could not be continued)" : "started a new session"}${reply.cost !== null ? `, cost $${reply.cost.toFixed(2)}` : ""}`);
+        if (reply.text === null) { failRound("the model gave no answer"); continue; }
+        const parsed = parseFixReply(reply.text);
+        if (!parsed) { failRound("the reply did not follow the form: TITLE line, SUMMARY line, the marker line and the diff"); continue; }
+        const quiet = quietProblem(parsed.title, parsed.summary) ?? (patchGiveaway(parsed.patch) ? `the diff adds the word "${patchGiveaway(parsed.patch)}"; name things for what the code does` : null);
+        if (quiet) { failRound(quiet, parsed.patch); continue; }
+        const v = validateFixPatch(parsed.patch, allowed, testPath, crate.dir, testName, scripts);
+        if (!v.ok) { failRound(v.reason, parsed.patch); continue; }
+        got = { title: parsed.title, summary: parsed.summary, patch: v.patch, testPatch: v.testPatch, turn: null, kept: reply.kept ? { "": reply.kept } : {} };
+      }
       const scratch = mkdtempSync(join(d.root, ".index-"));
       let applied;
-      try { applied = await git.applyToTree(sha, v.patch, join(scratch, "index")); } finally { rmSync(scratch, { recursive: true, force: true }); }
-      if (!applied.ok) { failRound(applied.reason, v.patch); continue; }
+      try { applied = await git.applyToTree(sha, got.patch, join(scratch, "index")); } finally { rmSync(scratch, { recursive: true, force: true }); }
+      if (!applied.ok) { failRound(applied.reason, got.patch, got.turn); continue; }
       // Every wording check has passed: only now does a build task exist. The job ends; a later one reads the result.
       let ids: [number, number];
-      try { ids = await queueRound(db, { repo, sha, crate: crate.name, test: testName, patch: v.patch, testPatch: v.testPatch }); } catch (e) {
-        if (e instanceof BuildError) { failRound(`the build tasks were not queued: ${e.message}`, v.patch); continue; }
+      try { ids = await queueRound(db, { repo, sha, crate: crate.name, test: testName, patch: got.patch, testPatch: got.testPatch }); } catch (e) {
+        if (e instanceof BuildError) { failRound(`the build tasks were not queued: ${e.message}`, got.patch, got.turn); continue; }
         throw e;
       }
-      const keptNow: Kept = reply.kept ? { "": reply.kept } : {};
       // Every column is written: a new round replaces the earlier one's retry flag and failure.
-      await sec.saveRound(db, { repo, number: n, round, patch: v.patch, test_patch: v.testPatch, title: parsed.title, summary: parsed.summary, head_task: ids[0], base_task: ids[1], retried: 0, session: storeSessions(keptNow, new Date()), state: "building", failure: null, created_at: new Date().toISOString() });
-      ledger.stored(keptNow);
+      await sec.saveRound(db, {
+        repo, number: n, round, patch: got.patch, test_patch: got.testPatch, title: got.title, summary: got.summary, head_task: ids[0], base_task: ids[1], retried: 0,
+        session: storeSessions(got.kept, new Date()), session_turn: got.turn, state: "building", failure: null, created_at: new Date().toISOString(),
+      });
+      ledger.stored(got.kept);
+      // The builds run elsewhere: the session's pod goes while they do, and a failed round puts the change back in the tree.
+      if (sessions) await settleSecuritySession(db, deps, repo, n, "park", undefined, log);
       const queued = `${repo} finding ${n}: round ${round} queued for build${await loadConfidentialReadyAt(db) === null ? "; waiting for a confidential build environment" : ""}`;
       log(queued);
       return queued;
     }
-    return await giveUp(db, repo, n, lastWhy, log);
+    return await noFix(lastWhy);
   } catch (e) {
-    await giveUp(db, repo, n, `the fix failed: ${(e as Error).message}`, log);
+    await noFix(`the fix failed: ${(e as Error).message}`);
     throw e;
   } finally {
     ledger.release();

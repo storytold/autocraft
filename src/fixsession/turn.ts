@@ -26,12 +26,14 @@ import {
   checksMessage, lintMessage, LOST_REPLY_MESSAGE, REPORT_MESSAGE, stepMessage, undoMessage,
   type FixSessionTask, type HistoryNote, type HistoryTurn, type StepTurn,
 } from "./messages.ts";
-import { FIX_FOLLOW_UP_CALL, FIX_SESSION_CALL, parseFixReport, parseSecurityReport, SESSION_DIFF_MAX_BYTES, SESSION_REPO_DOCS, type SecurityReport } from "./report.ts";
+import { CHECK_FOLLOW_UPS, FIX_FOLLOW_UP_CALL, FIX_SESSION_CALL, parseFixReport, parseSecurityReport, SESSION_DIFF_MAX_BYTES, SESSION_REPO_DOCS, type SecurityReport } from "./report.ts";
 import {
   addTurn, endSession, ensureSession, lastTurn, loadSessions, loadTurns, SESSION_MAX_TURNS, settleTurn, turnsOf, updateSession,
   type FixSession, type FixTurn, type FixTurnPurpose, type FixTurnStep,
 } from "./store.ts";
 import { ensureWorkspace, restorePatch, WORKSPACE_SESSION_KIND, type DependencyFetch, type FixWorkspaceEnv } from "./workspace.ts";
+
+export { CHECK_FOLLOW_UPS };
 
 export type FixPromptId = "fix.session" | "security.session";
 /** The step a turn works for, with a maintainer's `fix <instructions>` apart from the review's fixes; turns are stored under it. */
@@ -39,8 +41,6 @@ export type GateStep = FixTurnStep;
 
 /** A lease lost with its Task Runner goes back to the queue once, onto the same workspace. */
 const CALL_ATTEMPTS = 2;
-/** Follow-ups with AutoCraft's own check findings per step. */
-export const CHECK_FOLLOW_UPS = 2;
 /** A turn whose call read more input than this (the context it carried) is the session's last: the next turn starts a fresh one. */
 export const FRESH_INPUT_TOKENS = 400_000;
 /** Turns one step sends at most, whatever their outcomes. */
@@ -94,7 +94,9 @@ function storeOf(kind: FixSession["kind"]): RoundStore<FixTurnResult, FixRound, 
         maxAttempts: CALL_ATTEMPTS, keepSession: true, ...(follow && { parentId: t.parentId }),
       };
       const result: FixTurnResult = { purpose: t.purpose, outcome: "queued", report: null, turns: null, costUsd: null, calls: 0, shellMs: 0, step: t.step, head: t.head, ...(follow && { parentId: t.parentId }) };
-      return { call, owner: t.session.id, kind: t.purpose, result, session: { repo: t.session.repo, item: t.session.number, baseSha: t.head, requestedBy: t.by, deadlineSec: limits.timeoutSeconds } };
+      // A security fix's workspace session names the call's item (the security pseudo repo), never the finding as an item of the repo.
+      const subject = kind === "security" && t.items[0] ? t.items[0] : { repo: t.session.repo, number: t.session.number };
+      return { call, owner: t.session.id, kind: t.purpose, result, session: { repo: subject.repo, item: subject.number, baseSha: t.head, requestedBy: t.by, deadlineSec: limits.timeoutSeconds } };
     },
     async add(db, owner, round) {
       const r = round.result;
@@ -192,10 +194,11 @@ export type StepEnv = FixWorkspaceEnv & {
 
 export type StepResult =
   /** Another job holds the session's work lease (left as a skip on it), or the workspace is not ready (FIX_WORKSPACE_WAIT). */
-  | { kind: "wait"; reason: string }
+  | { kind: "wait"; reason: string; /** WorkspaceWait.stuck: no workspace starts at the commit until a kubernetes environment changes. */ stuck?: true }
   /** The session ended meanwhile (its PR closed, a person stopped the item) or a new one was refused. */
   | { kind: "ended"; reason: string }
-  | { kind: "failed"; reason: string }
+  /** `startFailed`: the session's workspace failed to start FIX_START_FAILURES times at the step's commit (WorkspaceFailed). */
+  | { kind: "failed"; reason: string; startFailed?: true }
   /** The report says none or blocked: nothing to push. */
   | { kind: "report"; report: SecurityReport; callId: number }
   /** The report says done and the tree holds no change. */
@@ -323,8 +326,8 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
     if (!await settled(round, r)) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, s.workspaceId);
   }
   const ws = await ensureWorkspace(s, spec.head, env, { keepTree: resume || !!spec.lint });
-  if (ws.kind === "wait") return done({ kind: "wait", reason: ws.reason }, s.workspaceId);
-  if (ws.kind === "failed") return done({ kind: "failed", reason: ws.reason }, s.workspaceId);
+  if (ws.kind === "wait") return done({ kind: "wait", reason: ws.reason, ...(ws.stuck && { stuck: true as const }) }, s.workspaceId);
+  if (ws.kind === "failed") return done({ kind: "failed", reason: ws.reason, startFailed: true }, s.workspaceId);
   if (!await reload()) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, ws.workspaceId);
   const pod = env.pod?.(ws.workspaceId) ?? workspacePod(db, ws.workspaceId, env.cancelled, env.api);
   const check = env.checks ?? runChecks;

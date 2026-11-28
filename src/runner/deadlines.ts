@@ -4,7 +4,9 @@
 // the deadline is the larger of the two, so a job is never stopped while the code would still let it work.
 import { CHECK_MAX_WALL_MS, LINT_MAX_ROUNDS } from "../core/rules.ts";
 import { CLAUDE_PROMPTS, type ClaudePromptId } from "../prompts/index.ts";
-import { AREAS_MAX, FINDINGS_PER_AREA_MAX } from "../security/rules.ts";
+import { CHECK_FOLLOW_UPS, FIX_FOLLOW_UP_CALL, FIX_SESSION_CALL } from "../fixsession/report.ts";
+import type { FixStep } from "../data/fixsession/types.ts";
+import { AREAS_MAX, FINDINGS_PER_AREA_MAX, FIX_ROUNDS } from "../security/rules.ts";
 import { stepMaxMin } from "../stages/registry.ts";
 
 /** How long a part of the runner's work fails before it counts as failing (the health check, and which failure it shows). */
@@ -37,8 +39,27 @@ export const STEP_PLANS: Record<string, Plan> = {
   "verify-collect": { calls: [item("verify.summary")], items: 10 },
   // One threat model, then per area an audit and a verify of each finding it may report, and a scan test of each (feature scan-tests).
   "security-scan": { calls: [item("security.model"), ...Array.from({ length: AREAS_MAX }, () => item("security.area")), ...Array.from({ length: AREAS_MAX * FINDINGS_PER_AREA_MAX }, () => item("security.verify")), ...Array.from({ length: AREAS_MAX * FINDINGS_PER_AREA_MAX }, () => item("security.scantest"))], items: 1 },
-  // A job holds one round: the review of a passed build and the next patch, or one patch. The build runs between jobs.
+  // A job holds one round: the review of a passed build and the next patch, or one patch. The build runs between jobs. In a fix
+  // session the job has its own bound (SESSION_BOUNDS).
   "security-fix": { calls: [item("security.fix", true), item("security.fixcheck")], items: 1 },
+};
+
+/** A job's variant whose bound is not its step's plan: the step works in fix sessions (the fix_sessions setting, read when the job starts). */
+export type StepVariant = "fix-session";
+
+/** The steps whose jobs have a fix-session variant, with the fix_sessions step that turns it on. */
+export const SESSION_VARIANT_STEPS: Record<string, FixStep> = { "security-fix": "security" };
+
+/**
+ * A fix session turn's minutes: a step's first turn, then its follow-ups (AutoCraft's check findings, one undo turn and one report
+ * turn), each at its call's time limit. The workspace is never waited for in the job: a security fix ends on a workspace that is not
+ * ready and its next job starts once the workspace moves on.
+ */
+const sessionStepMin = (): number => (FIX_SESSION_CALL.timeoutSeconds + (CHECK_FOLLOW_UPS + 2) * FIX_FOLLOW_UP_CALL.timeoutSeconds) / 60;
+
+/** The fix-session bound of a step's job, in minutes, and its longest call: a security fix runs up to FIX_ROUNDS rounds before a build, then the review. */
+const SESSION_BOUNDS: Record<string, () => { bound: number; longest: number }> = {
+  "security-fix": () => ({ bound: FIX_ROUNDS * sessionStepMin() + callMin(item("security.fixcheck")), longest: Math.max(FIX_SESSION_CALL.timeoutSeconds / 60, callMin(item("security.fixcheck"))) }),
 };
 
 /** Minutes one call can take: each attempt runs the first turn and the lint follow-ups at the prompt's time limit, and a patch call adds the check tool's wall time. */
@@ -74,9 +95,10 @@ export const SLICE_SHARE = 0.5;
 /** Margin on the bound: a quarter and a few minutes for the work around the calls (git, GitHub, the database). */
 const margin = (min: number): number => Math.ceil(min * 1.25) + 5;
 
-/** The deadline of a job of `step` in minutes. `items`: the job's `limit` param, when it has one. */
-export function stepDeadlineMin(step: string, items?: number): number {
-  const bound = stepBoundMin(step, items);
+/** The deadline of a job of `step` in minutes. `items`: the job's `limit` param, when it has one; `variant`: the job's (StepVariant). */
+export function stepDeadlineMin(step: string, items?: number, variant?: StepVariant): number {
+  const session = variant === "fix-session" ? SESSION_BOUNDS[step] : undefined;
+  const bound = session ? session().bound : stepBoundMin(step, items);
   return Math.max(stepMaxMin(step), bound === null ? 0 : margin(bound));
 }
 
@@ -87,7 +109,8 @@ export function longestCallMin(step: string): number | null {
 }
 
 /** Minutes a job of `step` may show no progress (no new job log line): its longest single call plus 10; the registry floor for a step with no model call. */
-export function stepNoProgressMin(step: string): number {
-  const call = longestCallMin(step);
+export function stepNoProgressMin(step: string, variant?: StepVariant): number {
+  const session = variant === "fix-session" ? SESSION_BOUNDS[step] : undefined;
+  const call = session ? session().longest : longestCallMin(step);
   return call === null ? stepMaxMin(step) : Math.ceil(call) + 10;
 }

@@ -37,7 +37,8 @@ import { queueRoomPass } from "../agents/call.ts";
 import { TRY_STEP } from "../build/workspace-session.ts";
 import { pruneWorkspaceImages } from "../build/workspace-relay.ts";
 import { noTakerFor } from "../remote/takers.ts";
-import { JOB_DEADLINE_ENV, RUNNER_FAILING_MS, stepDeadlineMin, stepNoProgressMin } from "./deadlines.ts";
+import { JOB_DEADLINE_ENV, RUNNER_FAILING_MS, SESSION_VARIANT_STEPS, stepDeadlineMin, stepNoProgressMin, type StepVariant } from "./deadlines.ts";
+import { fixSessionsOn } from "../fixsession/switch.ts";
 import { envVar } from "../env.ts";
 import { anyRepinDue } from "../repin/due.ts";
 import { REMOTE_WAIT_CAP_MS } from "../remote/calls.ts";
@@ -93,9 +94,9 @@ export type RunnerOptions = {
   /** The planner's detection pass (default: a worker thread on its own connection to `dbTarget`). Tests pass a fake. */
   detect?: (nowMs: number) => Promise<Detected>;
   /** Longest run of a job of a step in minutes, given the job's `limit` param (default: stepDeadlineMin). Tests pass a short one. */
-  maxMin?: (step: string, items?: number) => number;
+  maxMin?: (step: string, items?: number, variant?: StepVariant) => number;
   /** Minutes a job may show no progress, by step (default: stepNoProgressMin). */
-  noProgressMin?: (step: string) => number;
+  noProgressMin?: (step: string, variant?: StepVariant) => number;
   /** How long past its deadline a job may finish its current item before the runner stops its process (default 10 minutes). */
   graceMs?: number;
 };
@@ -183,9 +184,9 @@ export class Runner {
   private readonly planThread: OffThread;
   private readonly o: Required<Omit<RunnerOptions, "db" | "lockFile" | "detect" | "maxMin" | "graceMs" | "noProgressMin">> & { lockFile: string | null };
   private readonly detect: (nowMs: number) => Promise<Detected>;
-  private readonly maxMin: (step: string, items?: number) => number;
+  private readonly maxMin: (step: string, items?: number, variant?: StepVariant) => number;
   private readonly graceMs: number;
-  private readonly noProgressMin: (step: string) => number;
+  private readonly noProgressMin: (step: string, variant?: StepVariant) => number;
 
   constructor(opts: RunnerOptions) {
     this.db = opts.db;
@@ -747,12 +748,29 @@ export class Runner {
     return this.capacity.c.max;
   }
 
+  /**
+   * The job's variant: fix-session when its step works in fix sessions on its repo now (the job reads the same setting when it
+   * starts). A setting that cannot be read leaves the step's own bound.
+   */
+  private async variantOf(q: QueuedJob): Promise<StepVariant | undefined> {
+    const step = SESSION_VARIANT_STEPS[q.step];
+    if (!step) return undefined;
+    try {
+      const repo = (JSON.parse(q.params) as { repo?: unknown }).repo;
+      return typeof repo === "string" && await fixSessionsOn(this.db, step, repo) ? "fix-session" : undefined;
+    } catch (e) {
+      this.o.log(`runner: job ${q.id}: the fix_sessions setting was not read (${(e as Error).message}); the step's own deadline applies`);
+      return undefined;
+    }
+  }
+
   /** The job's claim, then its process; null when another job holds the step or the claim failed. */
   private async start(q: QueuedJob, step: StepDef, steps: Map<string, StepDef>, cap: number, cursor: LogCursor | undefined): Promise<{ pid: number | null } | null> {
     const id = q.id, stepName = step.name;
     const logPath = join(this.o.logs, `job-${id}.log`);
     const logCopy = JobLogCopy.open(id, logPath, cursor);
-    const deadlineMin = this.maxMin(stepName, q.limit ?? undefined);
+    const variant = await this.variantOf(q);
+    const deadlineMin = this.maxMin(stepName, q.limit ?? undefined, variant);
     const mutexSteps = step.exclusive ? [...steps.values()].filter((x) => x.exclusive === step.exclusive).map((x) => x.name) : [];
     // One guarded statement: a command-line run cannot take the step in between.
     const claimed = await claimJob(this.db, { id, step: stepName, repo: q.repo, number: numberOfParams(q.params), lane: laneOf(q.params), cap: cap === Infinity ? null : cap, mutexSteps, logPath });
@@ -786,7 +804,7 @@ export class Runner {
           });
       });
     });
-    this.running.set(id, { child, termAt: null, exited, startedAt: Date.now(), deadlineMin, logPath, logCopy, flaggedAt: null, noProgressMin: this.noProgressMin(stepName), stopMsg: null, remoteWaitMs: 0, remoteSeen: null });
+    this.running.set(id, { child, termAt: null, exited, startedAt: Date.now(), deadlineMin, logPath, logCopy, flaggedAt: null, noProgressMin: this.noProgressMin(stepName, variant), stopMsg: null, remoteWaitMs: 0, remoteSeen: null });
     this.o.log(`job ${id}: started (pid ${child.pid})`);
     return { pid: child.pid ?? null };
   }

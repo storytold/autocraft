@@ -156,6 +156,18 @@ export const undoMessage = (problems: string[]): string =>
 export const roundFailedMessage = (reason: string): string =>
   `Your change did not pass. What failed is below. Correct the change in the working tree, run the checks again, and reply with the JSON report as before.\n\n${block("failure", reason)}`;
 
+/** A security fix round that failed with no change to go on from (the gates refused it, or the session made none): the next try starts clean. */
+export const securityRetryMessage = (reason: string, commit: string): string =>
+  `An earlier try at this fix did not pass. What failed is below. The tree in /work/src is clean at ${commit} again: edits from the earlier try are gone. Write the fix again so that it passes, run the checks, and reply with the JSON report as before.\n\n${block("failure", reason)}`;
+
+/** A fresh session that takes over a security fix round that failed: the tree holds that round's change again. */
+export const securityTakeoverMessage = (reason: string, diffStat: string): string =>
+  `An earlier session worked on this fix and is gone. The tree in /work/src holds its change (earlier.diff_stat), and that change did not pass: earlier.failure says why. Correct the change in the working tree, run the checks, and reply with the JSON report.\n\n${block("earlier", { diff_stat: diffStat, failure: reason })}`;
+
+/** The opening of a new fix on a session that worked on the finding before: the clean tree, then the task as a first turn gets it. */
+export const securityTaskMessage = (commit: string, task: string): string =>
+  `New task. The tree in /work/src is clean at ${commit}; edits from your earlier tasks are gone.\n\n${task}`;
+
 export const REPORT_MESSAGE = "Your last reply was not the JSON report. Do not use tools. Reply with only the JSON report object, as the instructions describe.";
 /** The report turn after a reply AutoCraft lost in a restart. */
 export const LOST_REPLY_MESSAGE = "AutoCraft did not receive your last reply. Do not use tools. Reply with only the JSON report object for the work so far, as the instructions describe.";
