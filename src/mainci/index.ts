@@ -5,7 +5,7 @@ import type { Querier } from "../mirror.ts";
 import { contextState, type CheckState } from "../review/checks.ts";
 import { trackedNames } from "../repos.ts";
 import { optionalChecks, optionalChecksOf } from "../optional-checks.ts";
-import { loadTrips, resumeTrips, TRIP_REASON_SEPARATOR, tripMergeBreakers } from "../data/control/index.ts";
+import { loadTrips, resumeTripsIf, tripMergeBreakers } from "../data/control/index.ts";
 import type { TripRow } from "../data/control/types.ts";
 import { tripKey } from "../core/push-outcome.ts";
 import { loadMergedInfo } from "../data/merge/index.ts";
@@ -135,27 +135,28 @@ export async function pollMainCi(db: Db, client: Querier, only?: string, log: (l
   return { repos: repos.length, heads };
 }
 
-/** The evidence a red main trips a merge breaker with: our merged PR and the red head of main. Only a main-CI trip has this form. */
-const mainCiEvidence = (repo: string, number: number, sha: string): string => `${repo}#${number}@${sha.slice(0, 8)}`;
+/** Marks the evidence a red main trips a merge breaker with; no other trip writes it. */
+export const MAIN_CI_EVIDENCE = "main-ci:";
+
+/** The evidence a red main trips a merge breaker with: our merged PR and the red head of main, behind MAIN_CI_EVIDENCE. */
+const mainCiEvidence = (repo: string, number: number, sha: string): string => `${MAIN_CI_EVIDENCE}${repo}#${number}@${sha.slice(0, 8)}`;
 
 const escaped = (repo: string): string => repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
- * Whether every cause on a merge breaker is a red main: each evidence entry has the main-CI form. A trip from before that form
- * holds the pair `repo#N`, `repo@sha` and one reason; a cause added to it (a post-merge defect) adds a reason, so it no longer counts.
+ * Whether every cause on a merge breaker is a red main: each evidence entry is a main-CI entry of the repo. A trip without
+ * the marker (a post-merge defect, also one added while main was red, or a main-CI trip from before the marker) is a person's.
  */
-export function redMainOnly(t: Pick<TripRow, "reason" | "evidence">, repo: string): boolean {
-  const r = escaped(repo);
-  const now = new RegExp(`^${r}#\\d+@[0-9a-f]+$`), sha = new RegExp(`^${r}@[0-9a-f]+$`), ref = new RegExp(`^${r}#\\d+$`);
-  if (!t.evidence.length) return false;
-  if (t.evidence.every((e) => now.test(e))) return true;
-  return !t.reason.includes(TRIP_REASON_SEPARATOR) && t.evidence.length === 2 && t.evidence.some((e) => sha.test(e)) && t.evidence.some((e) => ref.test(e));
+export function redMainOnly(t: Pick<TripRow, "evidence">, repo: string): boolean {
+  const form = new RegExp(`^${escaped(MAIN_CI_EVIDENCE)}${escaped(repo)}#\\d+@[0-9a-f]+$`);
+  return t.evidence.length > 0 && t.evidence.every((e) => form.test(e));
 }
 
 /**
  * Resumes, as the pipeline, each merge breaker that a red main tripped once that main counts as green (or failing only optional
  * checks) again: the state comes from the newest head, so from the red head the trip names rerun green or from a later head that
- * holds it. A merge breaker with any other cause (a post-merge review's defects, also one added while main was red) stays for a person.
+ * holds it. The check is made again in the write that clears the trip, so a cause added meanwhile keeps it. A merge breaker with
+ * any other cause stays for a person.
  */
 async function resumeMainCiTrips(db: Db, rows: MainCiRepoRow[], log: (line: string) => void): Promise<void> {
   const passing = rows.filter((r) => r.state === "green" || r.state === "optional");
@@ -163,7 +164,8 @@ async function resumeMainCiTrips(db: Db, rows: MainCiRepoRow[], log: (line: stri
   const trips = await loadTrips(db, { keys: passing.map((r) => tripKey("merge", r.repo)) });
   const due = passing.filter((r) => { const t = trips.get(tripKey("merge", r.repo)); return !!t && redMainOnly(t, r.repo); });
   if (!due.length) return;
-  const resumed = await resumeTrips(db, due.map((r) => tripKey("merge", r.repo)), "pipeline");
+  const repoOf = new Map(due.map((r) => [tripKey("merge", r.repo), r.repo]));
+  const resumed = await resumeTripsIf(db, [...repoOf.keys()], "pipeline", (t) => redMainOnly(t, repoOf.get(t.stage)!));
   for (const t of resumed) log(`main-ci: resumed ${t.key}: main CI passes again (${t.reason})`);
 }
 

@@ -51,11 +51,28 @@ export async function loadBreakerSince(db: Db, keys: string[]): Promise<Map<stri
 /** Joins the reasons of one trip: a trip that gained a cause while active lists every cause. */
 export const TRIP_REASON_SEPARATOR = "; ";
 
+/** Tries of a compare-and-set on a trip row that another writer changes in between. */
+const CAS_TRIES = 3;
+
+type RawTrip = { stage: string; active: number; reason: string; evidence: string };
+
+/** The stored rows of `keys` as written (reason and evidence text), for a compare-and-set on them. */
+async function rawRows(db: Db, keys: string[]): Promise<Map<string, RawTrip>> {
+  if (!keys.length) return new Map();
+  const q = queryDb(db);
+  const found = await q.all(q.k.selectFrom("main.stage_trips").select(["stage", "active", "reason", "evidence"]).where(kx.inList(db, "stage", keys)));
+  return new Map(found.map((r) => [r.stage, r]));
+}
+
+const tripRowOf = (r: RawTrip): Pick<TripRow, "stage" | "reason" | "evidence"> => ({ stage: r.stage, reason: r.reason, evidence: evidenceOf(r.evidence) });
+
 /**
  * Compare-and-set (`ON CONFLICT ... WHERE active = 0 RETURNING`): trips each key that is not active already and returns those
  * keys, with one `stage-trip` audit row each. A repeated key takes its first row. Joins the caller's transaction.
  * `append`: a key that is active already gains a reason it does not list yet, with that reason's evidence (one `stage-trip`
- * audit row each), so a later cause is kept and a resume sees it; such a key is not returned.
+ * audit row each), so a later cause is kept and a resume sees it; such a key is not returned. The append is a compare-and-set
+ * on the row's reason and evidence, read again when another writer changed them, so concurrent causes are all kept; a trip
+ * resumed in between is tripped anew.
  */
 export async function tripStage(db: Db, rowsIn: { key: string; reason: string; evidence: string[]; at: string }[], o: { append?: boolean } = {}): Promise<string[]> {
   const first = new Map<string, (typeof rowsIn)[number]>();
@@ -63,24 +80,36 @@ export async function tripStage(db: Db, rowsIn: { key: string; reason: string; e
   const unique = [...first.values()];
   if (!unique.length) return [];
   const q = queryDb(db);
+  const insert = async (list: typeof unique): Promise<Set<string>> => new Set((await q.all(q.k.insertInto("main.stage_trips")
+    .values(list.map((r) => ({ stage: r.key, active: 1, reason: r.reason, evidence: JSON.stringify(r.evidence), tripped_at: r.at })))
+    .onConflict((oc) => oc.column("stage").doUpdateSet(kx.excluded(["active", "reason", "evidence", "tripped_at"])).where((eb) => eb(eb.ref("stage_trips.active" as never), "=", 0 as never)))
+    .returning("stage"))).map((r) => r.stage));
   return await db.write(async () => {
-    const won = await q.all(q.k.insertInto("main.stage_trips")
-      .values(unique.map((r) => ({ stage: r.key, active: 1, reason: r.reason, evidence: JSON.stringify(r.evidence), tripped_at: r.at })))
-      .onConflict((oc) => oc.column("stage").doUpdateSet(kx.excluded(["active", "reason", "evidence", "tripped_at"])).where((eb) => eb(eb.ref("stage_trips.active" as never), "=", 0 as never)))
-      .returning("stage"));
-    const tripped = new Set(won.map((r) => r.stage));
+    const tripped = await insert(unique);
     const added: typeof unique = [];
     if (o.append) {
-      // Rows of one call name distinct keys (first-wins above), so each active row gains at most one reason here.
-      const active = await rows(db, { active: true, keys: unique.filter((r) => !tripped.has(r.key)).map((r) => r.key) });
-      for (const r of unique) {
-        const t = active.get(r.key);
-        if (!t || t.reason.split(TRIP_REASON_SEPARATOR).includes(r.reason)) continue;
-        const evidence = [...t.evidence, ...r.evidence.filter((e) => !t.evidence.includes(e))];
-        await q.run(q.k.updateTable("main.stage_trips").set({ reason: `${t.reason}${TRIP_REASON_SEPARATOR}${r.reason}`, evidence: JSON.stringify(evidence) })
-          .where("stage", "=", r.key).where("active", "=", 1));
-        added.push(r);
+      let todo = unique.filter((r) => !tripped.has(r.key));
+      for (let i = 0; i < CAS_TRIES && todo.length; i++) {
+        const stored = await rawRows(db, todo.map((r) => r.key));
+        const again: typeof unique = [];
+        for (const r of todo) {
+          const t = stored.get(r.key);
+          if (!t || t.active !== 1) {
+            if ((await insert([r])).has(r.key)) tripped.add(r.key);
+            else again.push(r);
+            continue;
+          }
+          const row = tripRowOf(t);
+          if (row.reason.split(TRIP_REASON_SEPARATOR).includes(r.reason)) continue;
+          const evidence = [...row.evidence, ...r.evidence.filter((e) => !row.evidence.includes(e))];
+          const won = await q.all(q.k.updateTable("main.stage_trips").set({ reason: `${t.reason}${TRIP_REASON_SEPARATOR}${r.reason}`, evidence: JSON.stringify(evidence) })
+            .where("stage", "=", r.key).where("active", "=", 1).where("reason", "=", t.reason).where("evidence", "=", t.evidence).returning("stage"));
+          if (won.length) added.push(r);
+          else again.push(r);
+        }
+        todo = again;
       }
+      if (todo.length) throw new Error(`could not add a cause to ${todo.map((r) => r.key).join(", ")}: the trip kept changing`);
     }
     await addAudit(db, [...unique.filter((r) => tripped.has(r.key)), ...added].map((r) => ({ login: "pipeline", action: "stage-trip", target: r.key, details: { reason: r.reason, evidence: r.evidence } })));
     return unique.filter((r) => tripped.has(r.key)).map((r) => r.key);
@@ -97,6 +126,27 @@ export async function resumeTrips(db: Db, keys: string[], by: string): Promise<{
       .where(kx.inList(db, "stage", keys)).where("active", "=", 1).returning(["stage", "reason"]));
     await addAudit(db, done.map((r) => ({ login: by, action: "stage-resume", target: r.stage, details: { reason: r.reason }, at })));
     return done.map((r) => ({ key: r.stage, reason: r.reason }));
+  });
+}
+
+/**
+ * Clears the active trips of `keys` that `may` accepts, as read in the same write: each clear is a compare-and-set on the reason
+ * and evidence `may` saw, so a cause added in between keeps the trip (the next call decides again). Audits each like resumeTrips.
+ */
+export async function resumeTripsIf(db: Db, keys: string[], by: string, may: (t: Pick<TripRow, "stage" | "reason" | "evidence">) => boolean): Promise<{ key: string; reason: string }[]> {
+  if (!keys.length) return [];
+  const q = queryDb(db);
+  return await db.write(async () => {
+    const at = new Date().toISOString();
+    const done: { key: string; reason: string }[] = [];
+    for (const t of (await rawRows(db, keys)).values()) {
+      if (t.active !== 1 || !may(tripRowOf(t))) continue;
+      const won = await q.all(q.k.updateTable("main.stage_trips").set({ active: 0, cleared_at: at, cleared_by: by })
+        .where("stage", "=", t.stage).where("active", "=", 1).where("reason", "=", t.reason).where("evidence", "=", t.evidence).returning(["stage", "reason"]));
+      done.push(...won.map((r) => ({ key: r.stage, reason: r.reason })));
+    }
+    await addAudit(db, done.map((r) => ({ login: by, action: "stage-resume", target: r.key, details: { reason: r.reason }, at })));
+    return done;
   });
 }
 

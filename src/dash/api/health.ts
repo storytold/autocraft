@@ -25,14 +25,14 @@ import type { Db } from "../../db/index.ts";
 
 /**
  * Where a tripped breaker's row goes for staff: the items its evidence names (`photocraft#12`, `photocraft#12@1a2b3c4d`,
- * `photocraft#12 attempt 2`; one opens beside the Items list), the held outside items for the surge breaker, else the Work queue.
+ * `main-ci:photocraft#12@1a2b3c4d`, `photocraft#12 attempt 2`; one opens beside the Items list), the held outside items for the surge breaker, else the Work queue.
  * Viewers go to the Work queue: the evidence and the held items are staff's to read.
  */
 export function tripTarget(trip: Pick<TripRow, "stage" | "evidence">, hidden: HiddenRepos, staff: boolean): string {
   if (!staff) return "/queue";
   const items = new Map<string, { repo: string; number: number }>();
   for (const e of trip.evidence) {
-    const m = /^([\w.-]+(?:\/[\w.-]+)?)#([1-9]\d*)\b/.exec(e);
+    const m = /^(?:main-ci:)?([\w.-]+(?:\/[\w.-]+)?)#([1-9]\d*)\b/.exec(e);
     if (m && !isHiddenRepo(hidden, m[1]!)) items.set(`${m[1]}#${m[2]}`, { repo: m[1]!, number: Number(m[2]) });
   }
   return items.size ? itemsListPath([...items.values()]) : trip.stage === OUTSIDE_SURGE ? itemsPath("is:outside-held") : "/queue";

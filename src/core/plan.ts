@@ -237,6 +237,8 @@ export type PrFacts = {
     noCi: boolean;
     /** The default branch's CI is red. */
     mainRed: boolean;
+    /** While the repo's next batch waits out the publish backoff (src/merge/batch-store.ts publishBackoffMs): when it ends (ms). */
+    batchBackoffUntil?: number;
     /** The repo's `implement` build feature is on (src/build/features.ts): the switch of an implementation PR's revisions and of the end of its attempt. */
     implementOn: boolean;
   };

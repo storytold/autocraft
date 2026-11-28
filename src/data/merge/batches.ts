@@ -116,12 +116,14 @@ export async function loadBatchDue(db: Db, now: Date): Promise<BatchDue[]> {
 export async function loadPublishFailures(db: Db, since: string, repos?: string[]): Promise<Map<string, { count: number; at: string }>> {
   if (repos && repos.length === 0) return new Map();
   const q = queryDb(db);
+  // Only the batches that count are read: the failed ones and the ones whose PR opened (merge_batches_updated bounds the range).
   const rows = await q.all(q.k.selectFrom("merge_batches as b").select(["b.repo", "b.state", "b.summary", "b.pr_number", "b.updated_at"])
-    .where("b.updated_at", ">=", since).$if(!!repos, (s) => s.where(kx.inList(db, "b.repo", repos!))).orderBy("b.id", "desc"));
+    .where("b.updated_at", ">=", since).where((eb) => eb.or([eb("b.state", "=", "failed"), eb("b.pr_number", "is not", null)]))
+    .$if(!!repos, (s) => s.where(kx.inList(db, "b.repo", repos!))).orderBy("b.id", "desc"));
   const out = new Map<string, { count: number; at: string }>(), done = new Set<string>();
   for (const r of rows) {
     if (done.has(r.repo)) continue;
-    // A batch whose PR opened ends the run of failures; batches that never got as far (superseded, split, still checking) do not count.
+    // A batch whose PR opened ends the run of failures; a batch that failed before it had a PR for another reason does not count.
     if (r.pr_number !== null) { done.add(r.repo); continue; }
     if (r.state !== "failed" || !r.summary?.startsWith(PUBLISH_FAILED)) continue;
     const o = out.get(r.repo);
