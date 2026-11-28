@@ -8,6 +8,7 @@ import { isAbsolute, join } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { WARM_KEY } from "./warm.ts";
+import { fileTooOpen } from "../permcheck.ts";
 
 export type StoreConfig = { listen: string; dir: string; maxGb: number; maxUploadGb: number; requestTimeoutSec: number; idleTimeoutSec: number; readKey: string; writeKey: string };
 /** `stored`, `bytes` and `signature` come from the signing worker; the store only keeps them. */
@@ -214,8 +215,8 @@ export function generateSigningKeys(privateFile: string, publicFile: string): vo
 }
 
 export async function storeServe(configPath: string): Promise<void> {
-  const mode = statSync(configPath).mode & 0o777;
-  if (mode & 0o077) throw new Error(`${configPath} holds the store keys and must not be accessible to group or others (mode ${mode.toString(8)}); run chmod 600`);
+  const why = fileTooOpen(configPath);
+  if (why) throw new Error(why === "not found" ? `${configPath} holds the store keys and was not found` : `${configPath} holds the store keys and ${why}`);
   const cfg = parseStoreConfig(JSON.parse(readFileSync(configPath, "utf8")));
   const server = createStore(cfg);
   const i = cfg.listen.lastIndexOf(":");

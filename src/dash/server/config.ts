@@ -2,6 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fileTooOpen } from "../../permcheck.ts";
 import { randomToken } from "./crypto.ts";
 import { dbTarget } from "../../db/open.ts";
 import { defaultImageCacheDir } from "./images.ts";
@@ -74,15 +75,11 @@ export function isLoopbackHost(hostHeader: string | undefined): boolean {
   return !!m && isLoopback(m[1] ?? m[2]!);
 }
 
-/** Refuses a secrets file that is missing or open to group or others. Every reader of the file checks it first. */
+/** Refuses a secrets file that is missing or open to anyone but its owner: the POSIX mode bits, or on Windows the file's ACL (src/permcheck.ts). Every reader of the file checks it first. */
 export function checkSecretsFileMode(path: string): void {
-  let mode: number;
-  try {
-    mode = statSync(path).mode;
-  } catch {
-    throw new ConfigError("secrets file not found");
-  }
-  if (mode & 0o077) throw new ConfigError("secrets file is readable or writable by group or others; chmod 600 it");
+  const why = fileTooOpen(path);
+  if (why === "not found") throw new ConfigError("secrets file not found");
+  if (why) throw new ConfigError(`secrets file ${why}`);
 }
 
 export function readSecrets(path: string | undefined): Secrets {
