@@ -20,7 +20,7 @@ import { ghExec } from "../merge/safe-merge.ts";
 import { ownerOf } from "../owners.ts";
 import { cachedDiff, ghDiff } from "../review/diff.ts";
 import type { TryStep } from "./cli.ts";
-import { crateDirsOf, packageDirsOf, type StepGate } from "./gates.ts";
+import { prPackages, type StepGate } from "./gates.ts";
 import type { StepTurn } from "./messages.ts";
 import { fixSessionLease, prStep, runStep, type StepEnv, type StepOutcome } from "./turn.ts";
 import { lastTurn, loadSessions } from "./store.ts";
@@ -28,7 +28,6 @@ import { openSession, parkSession } from "./workspace.ts";
 
 
 const indent = (s: string) => s.trimEnd().split("\n").map((l) => `  ${l}`).join("\n");
-const DIFF_FILE = /^diff --git a\/(\S+) b\/\S+$/gm;
 
 /** Returns the exit code: 0 when the gates passed, 2 when they refused or the session changed nothing, 1 when the step could not run. */
 export async function runSessionTry(db: Db, repo: string, number: number, step: TryStep, instructions: string | null, log: (line: string) => void = console.log): Promise<number> {
@@ -62,15 +61,9 @@ export async function runSessionTry(db: Db, repo: string, number: number, step: 
     const fixes = parseFixes(JSON.stringify(review.fixes));
     const allowed = [...new Set(fixes.map((f) => f.file))].filter((f) => fixupEditable(f, scripts));
     if (!allowed.length) throw new Error(`the take-fix review of ${ref} names no file a fix-up may edit`);
-    const ls = await git.git(["ls-tree", "-r", "--name-only", head]);
-    const manifests = new Map<string, string>();
-    for (const f of ls.stdout.split("\n").filter((x) => x === "Cargo.toml" || x.endsWith("/Cargo.toml"))) {
-      const t = await git.file(head, f);
-      if (t.ok) manifests.set(f, t.content);
-    }
-    const newFilesIn = crateDirsOf([...diff.text.matchAll(DIFF_FILE)].map((m) => m[1]!), manifests);
+    const { newFilesIn, packages } = await prPackages(git, head, diff.text);
     turn = { ...base, step: "fixup", reason: review.reason ?? "", fixes, allowed, newFilesIn, diff: diff.text };
-    gate = { step: "fixup", allowed, newFilesIn, packages: packageDirsOf(manifests), scripts, quiet };
+    gate = { step: "fixup", allowed, newFilesIn, packages, scripts, quiet };
   } else if (step === "maintainer") {
     turn = { ...base, step: "maintainer", instructions: instructions!.trim(), diff: diff.text };
     gate = { step: "maintainer", scripts, quiet };

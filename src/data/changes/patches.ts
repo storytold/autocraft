@@ -66,15 +66,15 @@ export async function recordPushing(db: Db, p: { kind: PatchKind; repo: string; 
  * Stores the model's patch in a `linting` row: the stored row with the next round's patch and task (update by `storedId`), or a
  * first row. A CI fix without a lint task is a patch kept for posting again (`lintTask` null).
  */
-export async function storePatch(db: Db, p: { kind: PatchKind; storedId?: number; repo: string; number: number; head: string; patch: string; files: string[]; lintTask: number | null; lintRound: number; lintState: string; session: string | null; /** The fix session turn that wrote the patch (CI fix). */ sessionTurn?: number | null; changes?: string[]; source?: FixupSource; operatorFix?: number | null; baseSha?: string; attempt: number; at?: string }): Promise<void> {
+export async function storePatch(db: Db, p: { kind: PatchKind; storedId?: number; repo: string; number: number; head: string; patch: string; files: string[]; lintTask: number | null; lintRound: number; lintState: string; session: string | null; /** The fix session turn that wrote the patch (fix-ups and CI fixes). */ sessionTurn?: number | null; changes?: string[]; source?: FixupSource; operatorFix?: number | null; baseSha?: string; attempt: number; at?: string }): Promise<void> {
   const files = json(p.files);
   const at = p.at ?? new Date().toISOString();
   await db.write(async () => {
     if (p.kind === "fixup") {
       const changes = p.changes?.length ? json(p.changes) : null;
-      if (p.storedId !== undefined) { await updateById(db, "fixups", p.storedId, { patch: p.patch, files, lint_task: p.lintTask, lint_round: p.lintRound, lint_state: p.lintState, session: p.session, changes }); return; }
+      if (p.storedId !== undefined) { await updateById(db, "fixups", p.storedId, { patch: p.patch, files, lint_task: p.lintTask, lint_round: p.lintRound, lint_state: p.lintState, session: p.session, session_turn: p.sessionTurn ?? null, changes }); return; }
       await insert(db, "fixups", { repo: p.repo, number: p.number, from_head: p.head, to_head: null, state: "linting", reason: null, files, attempt: p.attempt, created_at: at, source: sourceCol(p.source), patch: p.patch,
-        lint_task: p.lintTask, lint_round: p.lintRound, lint_state: p.lintState, session: p.session, operator_fix: p.operatorFix ?? null, changes });
+        lint_task: p.lintTask, lint_round: p.lintRound, lint_state: p.lintState, session: p.session, session_turn: p.sessionTurn ?? null, operator_fix: p.operatorFix ?? null, changes });
     } else if (p.kind === "cifix") {
       if (p.storedId !== undefined) { await updateById(db, "ci_fixes", p.storedId, { patch: p.patch, files, lint_task: p.lintTask, lint_round: p.lintRound, lint_state: p.lintState, session: p.session, session_turn: p.sessionTurn ?? null }); return; }
       await insert(db, "ci_fixes", { repo: p.repo, number: p.number, head: p.head, to_head: null, kind: "code", state: "linting", reason: null, files, attempt: p.attempt, created_at: at, patch: p.patch,

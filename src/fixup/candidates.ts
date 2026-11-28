@@ -18,7 +18,7 @@ export type FixCandidate = { repo: string; number: number; head: string; reason:
   /** A stored model patch whose lint task ended: the collect step pushes it with the format changes folded in, or asks the model again with the findings. */
   lint?: LintWork };
 /** The fixups row of a stored patch: `lint_state` is `pending` (first task) or `requeued` (the lost task was queued once more). */
-export type LintWork = { rowid: number; round: number; task: number | null; state: string; patch: string; /** The kept model session that wrote the patch (src/prepush/resume.ts). */ session: string | null; /** An operator fix-up model's list of what the patch changes. */ changes: string[] };
+export type LintWork = { rowid: number; round: number; task: number | null; state: string; patch: string; /** The kept model session that wrote the patch (src/prepush/resume.ts). */ session: string | null; /** The fix session turn (fix_session_turns.id) that wrote the patch; null for a patch of the patch path. */ sessionTurn: number | null; /** An operator fix-up model's list of what the patch changes. */ changes: string[] };
 export type FixSelection = {
   /** Take-fix PRs we may push to, with our push approved. */
   fix: FixCandidate[];

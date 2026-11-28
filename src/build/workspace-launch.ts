@@ -81,8 +81,8 @@ const BACKGROUND_GRACE_MS = 30_000;
  * The script that writes the workspace's diff against the commit in `$1` to `/work/.ws/<name>.diff`, with its own index copy and
  * temporary files per name. `flags` go before the commit. The diff is cut one byte past the cap, so an oversized one shows as such;
  * head stopping early makes git's status 141. It works on a copy of the index, so the session's index and its lock are never touched.
- * The copy keeps the index's mtime: git compares the content of a file changed in the second the index was written only while the
- * index is no newer than the file, so a same-size edit made then (a restored patch) would otherwise show no change.
+ * The copy keeps the index's mtime (cp -p): git re-reads a file whose mtime is not older than the index, so an edit of the same size
+ * made in the second the index was written still shows, which a copy with a new mtime would hide.
  */
 export const diffScript = (name: string, flags = ""): string => `set -e
 GIT_INDEX_FILE=/work/.ws/${name}.index

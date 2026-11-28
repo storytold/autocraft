@@ -118,7 +118,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
     seenLint.add(key);
     for (const w of reads.stored) {
       if (w.kind !== "fixup" || w.repo !== repo || w.number !== f.number || w.head !== head || w.source !== source) continue;
-      const lint = { rowid: w.id, round: w.lintRound, task: w.lintTask, state: w.lintState, patch: w.patch, session: w.session, changes: w.changes };
+      const lint = { rowid: w.id, round: w.lintRound, task: w.lintTask, state: w.lintState, patch: w.patch, session: w.session, sessionTurn: w.sessionTurn, changes: w.changes };
       if (source === "operator") {
         const o = await queuedOperatorFix(db, repo, f.number, head);
         if (o && w.operatorFix === o.id) list({ repo, number: f.number, head, reason: "an operator's instructions", fixes: [], attempt: w.attempt, model: null, source: "operator", operator: { id: o.id, instructions: o.instructions }, lint });

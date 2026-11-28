@@ -3,26 +3,20 @@
 // tree. The pod runs the real workspace helper on a scratch /work; only the model and AutoCraft's checks are fakes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { SCRATCH } from "./scratch.ts";
 import { world } from "./world-db.ts";
+import { fixPod } from "./helpers/fix-pod.ts";
 import { createEnv } from "../src/build/envs.ts";
-import type { KubeApi } from "../src/build/kube-api.ts";
-import type { WorkspaceCallRequest } from "../src/build/workspace-call.ts";
-import { WS_POD_PATH } from "../src/build/workspace.ts";
-import { createWorkspace, moveWorkspace } from "../src/build/workspaces.ts";
-import type { CheckRound } from "../src/implement/checks.ts";
-import type { Outcome } from "../src/remote/calls.ts";
 import { runGate, type StepGate } from "../src/fixsession/gates.ts";
 import type { StepTurn } from "../src/fixsession/messages.ts";
-import { ensureSession, loadSessions, turnsOf, updateSession, type FixSessionKind } from "../src/fixsession/store.ts";
+import { loadSessions, turnsOf, type FixSessionKind } from "../src/fixsession/store.ts";
 import { prStep, runStep, type StepEnv, type StepSpec } from "../src/fixsession/turn.ts";
 
 const top = join(SCRATCH, "fix-turn");
 process.env.AUTOCRAFT_FIXUP_DIR = join(top, "fixups");
-const helper = new URL("../deploy/container/ws", import.meta.url).pathname;
 const LIB = "crates/app/src/lib.rs", UTIL = "crates/app/src/util.rs", IT = "crates/app/tests/it.rs";
 const ORIGINAL: Record<string, string> = { "crates/app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\n', [LIB]: "pub fn a() -> u8 { 0 }\n", [UTIL]: "pub fn u() {}\n", [IT]: "#[test]\nfn t() {}\n" };
 
@@ -37,78 +31,11 @@ async function setup() {
   const head = git("rev-parse", "HEAD");
   execFileSync("git", ["clone", "-q", "--bare", work, join(top, "fixups/app")]);
 
-  // One scratch /work per workspace, seeded at the head.
-  const roots = new Map<number, string>();
-  const seed = (ws: number): string => {
-    const root = join(top, `pod-${ws}`);
-    for (const d of ["src", "home", ".ws/calls"]) mkdirSync(join(root, d), { recursive: true });
-    const seeded = spawnSync("sh", [helper, "untar"], { env: { ...process.env, WS_ROOT: root }, input: execFileSync("git", ["archive", head], { cwd: work }) });
-    roots.set(ws, root);
-    return seeded.stdout.toString().trim().split(" ")[2]!;
-  };
-  const api = {
-    listPods: async (_ns: string, selector: string) => {
-      const id = /craft\.build\/workspace=(\d+)/.exec(selector)![1]!;
-      return [{ metadata: { name: `ws-${id}`, labels: { "craft.build/workspace": id } }, status: { phase: "Running" } }];
-    },
-    exec: async (_ns: string, pod: string, _c: string, argv: string[], o: { stdin?: Buffer | AsyncIterable<Buffer> }) => {
-      const root = roots.get(Number(pod.slice(3)))!;
-      const local = (a: string) => a.replace(/\/work(?=\/|$|\s|")/g, root);
-      const [cmd, ...args] = argv[0] === WS_POD_PATH ? ["sh", helper, ...argv.slice(1)] : argv;
-      const p = spawn(cmd!, args.map(local), { env: { ...process.env, WS_ROOT: root } });
-      const out: Buffer[] = [];
-      p.stdout.on("data", (b: Buffer) => out.push(b));
-      if (o.stdin && !Buffer.isBuffer(o.stdin)) for await (const chunk of o.stdin) p.stdin.write(chunk);
-      p.stdin.end(Buffer.isBuffer(o.stdin) ? o.stdin : undefined);
-      const code = await new Promise<number | null>((r) => p.on("close", r));
-      return { exitCode: code, stdout: Buffer.concat(out), stderr: Buffer.alloc(0), truncated: false };
-    },
-  } as unknown as KubeApi;
-
   const db = (await world()).db;
   await createEnv(db, { id: "pods", label: "Pods", kind: "kubernetes", slots: 4, settings: { image: "autocraft:test" } }, "op");
-
-  // The model: each call writes the files the case gives it into the pod's tree, then replies with the report.
-  const queued: WorkspaceCallRequest[] = [];
-  let edits: (r: WorkspaceCallRequest) => Record<string, string> = () => ({});
-  let report: Record<string, unknown> = { status: "done", summary: "Made the change." };
-  const env: StepEnv = {
-    db, api, log: () => {}, by: "op",
-    agents: async () => "Build with cargo build --offline.\n",
-    checks: async (_pod, o) => ({ round: o.round, base: o.base, diffStat: "", files: [], crates: [], findings: [], notes: [], noVerdict: [], diffHash: "", needsDependency: false, clean: true } as unknown as CheckRound),
-    calls: {
-      async queue(_db, r) {
-        queued.push(r);
-        const id = 5000 + queued.length, now = Date.now();
-        await db.run(db.k.insertInto("main.remote_calls").values({
-          id, step: "fixup", stage: 0, prompt_id: r.promptId, prompt_version: r.promptVersion, tier: r.tier, effort: r.effort, asked_model: r.model, bundle: JSON.stringify({ system: r.system }),
-          state: "queued", since: now, seen_at: now, max_attempts: 2, timeout_ms: 1000, parent_id: r.parentId ?? null,
-        } as never));
-        return id;
-      },
-      async await(_db, id): Promise<Outcome> {
-        const r = queued[id - 5001]!, root = roots.get(r.workspaceId)!;
-        for (const [p, text] of Object.entries(edits(r))) { mkdirSync(dirname(join(root, "src", p)), { recursive: true }); writeFileSync(join(root, "src", p), text); }
-        return { state: "done", text: JSON.stringify(report), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null } as never, byModel: null, costUsd: 0.5, turns: 3, sessionId: "s", runId: null };
-      },
-    },
-  };
-
-  /** A live session of `kind` on item `n` with a ready workspace at the head. */
-  const session = async (kind: FixSessionKind, n: number) => {
-    const ws = await createWorkspace(db, { repo: "app", baseSha: head, envId: "pods", owner: "test" });
-    await moveWorkspace(db, ws, ["requested"], "ready", { pod: `ws-${ws}`, base_commit: seed(ws) });
-    const s = await ensureSession(db, kind, "app", n);
-    assert.ok("session" in s);
-    await updateSession(db, s.session.id, { workspaceId: ws, head });
-    return (await loadSessions(db, [s.session.id])).get(s.session.id)!;
-  };
-  return {
-    db, env, head, queued, session,
-    model(f: typeof edits, r: Record<string, unknown> = { status: "done", summary: "Made the change." }) { edits = f; report = r; },
-    /** The workspace's scratch /work. */
-    root: (ws: number) => roots.get(ws)!,
-  };
+  const pod = fixPod(db, { top, src: work, head });
+  const env: StepEnv = { db, log: () => {}, by: "op", ...pod.deps };
+  return { db, env, head, queued: pod.queued, session: pod.session, model: pod.model, root: pod.root };
 }
 
 // Both tests share one repo, pod and database; each works on its own items.

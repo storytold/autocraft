@@ -15,6 +15,7 @@ import {
   resumeWorkspace, type WorkspaceStateName,
 } from "../build/workspaces.ts";
 import { implementEnv, WorkspaceUnavailable } from "../implement/workspace.ts";
+import { loadFixWorkspaceWaits } from "../data/fixsession/index.ts";
 import { endIdle, ensureSession, updateSession, type EndedFixSession, type FixSession, type FixSessionKind } from "./store.ts";
 
 export { WorkspaceUnavailable };
@@ -70,6 +71,16 @@ export type WorkspaceReady = {
   /** With keepTree: the tree does not hold the earlier turn's changes (a new or rebuilt workspace), so the caller restores the stored patch. */
   treeLost: boolean;
 };
+
+/**
+ * The planner's reading for the lanes of PR fix steps (fix-up, CI fix): the workspaces of PR fix sessions that are starting or
+ * failed, and the kubernetes environments a workspace can run in. A step that waited for its workspace records nothing, so its job
+ * handled nothing; it runs again when this changes (the workspace gets ready or fails, an environment is enabled or disabled).
+ */
+export async function fixWorkspaceReading(db: Db): Promise<string> {
+  const envs = (await listEnvs(db)).filter((e) => e.kind === "kubernetes" && e.enabled && !e.settings?.warmWriter).map((e) => `${e.id}${e.confidential ? "*" : ""}`).sort();
+  return `${await loadFixWorkspaceWaits(db, "pr")}|${envs.join(",")}`;
+}
 
 /** The environment a session's workspace runs in: implementations' for a PR, a confidential one for a security fix (none: a wait). */
 export async function fixSessionEnv(db: Db, kind: FixSessionKind): Promise<string | WorkspaceWait> {

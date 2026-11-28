@@ -5,23 +5,20 @@
 // scratch /work; the model, AutoCraft's in-pod checks, GitHub and the Opus check are fakes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
 import { createEnv } from "../src/build/envs.ts";
-import type { KubeApi } from "../src/build/kube-api.ts";
 import type { WorkspaceCallRequest } from "../src/build/workspace-call.ts";
-import { WS_POD_PATH } from "../src/build/workspace.ts";
-import { createWorkspace, getWorkspace, moveWorkspace } from "../src/build/workspaces.ts";
+import { getWorkspace } from "../src/build/workspaces.ts";
 import { runCifix, type CifixDeps } from "../src/cifix/index.ts";
 import { rowid } from "../src/db/kx.ts";
 import { setPushApproval } from "../src/fixup/approval.ts";
 import { exec, type Exec, type ExecResult } from "../src/fixup/git.ts";
-import { ensureSession, turnsOf, updateSession } from "../src/fixsession/store.ts";
+import { turnsOf } from "../src/fixsession/store.ts";
 import { setFixSessions } from "../src/fixsession/switch.ts";
 import type { StepEnv } from "../src/fixsession/turn.ts";
-import type { CheckRound } from "../src/implement/checks.ts";
 import type { Querier } from "../src/mirror.ts";
 import { CLIPPY_ARTIFACT } from "../src/prepush/index.ts";
 import type { Outcome } from "../src/remote/calls.ts";
@@ -29,6 +26,7 @@ import { insertWorkflow } from "../src/workflow/store.ts";
 import { acting, appLane } from "./acting.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { validating } from "./gql.ts";
+import { callId, fixPod } from "./helpers/fix-pod.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
@@ -38,7 +36,6 @@ const cache = join(dir, "fixups");
 process.env.AUTOCRAFT_FIXUP_DIR = cache;
 process.env.AUTOCRAFT_DIFF_CACHE = join(dir, "diffs");
 process.env.AUTOCRAFT_ARTIFACT_DIR = join(dir, "artifacts");
-const helper = new URL("../deploy/container/ws", import.meta.url).pathname;
 const T0 = "2026-01-01T00:00:00Z";
 const LIB = "src/lib.rs", OTHER = "src/other.rs";
 const ORIGINAL: Record<string, string> = { "Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\n', [LIB]: "fn a() {}\nfn main() { b(); }\n", [OTHER]: "pub fn o() {}\n" };
@@ -97,59 +94,25 @@ test("lint findings on a session's CI fix go back to that session, an unclaimed 
     return exec("git", sub, { ...o });
   };
 
-  // The pod: one scratch /work, run by the real helper.
-  const root = join(dir, "pod");
-  for (const d of ["src", "home", ".ws/calls"]) mkdirSync(join(root, d), { recursive: true });
-  const seeded = spawnSync("sh", [helper, "untar"], { env: { ...process.env, WS_ROOT: root }, input: execFileSync("git", ["archive", head], { cwd: work }) });
-  const baseCommit = seeded.stdout.toString().trim().split(" ")[2]!;
+  // The pod: one scratch /work, run by the real helper, with a live session whose workspace is ready at the head.
+  const pod = fixPod(db, { top: dir, src: work, head });
+  const live = await pod.session("pr", 7);
+  const ws = live.workspaceId!, root = pod.root(ws);
   const tree = (p: string) => readFileSync(join(root, "src", p), "utf8");
-  const api = {
-    listPods: async (_ns: string, selector: string) => {
-      const id = /craft\.build\/workspace=(\d+)/.exec(selector)![1]!;
-      return [{ metadata: { name: `ws-${id}`, labels: { "craft.build/workspace": id } }, status: { phase: "Running" } }];
-    },
-    deletePod: async () => {},
-    exec: async (_ns: string, _pod: string, _c: string, argv: string[], o: { stdin?: Buffer | AsyncIterable<Buffer> }) => {
-      const local = (a: string) => a.replace(/\/work(?=\/|$|\s|")/g, root);
-      const [c, ...rest] = argv[0] === WS_POD_PATH ? ["sh", helper, ...argv.slice(1)] : argv;
-      const p = spawn(c!, rest.map(local), { env: { ...process.env, WS_ROOT: root } });
-      const out: Buffer[] = [];
-      p.stdout.on("data", (b: Buffer) => out.push(b));
-      if (o.stdin && !Buffer.isBuffer(o.stdin)) for await (const chunk of o.stdin) p.stdin.write(chunk);
-      p.stdin.end(Buffer.isBuffer(o.stdin) ? o.stdin : undefined);
-      const code = await new Promise<number | null>((r) => p.on("close", r));
-      return { exitCode: code, stdout: Buffer.concat(out), stderr: Buffer.alloc(0), truncated: false };
-    },
-  } as unknown as KubeApi;
-  const ws = await createWorkspace(db, { repo: "app", baseSha: head, envId: "pods", owner: "test" });
-  await moveWorkspace(db, ws, ["requested"], "ready", { pod: `ws-${ws}`, base_commit: baseCommit });
-  const opened = await ensureSession(db, "pr", "app", 7);
-  assert.ok("session" in opened);
-  await updateSession(db, opened.session.id, { workspaceId: ws, head });
   // A fix-up's refused edit left in the pod.
   writeFileSync(join(root, "src", OTHER), "pub fn o() { let _ = 1; }\n");
 
   // The model: each call is answered by the next step of the case.
-  const queued: WorkspaceCallRequest[] = [];
   const answers: ((r: WorkspaceCallRequest) => Outcome)[] = [];
   const done = (summary: string): Outcome => ({ state: "done", text: JSON.stringify({ status: "done", summary }), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null } as never, byModel: null, costUsd: 0.5, turns: 3, sessionId: "s", runId: null });
   const session = (_db: unknown, l: (line: string) => void): StepEnv => ({
-    db, api, log: l, agents: async () => null,
-    checks: async (_pod, o) => ({ round: o.round, base: o.base, diffStat: "", files: [], crates: [], findings: [], notes: [], noVerdict: [], diffHash: "", needsDependency: false, clean: true } as unknown as CheckRound),
+    ...pod.deps, db, log: l, agents: async () => null,
     calls: {
-      async queue(_db, r) {
-        queued.push(r);
-        const id = 5000 + queued.length, now = Date.now();
-        await db.run(db.k.insertInto("main.remote_calls").values({
-          id, step: "cifix", stage: 0, prompt_id: r.promptId, prompt_version: r.promptVersion, tier: r.tier, effort: r.effort, asked_model: r.model, bundle: JSON.stringify({ system: r.system }),
-          state: "queued", since: now, seen_at: now, max_attempts: 2, timeout_ms: 1000, parent_id: r.parentId ?? null,
-        } as never));
-        return id;
-      },
+      queue: pod.deps.calls!.queue,
       async await(_db, id) {
         const answer = answers.shift();
         assert.ok(answer, `no answer for call ${id}`);
-        return answer(queued[id - 5001]!);
+        return answer(pod.queued[id - callId(1)]!);
       },
     },
   });
@@ -184,7 +147,7 @@ test("lint findings on a session's CI fix go back to that session, an unclaimed 
   await cifix();
   const [first] = await stored();
   assert.equal(first?.state, "linting", out.join("\n"));
-  const turns1 = await turnsOf(db, opened.session.id);
+  const turns1 = await turnsOf(db, live.id);
   assert.equal(first!.session_turn, turns1.at(-1)!.id);
   const firstCall = turns1.at(-1)!.callId!;
 
@@ -210,7 +173,7 @@ test("lint findings on a session's CI fix go back to that session, an unclaimed 
   assert.equal(second?.state, "linting", out.join("\n"));
   assert.equal(second!.lint_round, 2);
   assert.notEqual(second!.lint_task, first!.lint_task);
-  assert.deepEqual((await turnsOf(db, opened.session.id)).map((t) => [t.purpose, t.outcome]), [["start", "done"], ["lint", "unclaimed"], ["fresh", "done"]]);
+  assert.deepEqual((await turnsOf(db, live.id)).map((t) => [t.purpose, t.outcome]), [["start", "done"], ["lint", "unclaimed"], ["fresh", "done"]]);
   assert.equal(log.filter((l) => l === "push").length, 0, "nothing is pushed while lint has findings");
 
   // 3. Lint clean: the push changes only the CI fix's file, and the pod is parked.

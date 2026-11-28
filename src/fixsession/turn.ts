@@ -28,7 +28,7 @@ import {
 } from "./messages.ts";
 import { FIX_FOLLOW_UP_CALL, FIX_SESSION_CALL, parseFixReport, parseSecurityReport, SESSION_DIFF_MAX_BYTES, SESSION_REPO_DOCS, type SecurityReport } from "./report.ts";
 import {
-  addTurn, endSession, ensureSession, lastTurn, loadSessions, SESSION_MAX_TURNS, settleTurn, turnsOf, updateSession,
+  addTurn, endSession, ensureSession, lastTurn, loadSessions, loadTurns, SESSION_MAX_TURNS, settleTurn, turnsOf, updateSession,
   type FixSession, type FixTurn, type FixTurnPurpose, type FixTurnStep,
 } from "./store.ts";
 import { ensureWorkspace, restorePatch, WORKSPACE_SESSION_KIND, type FixWorkspaceEnv } from "./workspace.ts";
@@ -143,23 +143,38 @@ export type StepSpec = {
   items?: ItemRef[];
   /**
    * A lint follow-up: the step goes on from its stored change `patch` (made at `head`), which the tree gets again, with `message`
-   * (the findings) on the live session. A fresh session gets them from `task`, which then names the findings itself.
+   * (the findings) on the session of call `parentId`, the call that wrote the change. When that is not the session's last call (a
+   * later turn, a lost runner, a new session), a fresh harness session gets the task, which then names the findings itself, with the
+   * history and what the tree holds.
    */
-  lint?: { patch: string; message: string };
+  lint?: { patch: string; message: string; parentId: number | null };
 };
+
+/** Lint findings on a step's stored change, and the call of the turn that wrote it (lintParent). */
+export type StepLint = { findings: string[]; patch: string; parentId: number | null };
 
 /**
  * A PR step's spec from its task turn: fix.session, with the step message on a live session. `lint`: the lint task's findings on
  * the step's stored change, which the step continues from.
  */
-export function prStep(db: Db, turn: StepTurn, gate: (pod: Pod) => StepGate, o: { lint?: { findings: string[]; patch: string } } = {}): StepSpec {
+export function prStep(db: Db, turn: StepTurn, gate: (pod: Pod) => StepGate, o: { lint?: StepLint } = {}): StepSpec {
   return {
     step: turn.step, head: turn.head, promptId: "fix.session",
     task: (history) => renderFixSession(db, { ref: turn.ref, turn, ...(history && { history }), ...(o.lint && { lint: o.lint.findings }) }),
     message: ({ moved }) => stepMessage(turn, { later: true, ...(moved && { moved }) }),
     gate,
-    ...(o.lint && { lint: { patch: o.lint.patch, message: lintMessage(o.lint.findings) } }),
+    ...(o.lint && { lint: { patch: o.lint.patch, message: lintMessage(o.lint.findings), parentId: o.lint.parentId } }),
   };
+}
+
+/**
+ * The call of fix session turn `turnId` (the turn that wrote a stored change) when it belongs to `session`: the parent of a lint
+ * follow-up on that change. Null when the change came from the patch path or from a session that has ended since.
+ */
+export async function lintParent(db: Db, session: Pick<FixSession, "id">, turnId: number | null): Promise<number | null> {
+  if (turnId === null) return null;
+  const t = (await loadTurns(db, [turnId])).get(turnId);
+  return t?.sessionId === session.id ? t.callId : null;
 }
 
 export type StepEnv = FixWorkspaceEnv & {
@@ -176,6 +191,7 @@ export type StepEnv = FixWorkspaceEnv & {
 };
 
 export type StepResult =
+  /** Another job holds the session's work lease (left as a skip on it), or the workspace is not ready (FIX_WORKSPACE_WAIT). */
   | { kind: "wait"; reason: string }
   /** The session ended meanwhile (its PR closed, a person stopped the item) or a new one was refused. */
   | { kind: "ended"; reason: string }
@@ -319,6 +335,9 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
     if (spec.lint) {
       const back = await restorePatch(env, ws.workspaceId, { diff: spec.lint.patch, head: spec.head });
       if (!back.ok) return done({ kind: "failed", reason: `the stored change could not be put back in the workspace: ${back.reason}` }, ws.workspaceId);
+      if (s.lastCallId !== null && s.lastCallId !== spec.lint.parentId) {
+        if (!await updateSession(db, s.id, { lastCallId: null }) || !await reload()) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, ws.workspaceId);
+      }
     }
   }
   // This step's turns so far, from the adopted turn back to the step's opening turn (purpose start, step or lint).

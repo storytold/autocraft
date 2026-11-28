@@ -72,7 +72,7 @@ import { STEP_STAGE, tripOf } from "../core/push-outcome.ts";
 import { planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
 import { leaseTurnover } from "../remote/calls.ts";
-import { loadFixWorkspaceWaits } from "../data/fixsession/index.ts";
+import { fixWorkspaceReading } from "../fixsession/workspace.ts";
 import type { Db } from "../db/index.ts";
 import { createHash } from "node:crypto";
 
@@ -681,6 +681,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     // A stored patch is collected when its lint task ends.
     topics: TASK_TOPICS,
+    // A fix-up that waited for its fix session's workspace runs again when that workspace or the environments move.
+    extra: fixWorkspaceReading,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx);
       // Each planned action is judged on its own PR: a person's fix-up runs whatever the repo approves.
@@ -844,8 +846,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "cifix",
     perRepo: true,
     topics: TASK_TOPICS,
-    // A CI fix that waited for its fix session's workspace runs again when that workspace moves (workspaces is no input topic).
-    extra: async (db) => await loadFixWorkspaceWaits(db, "pr"),
+    // A CI fix that waited for its fix session's workspace runs again when that workspace or the environments move.
+    extra: fixWorkspaceReading,
     detect: async (db, ctx) => {
       // A stored patch whose lint task ended is collected by the same step.
       const plans = await plansOf(db, ctx);

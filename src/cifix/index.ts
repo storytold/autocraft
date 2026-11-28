@@ -72,7 +72,7 @@ import { guardedApi, inClusterApi } from "../build/kube-api.ts";
 import { CIFIX_SESSION_RULES, type CifixGate } from "../fixsession/gates.ts";
 import type { CifixTurn, FixStep as TurnStep } from "../fixsession/messages.ts";
 import { fixSessionsOn } from "../fixsession/switch.ts";
-import { prStep, runStep, type StepEnv, type StepOutcome } from "../fixsession/turn.ts";
+import { lintParent, prStep, runStep, type StepEnv, type StepOutcome } from "../fixsession/turn.ts";
 import { openSession, parkSession, WorkspaceUnavailable } from "../fixsession/workspace.ts";
 import { loadLiveFixSession } from "../data/fixsession/index.ts";
 
@@ -648,7 +648,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
    * its environment, or another job on it), nothing is recorded and the PR does not count as handled; `done`: nothing is pending,
    * and the workspace's pod is parked.
    */
-  const fixInSession = async (c: CifixCandidate, pr: PrNode, failure: CiFailure, lint?: { patch: string; findings: string[] }): Promise<"stored" | "wait" | "done"> => {
+  const fixInSession = async (c: CifixCandidate, pr: PrNode, failure: CiFailure, lint?: { patch: string; findings: string[]; sessionTurn: number | null }): Promise<"stored" | "wait" | "done"> => {
     let r: "stored" | "wait" | "done";
     try {
       r = await sessionStep(c, pr, failure, lint);
@@ -659,7 +659,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     if (r === "done") await parkLive(c);
     return r;
   };
-  const sessionStep = async (c: CifixCandidate, pr: PrNode, failure: CiFailure, lint?: { patch: string; findings: string[] }): Promise<"stored" | "wait" | "done"> => {
+  const sessionStep = async (c: CifixCandidate, pr: PrNode, failure: CiFailure, lint?: { patch: string; findings: string[]; sessionTurn: number | null }): Promise<"stored" | "wait" | "done"> => {
     const ref = refOf(c);
     const fail = async (state: "failed" | "refused", raw: string): Promise<"done"> => {
       const reason = scrubReason(raw, d.root);
@@ -699,7 +699,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     };
     const opened = await openSession(db, "pr", repo, c.number, { head });
     if ("refused" in opened) { summary.skipped.push(ref); log(`  ${ref}: skipped: a person stopped the item's workflow`); return "done"; }
-    const base = prStep(db, turn, () => gate, lint ? { lint } : {});
+    const base = prStep(db, turn, () => gate, lint ? { lint: { findings: lint.findings, patch: lint.patch, parentId: await lintParent(db, opened.session, lint.sessionTurn) } } : {});
     const spec = { ...base, message: (o: { moved: { from: string; diffStat: string } | null }) => base.message({ moved: o.moved && ours?.from === o.moved.from ? null : o.moved }) };
     let out: StepOutcome;
     try {
@@ -796,7 +796,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     if (sessions) {
       // A change the patch path stored goes on in the fix session; its kept model session is not used again.
       dropSessions(w.session);
-      const r = await fixInSession(c, pr, reading.failure, { patch: w.patch, findings });
+      const r = await fixInSession(c, pr, reading.failure, { patch: w.patch, findings, sessionTurn: w.sessionTurn });
       return r === "stored" ? "pending" : r;
     }
     await fixCode(c, pr, reading.failure, { patch: w.patch, findings }, sessionAsk(w.session, "", findings, new Date(at())));
