@@ -2,18 +2,24 @@
 // that says why and what AutoCraft can do next: Try again (a new attempt; on our open PR, the same revision again) and Open as
 // draft PR (only when the change passes the PR step's diff check). Try again is recommended when it is offered. A maintainer's
 // answer is an `answer` round after it, which the next build job carries out (applyStuckAnswer); closing the issue or PR,
-// stopping and the backlog are commands of their own. Three attempts per issue text version at most get Try again. Three
-// implementations in a row on a repo that end stuck or failed without a PR trip the repo's Implement breaker (`implement:<repo>`).
+// stopping and the backlog are commands of their own. Three attempts per issue text version at most get Try again.
+//
+// A stop on a failure of AutoCraft's own (OWN) asks nobody at first: the attempt goes back to where its step starts again and
+// runs after a backoff (start-retry.ts), and only the stop after the retries asks. Three implementations in a row on a repo
+// that end stuck on the item's own cause, or failed without a PR, trip the repo's Implement breaker (`implement:<repo>`); a stop
+// of our own neither counts nor breaks the row.
 import type { Db } from "../db/index.ts";
 import { addAudit, loadTrip, tripStage } from "../data/control/index.ts";
 import { loadImplementFacts, loadStuckStreaks, restartAttempt, retryRevision } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
+import { endWorkspace } from "../build/workspaces.ts";
 import { tripKey } from "../core/push-outcome.ts";
 import { textHash } from "../core/open-prs.ts";
 import { queuerOf } from "./gate.ts";
-import { addRounds, writeStep, type Attempt } from "./attempt.ts";
+import { addRounds, attemptNow, writeStep, type Attempt, type NewRound } from "./attempt.ts";
+import { IMPLEMENT_RETRIES, ownRetries, ownRetryOf } from "./start-retry.ts";
 import { IMPLEMENT_ASKER, openQuestion, type QuestionOption } from "./questions.ts";
-import { ENDED_STATES, IMPLEMENTATION_STATES, type Implementation, type ImplementationRound, type QuestionRound } from "./types.ts";
+import { ENDED_STATES, IMPLEMENTATION_STATES, type Implementation, type ImplementationRound, type ImplementationState, type QuestionRound, type RetryRound } from "./types.ts";
 
 const ACTOR = IMPLEMENT_ASKER;
 const OPEN_STATES = IMPLEMENTATION_STATES.filter((s) => !ENDED_STATES.has(s));
@@ -40,9 +46,22 @@ export const STUCK_CAUSES = {
 } as const;
 export type StuckCause = keyof typeof STUCK_CAUSES;
 
+/**
+ * Whose failure each stop is: `ours` when AutoCraft's own machinery failed (a model or Task Runner call, the workspace, the checks
+ * harness, a push or a GitHub write), which a later run may get past by itself; `theirs` when the item's change or the session's
+ * judgement stopped it, which needs a person.
+ */
+export const STUCK_SIDE = {
+  "plan-unparseable": "ours", "plan-failed": "ours", "question-failed": "ours", "reset-failed": "ours", "session-failed": "ours",
+  "session-lost": "ours", "no-report": "ours", "checks-no-verdict": "ours", "push-failed": "ours", "workspace-lost": "ours",
+  "plan-flagged": "theirs", blocked: "theirs", "needs-dependency": "theirs", "checks-failing": "theirs", "no-change": "theirs",
+  "diff-refused": "theirs", "revision-limit": "theirs",
+} as const satisfies Record<StuckCause, "ours" | "theirs">;
+export const OWN_CAUSES = (Object.keys(STUCK_SIDE) as StuckCause[]).filter((c) => STUCK_SIDE[c] === "ours");
+
 /** Attempts per issue text version that may end stuck and still be offered Try again. */
 export const MAX_ATTEMPTS_PER_TEXT = 3;
-/** Implementations in a row on a repo that end stuck or failed without a PR before the repo's Implement breaker trips. */
+/** Implementations in a row on a repo that end stuck on the item's own cause, or failed without a PR, before the repo's Implement breaker trips. */
 export const STUCK_IN_A_ROW = 3;
 
 export const STUCK_OPTIONS = {
@@ -93,27 +112,94 @@ async function stuckQuestion(db: Db, impl: Implementation, cause: StuckCause, re
   return { audience: "maintainer", text, options, recommended: options.some((o) => o.key === STUCK_OPTIONS.tryAgain.key) ? STUCK_OPTIONS.tryAgain.key : null, stuck: true, cause, facts };
 }
 
-/** Moves the attempt to `stuck` with its blocker question, records it, then checks the repo's breaker. Returns the reason. */
-export async function markStuck(db: Db, impl: Implementation, cause: StuckCause, detail: string | null, o: { diffCheck?: DiffCheck; at?: string } = {}): Promise<string> {
+/** How markStuck ended the attempt's step: the reason, and AutoCraft's own retry when it goes on by itself instead of asking. */
+export type StuckEnd = { reason: string; retry: { n: number; of: number; at: string } | null };
+
+/** The stop as a job's summary line: stuck, or the retry AutoCraft makes itself. */
+export const stuckLine = (cause: StuckCause, end: StuckEnd): string => (end.retry
+  ? `stopped (${cause}: ${end.reason}); AutoCraft tries again at ${end.retry.at.slice(11, 16)} UTC (retry ${end.retry.n} of ${end.retry.of})`
+  : `stuck (${cause}: ${end.reason})`);
+
+/**
+ * Where an attempt stopped by a failure of our own starts its step again, or null when it cannot (a revision that had not
+ * started yet). Plan causes, and any stop before a plan is stored, plan again. Checks without a verdict run again, and a failed
+ * push opens the PR again, on the same change; any other stop of the session starts it over from the plan in a new workspace,
+ * whose `workspace` round ends the turns and checks of the stopped one. A revision runs again from a copy of its `revise` round.
+ */
+function restartOf(impl: Implementation, cause: StuckCause, rounds: readonly ImplementationRound[]): { to: ImplementationState; fresh: boolean; rounds: NewRound[] } | null {
+  if (impl.prNumber !== null) {
+    const last = rounds.filter((r) => r.kind === "revise").at(-1);
+    return impl.state === "revising" && last ? { to: "revising", fresh: false, rounds: [{ kind: "revise", result: last.result }] } : null;
+  }
+  if (impl.state === "planning" || impl.state === "asked" || !impl.plan || ["plan-unparseable", "plan-failed", "question-failed", "reset-failed"].includes(cause)) return { to: "planning", fresh: false, rounds: [] };
+  if (cause === "checks-no-verdict" && impl.state === "checking") return { to: "checking", fresh: false, rounds: [] };
+  if (cause === "push-failed" && impl.state === "opening") return { to: "opening", fresh: false, rounds: [] };
+  return { to: "planned", fresh: true, rounds: [] };
+}
+
+/**
+ * A stop of our own with retries left: the attempt goes back to where its step starts again with a `retry` round, and its bucket
+ * runs after the backoff (start-retry.ts). Otherwise the stop asks: the retries are used up (`retried` says how many were made), or
+ * the step cannot start again.
+ */
+async function retryOwn(db: Db, impl: Implementation, cause: StuckCause, reason: string, runner: boolean, at: string): Promise<NonNullable<StuckEnd["retry"]> | "left" | { retried: number }> {
+  const rounds = (await attemptNow(db, impl))?.rounds ?? [];
+  const retried = ownRetries(rounds, runner);
+  const restart = retried < IMPLEMENT_RETRIES ? restartOf(impl, cause, rounds) : null;
+  if (!restart) return { retried };
+  const retry: RetryRound = { cause, detail: reason, runner, from: impl.state, to: restart.to };
+  const w = await db.write(async () => {
+    const w = await writeStep(db, impl, {
+      to: restart.to, expect: OPEN_STATES, at,
+      ...(restart.fresh && { patch: { workspaceId: null, sessionCallId: null } }),
+      rounds: [{ kind: "retry", result: retry }, ...restart.rounds],
+    });
+    if (w) await addAudit(db, [{ login: ACTOR, action: "implement-self-retry", target: `${impl.repo}#${impl.number}`, details: { implementation: impl.id, cause, reason, runner, to: restart.to }, at }]);
+    return w;
+  });
+  // An attempt that ended meanwhile (a cancel, its PR merged) keeps its end.
+  if (!w) return "left";
+  if (restart.fresh && impl.workspaceId !== null) await endWorkspace(db, impl.workspaceId);
+  const due = ownRetryOf([...rounds, { kind: "retry", at, result: retry }])!;
+  return { n: due.n, of: IMPLEMENT_RETRIES, at: new Date(due.dueAt).toISOString() };
+}
+
+/**
+ * Ends the attempt's step on a stop. A stop of our own (OWN) with retries left goes on by itself after a backoff; any other moves
+ * the attempt to `stuck` with its blocker question, records it, and, for a stop on the item's own cause, checks the repo's breaker.
+ * `runner` says a Task Runner lost the call, which is counted apart from other failures of ours.
+ */
+export async function markStuck(db: Db, impl: Implementation, cause: StuckCause, detail: string | null, o: { diffCheck?: DiffCheck; at?: string; runner?: boolean } = {}): Promise<StuckEnd> {
   const at = o.at ?? new Date().toISOString();
   const reason = `${STUCK_CAUSES[cause]}${detail ? `: ${detail}` : ""}`.replace(/\s+/g, " ").slice(0, 300);
-  const q = await stuckQuestion(db, impl, cause, reason, o.diffCheck ?? noDiffCheck);
+  const ours = STUCK_SIDE[cause] === "ours";
+  let head: string | undefined;
+  if (ours) {
+    const retry = await retryOwn(db, impl, cause, reason, o.runner ?? cause === "session-lost", at);
+    if (retry === "left") return { reason, retry: null };
+    if ("n" in retry) return { reason, retry };
+    if (retry.retried) head = `AutoCraft tried again ${retry.retried} ${retry.retried === 1 ? "time" : "times"} on its own`;
+  }
+  const q = await stuckQuestion(db, impl, cause, reason, o.diffCheck ?? noDiffCheck, head);
   const moved = await db.write(async () => {
     // An attempt that ended meanwhile (a cancel, its PR merged) keeps its end.
     if (!await writeStep(db, impl, { to: "stuck", patch: { reason }, expect: OPEN_STATES, rounds: [{ kind: "question", result: q }], at })) return false;
     await addAudit(db, [{ login: ACTOR, action: "implement-stuck", target: `${impl.repo}#${impl.number}`, details: { implementation: impl.id, cause, reason }, at }]);
     return true;
   });
-  if (moved) await tripIfStuckInARow(db, impl.repo, at);
-  return reason;
+  if (moved && !ours) await tripIfStuckInARow(db, impl.repo, at);
+  return { reason, retry: null };
 }
 
-/** Trips `implement:<repo>` when the repo's last STUCK_IN_A_ROW finished implementations since its last resume all ended stuck or failed without a PR. */
+/**
+ * Trips `implement:<repo>` when the repo's last STUCK_IN_A_ROW finished implementations since its last resume all ended stuck or
+ * failed without a PR. One whose last stop was of our own (OWN) is left out of the row.
+ */
 export async function tripIfStuckInARow(db: Db, repo: string, at = new Date().toISOString()): Promise<boolean> {
   const key = tripKey("implement", repo);
   const t = await loadTrip(db, key);
   if (t?.active) return false;
-  const rows = (await loadStuckStreaks(db, new Map([[repo, t?.clearedAt ?? ""]]), STUCK_IN_A_ROW)).get(repo) ?? [];
+  const rows = (await loadStuckStreaks(db, new Map([[repo, t?.clearedAt ?? ""]]), STUCK_IN_A_ROW, OWN_CAUSES)).get(repo) ?? [];
   if (rows.length < STUCK_IN_A_ROW || rows.some((r) => r.prNumber !== null)) return false;
   const tripped = await tripStage(db, [{ key, reason: `${STUCK_IN_A_ROW} implementations in a row in ${repo} ended stuck or failed without a PR`, evidence: rows.map((r) => `${repo}#${r.number} attempt ${r.attempt}`), at }]);
   return tripped.length > 0;

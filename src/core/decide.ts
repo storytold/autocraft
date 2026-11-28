@@ -4,6 +4,7 @@ import {
   RULE_LABELS, RULE_SIZES, RULE_TIERS, UNSURE_REASON, VERIFY_UNAVAILABLE, ciAllows, conflictNote, verifyAllows, verifyOk,
   FIXUP_MAX_ATTEMPTS, CIFIX_FINAL_STATES, CIFIX_MAX_PUSHES_PER_PR, CIFIX_MAX_TRIES, CIFIX_MAX_TRIES_PER_PR, STATE_REFUSAL, TRANSIENT_REFUSAL,
 } from "./rules.ts";
+import { IMPLEMENT_RETRIES } from "./backoff.ts";
 import { UNCHECKED_REASON } from "./sensitive.ts";
 import { inFlightNow, isWork, unassignActions } from "./assignment.ts";
 import { mayRun, permitted } from "./authority.ts";
@@ -251,6 +252,9 @@ export type Wait = Why<WaitCode>;
 const person = (code: WaitCode, text: string): Wait => ({ code, who: "person", text });
 const contributor = (code: WaitCode, text: string): Wait => ({ code, who: "contributor", text });
 const system = (code: WaitCode, text: string): Wait => ({ code, who: "system", text });
+/** The backoff of AutoCraft's own retry of a stopped implementation (src/implement/start-retry.ts). */
+export const ownRetryWait = (r: { n: number; dueAt: number }): Wait =>
+  system("implement-retry", `AutoCraft tries the implementation again at ${new Date(r.dueAt).toISOString().slice(11, 16)} UTC (retry ${r.n} of ${IMPLEMENT_RETRIES})`);
 /** The wait as a plan holds it. */
 export const waitFields = (w: Wait | null): Pick<Plan, "wait" | "waitKind"> & { waitCode: WaitCode | null } => ({ wait: w?.text ?? null, waitKind: w?.who ?? null, waitCode: w?.code ?? null });
 
@@ -697,7 +701,8 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // work records it and ends the workspace). While the repo's Implement feature is off, or nobody it runs for settles on the
   // repo, an open PR plans no revision and waits.
   const implDue = open && !!im && (im.state === "revising" || !!reviseOf(f));
-  const implHeld = implDue ? (f.repoFacts.implementOn ? standingWait(im!, f.repo) : system("implement-off", implementOffWait(f.repo))) : null;
+  const retry = im?.state === "revising" && im.ownRetry && f.now < im.ownRetry.dueAt ? ownRetryWait(im.ownRetry) : null;
+  const implHeld = implDue ? (f.repoFacts.implementOn ? retry ?? standingWait(im!, f.repo) : system("implement-off", implementOffWait(f.repo))) : null;
   // Ending the attempt is bookkeeping (no GitHub write, no session): it runs whatever the switch says.
   const implementAct = implDue && !implHeld ? act("implement", f.head, { bucket: "revise", issue: im!.issue })
     : attempt && !open ? act("implement", null, { bucket: "revise", issue: attempt.issue }) : null;

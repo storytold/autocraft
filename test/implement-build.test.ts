@@ -155,16 +155,17 @@ test("a restart after the turn's report and before the checks runs the checks on
   assert.deepEqual((await roundsOf(s.db, s.impl.id)).map((r) => r.kind), ["session", "checks"]);
 });
 
-test("tests that timed out are no verdict: the checks run again, and a second no verdict makes the attempt stuck without findings for the session", async () => {
+test("tests that timed out are no verdict: the checks run again, a second no verdict is AutoCraft's to retry, and the retry runs the checks afresh", async () => {
   const s = await setup();
   const timedOut = { "tests.exit": "124", "tests.txt": "" };
   s.override.set(1, timedOut);
   s.override.set(2, timedOut);
   await runBuild(s.run, "app", 7, s.deps);
-  const im = (await implementationById(s.db, s.impl.id))!;
-  assert.equal(im.state, "stuck");
+  assert.equal((await implementationById(s.db, s.impl.id))!.state, "checking", "the checks wait for their retry");
   assert.equal(s.queued.length, 1, "nothing goes back to the session");
-  assert.match(String(im.reason ?? ""), /no verdict/i);
+  assert.deepEqual((await roundsOf(s.db, s.impl.id)).map((r) => r.kind).filter((k) => k === "question" || k === "retry"), ["retry"], "nothing is asked");
+  await runBuild(s.run, "app", 7, s.deps);
+  assert.equal((await implementationById(s.db, s.impl.id))!.state, "opening", "the retried checks have a verdict");
 });
 
 test("a no verdict that passes on the rerun is clean, and cargo fmt that is not installed is no verdict", async () => {

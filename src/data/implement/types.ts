@@ -29,8 +29,9 @@ export type ImplementBucket = (typeof IMPLEMENT_BUCKETS)[number];
  * `answer`: a person answered a question or stuck recommendation (AnswerRound).
  * `revise`: a revision of our open PR starts (ReviseRound); the turns and checks after it belong to that revision.
  * `start-failed`: the plan bucket's workspace did not start, before its model call (StartFailedRound); AutoCraft starts it again itself.
+ * `retry`: the attempt stopped on a failure of AutoCraft's own and goes on by itself after a backoff (RetryRound), instead of asking.
  */
-export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question", "guidance", "workspace", "ask-failed", "revise", "answer", "start-failed"] as const;
+export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question", "guidance", "workspace", "ask-failed", "revise", "answer", "start-failed", "retry"] as const;
 export type RoundKind = (typeof ROUND_KINDS)[number];
 
 /** One `implementations` row. JSON columns are parsed; a column that does not parse reads as null. */
@@ -86,6 +87,8 @@ export type AnswerRound = { by: string; via: string; at: string; option?: string
 export type AskFailedRound = { planRound: number; error: string };
 /** A `start-failed` round: why the workspace did not start. */
 export type StartFailedRound = { error: string };
+/** A `retry` round: the stuck cause AutoCraft retries itself, its detail, whether a Task Runner lost the call, and the state it goes on from. */
+export type RetryRound = { cause: string; detail: string | null; runner: boolean; from: string; to: string };
 export type PlanQuestion = { audience: QuestionAudience; text: string; options: { label: string; hint: string }[]; recommended: string | null };
 
 /**
@@ -145,12 +148,15 @@ export type IssueAttempt = {
   lastRevise: ReviseRound | null;
   /** AutoCraft's own retry of a failed workspace start (src/implement/start-retry.ts): the failures in a row and when the next start is due; null when none is due. */
   startRetry: { failures: number; dueAt: number } | null;
+  /** AutoCraft's own retry of a stopped attempt (src/implement/start-retry.ts): its newest retry round's cause, its number and when it is due; null when none stands. */
+  ownRetry: OwnRetry | null;
   /** Attempts of the issue per text_hash; empty while its only attempt is neither failed nor stuck. */
   textCounts: Record<string, number>;
   /** Attempts with a PR, newest id first; the plan each was built from only with `withPlans`. */
   prAttempts: { id: number; prNumber: number; state: ImplementationState; createdAt: string; diffStat: string | null; plan?: PlanReply | null }[];
 };
-export type PrAttempt = { issue: number; attemptId: number; state: ImplementationState; revisedHeads: string[]; planned?: IssueAttempt["planned"] };
+export type PrAttempt = { issue: number; attemptId: number; state: ImplementationState; revisedHeads: string[]; ownRetry: OwnRetry | null; planned?: IssueAttempt["planned"] };
+export type OwnRetry = { cause: string; n: number; dueAt: number };
 export type ImplementFacts = {
   byIssue: Map<RefKey, IssueAttempt>;
   /** The latest attempt that opened each PR, ended ones too. */

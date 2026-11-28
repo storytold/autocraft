@@ -420,7 +420,7 @@ test("a stuck implementation comes back with Try again, and a yes starts it agai
     const w = await implementIssue();
     const db = w.db;
     if (approved) await say(w, "merge");
-    await markStuck(db, (await currentAttempt(db, "app", 7))!.impl, "session-failed", null);
+    await markStuck(db, (await currentAttempt(db, "app", 7))!.impl, "blocked", null);
     await advanceWorkflows(db);
     const wf = (await liveWorkflow(db, "app", 7))!;
     assert.deepEqual([wf.state, wf.blocker, wf.rec?.merges], approved ? ["blocked", "failed-twice", true] : ["recommending", null, false]);
@@ -630,7 +630,7 @@ test("the third attempt on an issue text offers no Try again, whatever became of
     await recordSteps(db, [{ id: im.id, to: end }]);
     await startAttempt(db, { repo: "app", number: 7, queuedBy: MAINT, textHash: im.textHash });
   }
-  await markStuck(db, (await currentAttempt(db, "app", 7))!.impl, "session-failed", null);
+  await markStuck(db, (await currentAttempt(db, "app", 7))!.impl, "blocked", null);
   await advanceWorkflows(db);
   const wf = (await liveWorkflow(db, "app", 7))!;
   assert.deepEqual([wf.state, wf.rec?.answer], ["recommending", undefined]);

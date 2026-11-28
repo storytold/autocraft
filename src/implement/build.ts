@@ -24,7 +24,7 @@ import {
   awaitTurn, findingsMessage, lintedReport, LOST_REPLY_MESSAGE, needsDependency, queueTurn, realCalls, REPORT_MESSAGE, renderSession, retryStdin, SESSION_MODEL, sessionInput,
   settleOrphan, summaryFixTurn, type CallDeps, type TurnRequest, type TurnRound,
 } from "./session.ts";
-import { applyStuckAnswer, markStuck, opensAsDraft, type DiffCheck, type StuckCause } from "./stuck.ts";
+import { applyStuckAnswer, markStuck, opensAsDraft, stuckLine, type DiffCheck, type StuckCause } from "./stuck.ts";
 import { attemptNow, currentAttempt, roundOf, writeStep, type Attempt, type NewRound } from "./attempt.ts";
 import { BUILD_STATES, type Implementation, type ImplementationPatch, type ImplementationRound, type ImplementationState, type SessionReport } from "./types.ts";
 
@@ -156,7 +156,7 @@ async function readyWorkspace(run: BuildRun, impl: Implementation): Promise<{ ws
   let wsId = impl.workspaceId, remade = false;
   const live = async (id: number | null) => id !== null && LIVE_STATES.includes((await getWorkspace(db, id))?.state as WorkspaceStateName);
   if (!await live(wsId)) {
-    wsId = await make(await envOf(wsId), `workspace ${wsId} was gone`);
+    wsId = await make(await envOf(wsId), wsId === null ? "the session starts again after a stop" : `workspace ${wsId} was gone`);
     remade = true;
   }
   for (let from = Date.now(), last = "";;) {
@@ -280,8 +280,10 @@ async function checksPhase(run: BuildRun, impl: Implementation, ws: { base: stri
   const all = await roundsNow(db, impl);
   const rounds = epochOf(all);
   const lastTurn = turnsOf(rounds).at(-1);
-  // Checks a restart cut off after they were stored count once: their rounds are the turn's result.
-  const since = rounds.filter((r) => r.kind === "checks" && (!lastTurn || r.id > lastTurn.id)).map((r) => r.result as CheckRound);
+  // Checks a restart cut off after they were stored count once: their rounds are the turn's result. AutoCraft's own retry of
+  // checks without a verdict runs them afresh.
+  const retried = rounds.filter((r) => r.kind === "retry").at(-1);
+  const since = rounds.filter((r) => r.kind === "checks" && (!lastTurn || r.id > lastTurn.id) && (!retried || r.id > retried.id)).map((r) => r.result as CheckRound);
   const noVerdict = (x: CheckRound) => !x.findings.length && !x.needsDependency && (x.noVerdict ?? []).length > 0;
   let c = since.at(-1);
   let round = checksOf(all).length;
@@ -390,8 +392,7 @@ async function buildUnit(run: BuildRun, cur: Attempt | null, deps: BuildDeps): P
     if (e instanceof Left) return `${ref(impl)}: ${e.message}`;
     if (!(e instanceof Stuck)) throw e;
     const now = (await attemptNow(db, impl))?.impl ?? impl;
-    await markStuck(db, now, e.cause_, e.message || null, { diffCheck: deps.diffCheck });
-    return `${ref(impl)}: stuck (${e.cause_}${e.message ? `: ${e.message}` : ""})`;
+    return `${ref(impl)}: ${stuckLine(e.cause_, await markStuck(db, now, e.cause_, e.message || null, { diffCheck: deps.diffCheck }))}`;
   }
 }
 

@@ -352,6 +352,8 @@ export type PrFacts = {
    */
   implementation?: {
     issue: number; state: string; revisedHeads: string[];
+    /** A revision AutoCraft goes on with itself after a stop of its own (src/implement/start-retry.ts): the retry's number, and when (ms) it is due. */
+    ownRetry?: { n: number; dueAt: number };
     /** Who the issue's live implement workflow runs for (src/workflow/work.ts settlerOf); null while none is live. */
     queuedBy: string | null;
     /** Whether queuedBy counts on the repo (data/access standing). */
@@ -511,6 +513,8 @@ export type ItemFacts = {
       prOpen: boolean;
       /** AutoCraft starts the attempt's plan again itself after its workspace did not start (src/implement/start-retry.ts): the failures in a row, and when (ms) the next start is due. */
       startRetry?: { failures: number; dueAt: number };
+      /** AutoCraft goes on with the attempt itself after a stop of its own (src/implement/start-retry.ts): the retry's number, and when (ms) it is due. */
+      ownRetry?: { n: number; dueAt: number };
     } | null;
     /** Live implementations in the repo other than this issue's. */
     liveInRepo: number;

@@ -26,3 +26,12 @@ const IMPLEMENT_START_DELAYS_MIN = [5, 15, 30] as const;
 
 /** The wait after the `failures`-th failed implementation start in a row: 5, 15, then 30 minutes. */
 export const implementStartDelayMs = (failures: number): number => IMPLEMENT_START_DELAYS_MIN[Math.min(Math.max(failures, 1), IMPLEMENT_START_DELAYS_MIN.length) - 1]! * 60_000;
+
+/**
+ * Retries AutoCraft makes itself of an implementation that stopped on a failure of its own (src/implement/stuck.ts OWN), counted
+ * apart for Task Runner losses and for every other failure; the next stop of that kind asks a person.
+ */
+export const IMPLEMENT_RETRIES = 3;
+const IMPLEMENT_RETRY_DELAYS_MIN = [15, 60, 180] as const;
+/** The wait before the `n`-th retry of a stopped implementation: 15 minutes, 1 hour, then 3 hours. */
+export const implementRetryDelayMs = (n: number): number => IMPLEMENT_RETRY_DELAYS_MIN[Math.min(Math.max(n, 1), IMPLEMENT_RETRY_DELAYS_MIN.length) - 1]! * 60_000;

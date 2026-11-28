@@ -322,7 +322,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   };
   base.inFlight = state === "OPEN" && !integration && isOwn(i.author) && c.ownPrs.has(ref);
   const acts = { act: d.act, identity: c.identity, now, soon: (at: number | undefined) => refresh.soon(ref, at) };
+  if (implementation?.ownRetry) refresh.soon(ref, implementation.ownRetry.dueAt);
   base.implementation = implementation ? { issue: implementation.issue, state: implementation.state, revisedHeads: implementation.revisedHeads,
+    ...(implementation.ownRetry && { ownRetry: { n: implementation.ownRetry.n, dueAt: implementation.ownRetry.dueAt } }),
     ...queuerIn(d.workflow.actors.get(d.workflow.ofPr.get(ref)?.id ?? -1), repo, acts) } : null;
   // The pre-merge findings a person dropped overrule the review at the head they were dropped at and at the heads our own pushes made from it.
   const overruled = head && wfFact?.droppedFindings ? wfFact.droppedFindings.filter((x) => x.head !== null && pushChainOf(patch.pushes, head).includes(x.head)).map((x) => x.title) : [];

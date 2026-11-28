@@ -43,7 +43,7 @@ import {
   awaitTurn, findingsMessage, LOST_REPLY_MESSAGE, needsDependency, queueTurn, realCalls, renderSession, REPORT_MESSAGE, sessionInput, settleOrphan,
   type CallDeps, type TurnPurpose, type TurnRound,
 } from "./session.ts";
-import { markStuck, type StuckCause } from "./stuck.ts";
+import { markStuck, stuckLine, type StuckCause } from "./stuck.ts";
 import { addRounds, attemptNow, currentAttempt, roundOf, setRound, writeStep, type Attempt, type NewRound } from "./attempt.ts";
 import { implTitle } from "./template.ts";
 import { IMPLEMENT_WORKSPACE_DEADLINE_SEC, implementEnv } from "./workspace.ts";
@@ -166,8 +166,7 @@ async function reviseUnit(run: BuildRun, cur: Attempt, deps: ReviseDeps): Promis
     if (!(e instanceof Stuck)) throw e;
     const now = (await attemptNow(db, impl))?.impl ?? impl;
     if (now.state !== "revising" && now.state !== "pr-opened") return `${ref(impl)}: ${now.state} meanwhile (${e.cause_}: ${e.message})`;
-    await markStuck(db, now, e.cause_, e.message || null);
-    return `${ref(impl)}: revision of #${impl.prNumber} stuck (${e.cause_}${e.message ? `: ${e.message}` : ""})`;
+    return `${ref(impl)}: revision of #${impl.prNumber} ${stuckLine(e.cause_, await markStuck(db, now, e.cause_, e.message || null))}`;
   }
 }
 
