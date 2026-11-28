@@ -3,6 +3,7 @@ import { registerTriggerSource } from "../../db/live.ts";
 
 registerTriggerSource("checks",
   { table: "ci_run_approvals" },
+  { table: "ci_vs_main" },
 );
 
 registerTriggerSource("queue",

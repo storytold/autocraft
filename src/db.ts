@@ -23,6 +23,8 @@ import { retireFixAttemptsSqlite } from "./db/fix-retire.ts";
 import { featuresRepoOnlySqlite } from "./db/feature-repo-only.ts";
 import { pingsSettledSqlite } from "./db/pings-settled.ts";
 import { fixupDiffHeldSqlite } from "./db/fixup-diff-held.ts";
+import { sonarOptionalSqlite } from "./db/sonar-optional.ts";
+import { DEFAULT_OPTIONAL_CHECKS } from "./core/rules.ts";
 import { holdsToItemsSqlite } from "./db/holds-to-items.ts";
 import { backfillRefusalsSqlite } from "./db/refused-runs.ts";
 import { backfillRunTokensSqlite } from "./db/run-tokens.ts";
@@ -583,6 +585,7 @@ function backfill(db: DatabaseSync): void {
   chatBackfillSqlite(db);
   pingsSettledSqlite(db);
   fixupDiffHeldSqlite(db);
+  sonarOptionalSqlite(db);
   // Reviews made before snapshots existed count as having read everything up to now: no wave of re-reviews.
   const now = new Date().toISOString();
   db.prepare("UPDATE main.opus_reviews SET seen_at = ? WHERE seen_at IS NULL").run(now);
@@ -766,10 +769,10 @@ function migrateValues(db: DatabaseSync): void {
     try { files = JSON.parse(h.files ?? "[]"); } catch { continue; }
     if (Array.isArray(files) && files.length && files.every((f) => typeof f === "string" && fixupEditable(f))) db.prepare("UPDATE main.fixups SET state = 'superseded' WHERE rowid = ?").run(h.id);
   }
-  // Every tracked repo starts with SonarCloud's scan as an optional check, once: an operator's later removal stays.
+  // Every tracked repo starts with SonarCloud's checks as optional, once: an operator's later removal stays.
   if (!db.prepare("SELECT 1 FROM main.settings WHERE key = 'optional_checks_seeded'").get()) {
     const put = db.prepare("INSERT OR IGNORE INTO main.settings (key, value) VALUES (?, ?)");
-    for (const r of db.prepare("SELECT name FROM main.tracked_repos").all() as { name: string }[]) put.run(`optional_checks:${r.name}`, JSON.stringify(["sonarcloud / SonarCloud Scan"]));
+    for (const r of db.prepare("SELECT name FROM main.tracked_repos").all() as { name: string }[]) put.run(`optional_checks:${r.name}`, JSON.stringify(DEFAULT_OPTIONAL_CHECKS));
     put.run("optional_checks_seeded", new Date().toISOString());
   }
   // Whole-repo pilot entries became the repo's pipeline flag.

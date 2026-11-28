@@ -15,7 +15,6 @@ import { askClaude, POOL_MAX, pool } from "../classify/run.ts";
 import { isHalt, poolRoom, takersCut } from "../agents/call.ts";
 import { pushesAreUnsettled } from "../fixup/unsettled.ts";
 import { audit } from "../dash/audit.ts";
-import { optionalChecks } from "../optional-checks.ts";
 import { finishInfraRerun, finishPatch, loadPatchFacts, recordPushing, startInfraRerun, storePatch } from "../data/changes/index.ts";
 import { loadTaskStates } from "../data/build/index.ts";
 import { loadArtifactFiles } from "../data/build/index.ts";
@@ -50,7 +49,7 @@ import { checkoutDiff } from "../fixup/diff-view.ts";
 import { MAX_PUSHES_PER_PR, MAX_TRIES_PER_PR, type CifixCandidate } from "./candidates.ts";
 import { selectCifix } from "./select.ts";
 import { formattingOnly, guardPatch, TEST_PATH } from "./guard.ts";
-import { readFailure } from "./logs.ts";
+import { ownFailure } from "../mainci/no-new.ts";
 import { askCiText, askText, commentText, commitMessage } from "./template.ts";
 import { formatDiffPaths, matchPrFiles, triage, unrelatedTests } from "./triage.ts";
 import { CIFIX_ASK_REASON } from "../core/rules.ts";
@@ -636,7 +635,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       return;
     }
     if (verdict.action === "fail") { await fail("rejected", `${findingsWord(res.findings)} remain after ${w.round} rounds: ${oneLine(verdict.first.message)}`); return; }
-    const reading = await readFailure(d.gh, repo, c.head, await optionalChecks(db, repo));
+    const reading = await ownFailure(db, d.gh, repo, c.number, c.head);
     if (reading.kind !== "failure") { await fail("failed", reading.why); return; }
     const findings = verdict.texts;
     await fixCode(c, pr, reading.failure, { patch: w.patch, findings }, sessionAsk(w.session, "", findings, new Date(at())));
@@ -649,7 +648,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       if (!pr) return;
       // A PR that only waits for rerun results is not counted as handled (it does not use the step's limit).
       const handle = () => params.onHandled?.(++handled);
-      const reading = await readFailure(d.gh, repo, c.head, await optionalChecks(db, repo));
+      const reading = await ownFailure(db, d.gh, repo, c.number, c.head);
       const skip = async (why: string) => { await rec.set(c, "code", "skipped", why); summary.skipped.push(ref); log(`  ${ref}: skipped: ${why}`); };
       if (reading.kind === "skip") { handle(); await skip(reading.why); return; }
       /**
@@ -768,7 +767,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     const release = await leaseItem(db, `pr:${repo}#${c.number}`, log);
     if (!release) continue;
     try {
-      const reading = await readFailure(d.gh, repo, c.head, await optionalChecks(db, repo));
+      const reading = await ownFailure(db, d.gh, repo, c.number, c.head);
       if (reading.kind === "skip") { await rec.set(c, "code", "skipped", reading.why); summary.skipped.push(ref); log(`  ${ref}: skipped: ${reading.why}`); continue; }
       // A maintainer's changes request is the person's to resolve first; an unreadable answer counts as blocked.
       const blocked = await readGate(db, d.querier, ownerOf(repo), repo, c.number, log);

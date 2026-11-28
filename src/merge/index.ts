@@ -28,6 +28,7 @@ import { buildQueue, countStates, QUEUE_STATES, ciAllows, verifyAllows, type Que
 export { buildQueue, countStates, QUEUE_STATES, type QueueEntry, type QueueState } from "./queue.ts";
 import { envVar } from "../env.ts";
 import { optionalChecks } from "../optional-checks.ts";
+import { mainsFailuresAt } from "../mainci/no-new.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { authFailure, laneForOperator, noWriteReason, SIGN_IN_REASON, type Lane, type LaneDeps } from "../github/user-lane.ts";
 import { ownerOf } from "../owners.ts";
@@ -43,9 +44,18 @@ import { openDb } from "../db/open.ts";
 /** Name of the built-in guarded merge (`autocraft-server safe-merge`); any other `$AUTOCRAFT_MERGE_CMD` is run as an external command that must accept `--head <sha>` and refuse when the PR head differs. */
 export const DEFAULT_MERGE_COMMAND = "safe-merge";
 
-/** `--allow-failed` for each optional check of the repo, only for the built-in command (another command may not know the flag). */
-export async function allowFailedArgs(db: Db, repo: string, cmd: string): Promise<string[]> {
-  return cmd === DEFAULT_MERGE_COMMAND ? (await optionalChecks(db, repo)).flatMap((n) => ["--allow-failed", n]) : [];
+/**
+ * `--allow-failed` for each optional check of the repo and each check of PR `at` that fails only where the red default branch fails
+ * (src/mainci/no-new.ts), only for the built-in command (another command may not know the flag).
+ */
+export async function allowFailedArgs(db: Db, repo: string, cmd: string, at: { number: number; head: string }): Promise<string[]> {
+  return cmd === DEFAULT_MERGE_COMMAND ? (await allowedFailures(db, repo, at.number, at.head)).flatMap((n) => ["--allow-failed", n]) : [];
+}
+
+/** The checks whose failure does not stop PR `number` at `head`: the repo's optional checks and those that fail only where the red main fails. */
+async function allowedFailures(db: Db, repo: string, number: number, head: string): Promise<string[]> {
+  const [optional, mains] = await db.together(() => Promise.all([optionalChecks(db, repo), mainsFailuresAt(db, repo, number, head)]));
+  return [...new Set([...optional, ...mains])];
 }
 const CLI = fileURLToPath(new URL("../cli.ts", import.meta.url));
 const ACTOR = "merge";
@@ -151,9 +161,12 @@ export async function prInfo(q: Querier, repo: string, n: number): Promise<PrInf
 export const methodOf = (info: PrInfo): "squash" | "merge" => (info.authors > 1 || info.commits > 100 ? "merge" : "squash");
 
 
-/** CI of a PR whose checks were just read, by the planner's rule (ciAt): without the repo's optional checks, and pending while runs we approved are unfinished. */
+/**
+ * CI of a PR whose checks were just read, by the planner's rule (ciAt): without the repo's optional checks and the checks that fail only
+ * where the red main fails, and pending while runs we approved are unfinished.
+ */
 export async function ciNow(db: Db, repo: string, ch: PrChecks): Promise<CiState> {
-  const [optional, runs] = await db.together(() => Promise.all([optionalChecks(db, repo), loadRunApprovals(db, [{ repo, number: ch.number }])]));
+  const [optional, runs] = await db.together(() => Promise.all([allowedFailures(db, repo, ch.number, ch.head_oid), loadRunApprovals(db, [{ repo, number: ch.number }])]));
   return ciAt(ch, ch.head_oid, { optional, approvedRuns: runs.get(`${repo}#${ch.number}@${ch.head_oid}`)?.approved.length ?? 0 });
 }
 
@@ -280,7 +293,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
       continue;
     }
     // The merge's own audit row is written by mergeViaCommand.
-    const r = await mergeViaCommand(w, d.run, d.mergeCommand, g, { method, extra: await allowFailedArgs(db, repo, d.mergeCommand) }, { run: runId, head: e.head, path: e.path }, undefined, lane?.env);
+    const r = await mergeViaCommand(w, d.run, d.mergeCommand, g, { method, extra: await allowFailedArgs(db, repo, d.mergeCommand, { number: e.number, head: e.head }) }, { run: runId, head: e.head, path: e.path }, undefined, lane?.env);
     if (r.code !== 0) {
       const why = oneLine(r.stderr) || oneLine(r.stdout) || `exit code ${r.code}`;
       const denied = lane ? authFailure(new Error(why)) : null;

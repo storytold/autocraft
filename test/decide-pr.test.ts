@@ -140,9 +140,8 @@ const rows: Row[] = [
   { name: "a failed batch, verification or merge is the leg's to carry on until it hands the merge over", facts: { batch: "batch-failed" }, expect: { state: "batch-failed", actions: [], code: "leg", who: "system" } },
   { name: "batch does not take a rule PR without a clean pre-merge review", facts: { batch: "in-batch", premerge: null }, expect: { state: "waiting-premerge" } },
   { name: "batch takes a handed-over PR", facts: { ...SIZE_L, ...HANDED, batch: "in-batch", premerge: null }, expect: { state: "in-batch" } },
-  { name: "red main holds a ready PR", facts: { repoFacts: { mainRed: true } }, expect: { state: "waiting-main-ci", actions: [] } },
-  { name: "red main does not hold the PR that fixes it", facts: { ...UNSTARTED, repoFacts: { mainRed: true }, mainFix: true }, expect: { state: "ready", actions: ["merge"] } },
-  { name: "batch members keep the batch state while main is red", facts: { repoFacts: { mainRed: true }, batch: "in-batch" }, expect: { state: "in-batch" } },
+  { name: "CI failing only where main fails merges and says so", facts: { ...UNSTARTED, vsMain: { passing: ["gate / test"] } }, expect: { state: "ready", actions: ["merge"], note: "CI fails only where main fails (gate / test)" } },
+  { name: "red CI waits for its comparison with a red main", facts: { ci: "pending", vsMain: { comparing: true, at: null } }, expect: { state: "waiting-ci", actions: [], code: "ci", who: "system" } },
   { name: "main fix merges alone", facts: { ...UNSTARTED, mainFix: true }, expect: { state: "ready", actions: ["merge"] } },
 
   // ---- changes requested, held, merged
@@ -371,7 +370,6 @@ test("a PR in a batch keeps the batch state", () => {
   for (const batch of ["batch-checking", "in-batch", "batch-failed"] as const) {
     assert.equal(decidePr(prFacts({ batch })).state, batch);
     assert.equal(decidePr(prFacts({ batch, ci: "pending" })).state, batch);
-    assert.equal(decidePr(prFacts({ batch, repoFacts: { mainRed: true } })).state, batch);
     assert.equal(merges(prFacts({ batch })), false);
   }
 });
@@ -409,10 +407,9 @@ test("every plan state is one of the declared states", () => {
   assert.equal(REVIEW_AT.length > 0, true);
 });
 
-test("a started PR nobody approved waits for a green main while main is red too; what its review asks for is a person's at once", () => {
+test("a started PR nobody approved with red CI, or with fixes its review asks for, is a person's at once", () => {
   const started = { workflow: { entry: "review", approved: false, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true } } as const;
-  const red = { ...started, ...CI_FAIL, cifix: cifix(), repoFacts: { mainRed: true } };
+  const red = { ...started, ...CI_FAIL, cifix: cifix() };
   const wait = (o: Over) => { const p = decidePr(prFacts(o)); return [p.wait, p.waitKind]; };
-  assert.deepEqual(wait(red), ["a green main", "system"]);
-  for (const o of [{ ...red, repoFacts: { mainRed: false } }, { ...red, ...TAKE_FIX, fixup: fixup() }, { ...red, mainFix: true }]) assert.deepEqual(wait(o), [MAINTAINER_ANSWER_WAIT, "person"], JSON.stringify(o));
+  for (const o of [red, { ...red, ...TAKE_FIX, fixup: fixup() }, { ...red, mainFix: true }]) assert.deepEqual(wait(o), [MAINTAINER_ANSWER_WAIT, "person"], JSON.stringify(o));
 });

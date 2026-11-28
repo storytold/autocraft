@@ -370,6 +370,19 @@ export interface CiRunApprovals {
   approved_at: string | null;
 }
 
+export interface CiVsMain {
+  repo: string;
+  number: number;
+  head: string;
+  main_head: string;
+  state: string;
+  checks: string;
+  reason: string | null;
+  reads: number;
+  first_at: string;
+  read_at: string;
+}
+
 export interface Classifications {
   repo: string;
   number: number;
@@ -1472,6 +1485,15 @@ export interface MainCi {
   state_changed_at: string;
   updated_at: string;
   settled_state: string | null;
+}
+
+export interface MainCiFailures {
+  repo: string;
+  head_sha: string;
+  state: string;
+  keys: string;
+  reason: string | null;
+  read_at: string;
 }
 
 export interface MainFixes {
@@ -2810,6 +2832,7 @@ export interface DB {
   chat_messages: ChatMessages;
   ci_fixes: CiFixes;
   ci_run_approvals: CiRunApprovals;
+  ci_vs_main: CiVsMain;
   classifications: Classifications;
   classify_state: ClassifyState;
   claude_account_status: ClaudeAccountStatus;
@@ -2901,6 +2924,7 @@ export interface DB {
   liveness_items: LivenessItems;
   liveness_state: LivenessState;
   main_ci: MainCi;
+  main_ci_failures: MainCiFailures;
   main_fixes: MainFixes;
   mcp_tokens: McpTokens;
   merge_batch_prs: MergeBatchPrs;
@@ -3033,6 +3057,7 @@ export interface DB {
   "main.chat_messages": ChatMessages;
   "main.ci_fixes": CiFixes;
   "main.ci_run_approvals": CiRunApprovals;
+  "main.ci_vs_main": CiVsMain;
   "main.classifications": Classifications;
   "main.classify_state": ClassifyState;
   "main.claude_account_status": ClaudeAccountStatus;
@@ -3124,6 +3149,7 @@ export interface DB {
   "main.liveness_items": LivenessItems;
   "main.liveness_state": LivenessState;
   "main.main_ci": MainCi;
+  "main.main_ci_failures": MainCiFailures;
   "main.main_fixes": MainFixes;
   "main.mcp_tokens": McpTokens;
   "main.merge_batch_prs": MergeBatchPrs;
@@ -3260,6 +3286,7 @@ export const COLUMNS = {
   chat_messages: ["id", "conversation_id", "author", "via", "kind", "body", "payload", "workflow_event_id", "turn_id", "workflow_id", "github_comment_id", "at"],
   ci_fixes: ["repo", "number", "head", "to_head", "kind", "state", "reason", "files", "attempt", "task_id", "runs", "created_at", "session", "patch", "lint_task", "lint_round", "lint_state"],
   ci_run_approvals: ["repo", "number", "head_oid", "cross_repo", "runs", "approved", "reread", "failed", "checked_at", "approved_at"],
+  ci_vs_main: ["repo", "number", "head", "main_head", "state", "checks", "reason", "reads", "first_at", "read_at"],
   classifications: ["repo", "number", "classifier", "run_id", "at", "type_label", "want", "reference", "flags", "dup_of", "reason", "probs", "input_hash"],
   classify_state: ["kind", "repo", "number", "value", "at"],
   claude_account_status: ["account_id", "logged_in", "method", "plan", "login_expires_at", "checked_at"],
@@ -3351,6 +3378,7 @@ export const COLUMNS = {
   liveness_items: ["repo", "number", "kind", "verdict", "cause", "state", "wait", "phase", "since", "checked_at"],
   liveness_state: ["id", "checked_at", "open"],
   main_ci: ["repo", "head_sha", "branch", "state", "failing", "checks", "committed_at", "headline", "first_seen_at", "state_changed_at", "updated_at", "settled_state"],
+  main_ci_failures: ["repo", "head_sha", "state", "keys", "reason", "read_at"],
   main_fixes: ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "decision_id", "issue_number", "pr_number", "pr_url", "created_at", "updated_at", "session", "patch", "files", "lint_task", "lint_round", "lint_state", "tries"],
   mcp_tokens: ["id", "login", "token_hash", "label", "can_answer", "created_at", "last_used_at", "expires_at", "can_run", "idle_claim_at", "idle_tiers", "idle_repos", "kind", "machine", "can_agent"],
   merge_batch_prs: ["batch_id", "number", "head_oid", "position", "repo"],

@@ -11,6 +11,7 @@ import { pushable, sameRepo } from "../fixup/pushable.ts";
 import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
 import { refereeClosed, settle } from "../classify/settled.ts";
 import { MAIN_FIX_BRANCH_PREFIX } from "../mainci/index.ts";
+import { passingChecks, vsMainStatus } from "../mainci/no-new.ts";
 import { changesRequestedWhy, GATE_FAILURES, failureNote } from "../merge/changes-requested.ts";
 import { parseFixes } from "../fixup/candidates.ts";
 import { tierKey, tiersOf, type AuthorRef } from "../whitelist.ts";
@@ -199,7 +200,7 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
     const cfg = config(db);
     const ctx: Ctx = {
       now, refresh, stale: await staleOf(false), staleActionable: await staleOf(true), ownPrs, identity: cfg.githubIdentity,
-      holdOf: holdsFrom({ ...d.holds, facts: d.review, optional: (repo) => cfg.repo(repo).optionalChecks, interval: minIntervalOf(d.control.settings.get(MIN_INTERVAL_KEY)), reads: d.blockers, edges: new Map([...d.patches].map(([ref, p]) => [ref, p.pushes])), approvals: d.merge.runs,
+      holdOf: holdsFrom({ ...d.holds, facts: d.review, optional: (repo) => cfg.repo(repo).optionalChecks, mains: (ref, head) => passingChecks(d.vsMain.get(`${ref}@${head}`), d.mainRed.get(ref.slice(0, ref.lastIndexOf("#")))), interval: minIntervalOf(d.control.settings.get(MIN_INTERVAL_KEY)), reads: d.blockers, edges: new Map([...d.patches].map(([ref, p]) => [ref, p.pushes])), approvals: d.merge.runs,
         authorRound: (ref, head) => roundWaits(d.workflow.live.get(ref), d.ownPushes.get(ref) ?? [], head), personReview: (ref) => personReviewSince(d.workflow.live.get(ref)) }, now),
     };
     const out: PrFacts[] = [];
@@ -263,23 +264,42 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const repoRow = d.repos.get(repo);
   const rf: PrFacts["repoFacts"] = {
     commentApproved: !!approvals.comment, ciApproved: !!approvals.ci,
-    noCi: !!d.ciSignals.get(repo)?.noCi, mainRed: d.mainRed.has(repo),
+    noCi: !!d.ciSignals.get(repo)?.noCi,
     implementOn: cfg.repo(repo).buildFeature("implement"),
   };
-  // A red main held only by its newest head's grace without checks stops holding with the clock alone.
-  refresh.soon(ref, d.mainRed.get(repo) ?? undefined);
+  const red = d.mainRed.get(repo);
+  // A red main kept only by its newest head's grace without checks stops counting with the clock alone.
+  refresh.soon(ref, red?.until ?? undefined);
   const backoff = d.batchBackoff.get(repo);
   if (backoff !== undefined && backoff > now) { rf.batchBackoffUntil = backoff; refresh.soon(ref, backoff); }
   const pub = repoRow?.visibility === "public";
   const defaultBranch = repoRow?.default_branch ?? null;
   const optional = cfg.repo(repo).optionalChecks;
-  const ciOf = (at: string): CiState => ciAt(ch, at, { optional, approvedRuns: d.merge.runs.get(`${ref}@${at}`)?.approved.length ?? 0 });
   /** The required checks at `at` that still run and that fail; none when the stored checks are of another head. */
   const requiredAt = (at: string): { running: boolean; failing: string[] } => {
     if (ch?.head_oid !== at) return { running: false, failing: [] };
     const req = checkList(ch.checks).filter((x) => !optional.includes(x.name));
     return { running: req.some((x) => x.state === "pending"), failing: req.filter((x) => x.state === "failure").map((x) => x.name) };
   };
+  /**
+   * The CI state at `at` and where it stands against a red main: failing checks that fail only where main fails count as passing
+   * (src/mainci/no-new.ts); while that comparison is to be made, or a log is read again, the CI waits for it.
+   */
+  const ciVs = (at: string): { ci: CiState; vs: PrFacts["vsMain"] } => {
+    const approvedRuns = d.merge.runs.get(`${ref}@${at}`)?.approved.length ?? 0;
+    const plain = ciAt(ch, at, { optional, approvedRuns });
+    if (plain !== "failure") return { ci: plain, vs: null };
+    const st = vsMainStatus({ failing: requiredAt(at).failing, red, row: d.vsMain.get(`${ref}@${at}`), now });
+    if (st.skip) return { ci: plain, vs: null };
+    const passing = passingChecks(st.row, red);
+    if (passing.length) return { ci: ciAt(ch, at, { optional: [...optional, ...passing], approvedRuns }), vs: { passing } };
+    if (!st.row || st.row.state === "unread") {
+      if (st.at !== null) refresh.soon(ref, st.at);
+      return { ci: "pending", vs: { comparing: true, at: st.at } };
+    }
+    return { ci: plain, vs: null };
+  };
+  const ciOf = (at: string): CiState => ciVs(at).ci;
   const isOwn = (author: string | null): boolean => !!author && d.ownLogins.has(author.toLowerCase());
   const batchRow = integration ? d.merge.integration.get(ref) : undefined;
   const pipelineRepo = !!d.control.tracked.get(repo)?.pipeline;
@@ -315,7 +335,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     heldBacklog: !wfFact && d.workflow.ended.get(ref) === "backlog", quiet: d.quiet.has(ref),
     score: workScore(wfFact) ?? d.ranks.get(ref)?.score ?? null, repoFacts: rf,
     review: null, post: { postable: false, posted: null },
-    checksHere: false, checksOpen: false, ci: "unknown", mergeable: i.mergeable ?? "UNKNOWN", unknown: null, runs: null,
+    checksHere: false, checksOpen: false, ci: "unknown", vsMain: null, mergeable: i.mergeable ?? "UNKNOWN", unknown: null, runs: null,
     lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false, verification: null, verifyUnavailable: null,
     handOver: false, mergeWaiting: false,
     premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: d.merge.activeBatched.has(ref),
@@ -482,7 +502,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const checksHere = ch?.head_oid === qh;
   base.checksHere = checksHere;
   base.checksOpen = checksHere && ch!.state === "OPEN" && !ch!.is_draft;
-  base.ci = ciOf(qh);
+  const vs = ciVs(qh);
+  base.ci = vs.ci;
+  base.vsMain = vs.vs;
   base.runs = runsOf(wait, rf.ciApproved);
   // Our push to this head turned its required checks red: the CI fix works on it now, without waiting for a review of the new head.
   // A head that our own push or the review's CI gate (red CI at a new head, reviewed earlier) left red is repaired against that head.

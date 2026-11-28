@@ -13,7 +13,7 @@ import { loadStatements, type Statement } from "../data/conversations/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
 import { loadIssueReviewFacts, type IssueReviewFact } from "../data/issuereview/index.ts";
 import { loadHolds as loadOutsideHolds, type HoldInfo } from "../data/intake/index.ts";
-import { loadMergeFacts, loadOwnIntegration, type MergeFacts } from "../data/merge/index.ts";
+import { loadMergeFacts, loadOwnIntegration, loadVsMain, type MergeFacts, type VsMainRow } from "../data/merge/index.ts";
 import {
   loadAuthorPermissions, loadComments, loadDiffFacts, loadFormalReviews, loadGates, loadItems, loadItemsWithHashes, loadOpenPrLinks, loadPrMirror, loadRepoCiSignals, loadRepos,
   type DiffFactsRow, type Gate, type PrMirror, type RepoCiSignals, type RepoRow, type ReviewFact,
@@ -31,7 +31,8 @@ import { PIPELINE_LOGIN_KEY } from "./rules.ts";
 import { authorWritesIn } from "../fixup/author-permission.ts";
 import { longLivedAll } from "../fixup/pushable.ts";
 import type { Settled } from "../classify/settled.ts";
-import { redMainHolds } from "../mainci/index.ts";
+import { redMainHeads } from "../mainci/index.ts";
+import type { RedMain } from "../mainci/no-new.ts";
 import { publishBackoffs } from "../merge/batch-store.ts";
 import { loadBlockerReads, type BlockerReads } from "../review/blockers.ts";
 import { CARRIED, carriedReviews, type Carried } from "../review/carry.ts";
@@ -82,8 +83,10 @@ export type PrPassData = {
   statements: Map<number, Statement>;
   /** Role and cached permission of the people the PRs' live workflows act for. */
   act: Map<PermKey, ActFacts>;
-  /** Repos whose default branch is red, with the time it stops counting as red when nothing new is read (null: only a new result ends it). */
-  mainRed: Map<string, number | null>;
+  /** Repos whose default branch is red: its red settled head and failing checks (src/mainci/index.ts redMainHeads). */
+  mainRed: Map<string, RedMain>;
+  /** The loaded PR heads' failing checks compared with the red main's, per head (src/mainci/no-new.ts). */
+  vsMain: Map<string, VsMainRow>;
   /** Per repo whose last batches could not be published, when its next batch may start (ms; it may be past). */
   batchBackoff: Map<string, number>;
   quiet: Set<string>;
@@ -185,22 +188,22 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
   const logins = [...o.base.own];
   const keyRepos = reposOf(keys);
   const dupeRepo = o.repo ?? (keyRepos?.length === 1 ? keyRepos[0] : undefined);
-  const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, dupes, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, scoped, mergeActions, mainRed, quiet, longLived, authorPerms, holds, repins, made, landedApprovals, mergeEntryReviews, batchBackoff] =
+  const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, dupes, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, scoped, mergeActions, mainRed, quiet, longLived, authorPerms, holds, repins, made, landedApprovals, mergeEntryReviews, batchBackoff, vsMain] =
     await Promise.all([
       loadControl(db), loadPrMirror(db, keys), loadRepos(db, { all: true }), loadRepoCiSignals(db), loadDiffFacts(db, keys),
       loadFormalReviews(db, keys), loadGates(db, keys), loadRanks(db, keys), o.dupes?.() ?? loadDupeState(db, dupeRepo ? { repo: dupeRepo } : {}), loadMergeFacts(db, keys), loadPatchFacts(db, keys), loadPushFacts(db, keys),
       loadMainFixPrs(db), loadWorkflowFacts(db, keys, { nowMs: o.now }), listWorkflows(db, { live: true }), loadImplementFacts(db, keys),
       loadReviewFacts(db, keys, { now: o.now, own: logins }), loadAssignments(db, {}), loadOutsideHolds(db, keys),
       loadInScope(db, keys), loadActions(db, { kinds: ["merge"], states: ACTION_WAITS }),
-      redMainHolds(db, o.now), listQuietPrs(db, { repo: o.repo }), longLivedAll(db, keyRepos), loadAuthorPermissions(db), loadHoldInputs(db, keys, o.now), loadRepinPushes(db, keys), loadMadePushes(db, keys), loadLandedApprovals(db, keys), loadMergeEntryReviews(db, keys),
-      publishBackoffs(db, new Date(o.now)),
+      redMainHeads(db, o.now), listQuietPrs(db, { repo: o.repo }), longLivedAll(db, keyRepos), loadAuthorPermissions(db), loadHoldInputs(db, keys, o.now), loadRepinPushes(db, keys), loadMadePushes(db, keys), loadLandedApprovals(db, keys), loadMergeEntryReviews(db, keys),
+      publishBackoffs(db, new Date(o.now)), loadVsMain(db, keys),
     ]);
   const own = new Map<RefKey, RecordedPush[]>([...new Set([...made.keys(), ...patches.keys(), ...pushes.keys(), ...repins.keys()])]
     .map((key) => [key, ownPushes(made.get(key) ?? [], patches.get(key)?.pushes ?? [], pushes.get(key)?.moves ?? [], repins.get(key) ?? [])]));
   const data: PrPassData = {
     now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, duplicates: prDuplicates(dupes), merge, patches, pushes, ownPushes: own, landedApprovals, mergeEntryReviews, mainFixPrs, workflow,
     workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins: o.base.own,
-    inScope: scoped, mergeActions, mainRed, batchBackoff, quiet, longLived, authorWrites: authorWritesIn(control.settings.get(PIPELINE_LOGIN_KEY), authorPerms, o.now), holds,
+    inScope: scoped, mergeActions, mainRed, vsMain, batchBackoff, quiet, longLived, authorWrites: authorWritesIn(control.settings.get(PIPELINE_LOGIN_KEY), authorPerms, o.now), holds,
     tasks: new Map(), ownCommits: new Set(), statements: new Map(), act: new Map(),
     settled: new Map(), tiers: new Map(), postSource: async () => null, blockers: { item: new Map(), pending: new Set(), latest: new Map() }, carried: new Map(),
   };

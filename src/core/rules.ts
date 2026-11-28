@@ -98,10 +98,14 @@ export function premergeRetryAt(row: { at: string; tries: number; lost?: number 
   return Date.parse(row.at) + (row.tries < PREMERGE_QUICK_TRIES ? RETRY_AFTER_MS : SLOW_RETRY_MS);
 }
 
+/** The checks a repo starts with as optional: SonarCloud's scan and its analysis report fail no merge. */
+export const DEFAULT_OPTIONAL_CHECKS: readonly string[] = ["sonarcloud / SonarCloud Scan", "SonarCloud Code Analysis"];
+
+/** The plain line of a PR or batch whose CI passes because its failing checks fail only where the red default branch fails (src/mainci/no-new.ts). */
+export const passesNote = (checks: readonly string[]): string => `CI fails only where main fails (${checks.join(", ")})`;
+
 /** Queue states a PR leaves for its batch's state while it is in a batch. */
 export const BATCHABLE = ["ready", "decision-answered-merge", "refused", "waiting-ci"];
-/** States that wait while the repo's main CI is red. */
-export const MAIN_RED_HELD = ["ready", "decision-answered-merge", "refused"];
 
 /** The queue's note for a conflicted PR, or null when nothing acts on it. */
 export function conflictNote(bucket: string, base: string): string | null {

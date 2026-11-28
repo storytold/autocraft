@@ -20,7 +20,7 @@ import { assertFence } from "../db/fence.ts";
 import { guardedApi, inClusterApi, type KubeApi } from "../build/kube-api.ts";
 import { READY_LIMIT_MS } from "../build/workspace-launch.ts";
 import { createWorkspace, describeHeader, diffStat, endWorkspace, execWs, getCheckpoint, getWorkspace, LIVE_STATES, resumeWorkspace, type WorkspaceStateName } from "../build/workspaces.ts";
-import { readFailure } from "../cifix/logs.ts";
+import { ownFailure } from "../mainci/no-new.ts";
 import type { CiFailure } from "../cifix/types.ts";
 import { reviseOf } from "../core/decide.ts";
 import { loadPrFact } from "../core/facts.ts";
@@ -33,7 +33,6 @@ import { commitIdentity } from "../github/identity.ts";
 import { pipelineAccount, setPipelineLogin } from "../github/pipeline-account.ts";
 import { pushOwnBranch, type Writer } from "../github/write.ts";
 import { ghExec, type Gh } from "../merge/safe-merge.ts";
-import { optionalChecks } from "../optional-checks.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { FOLLOW_UP_ROUNDS, type BuildRun } from "./build.ts";
 import { roundDir, runChecks, workspacePod, type CheckRound, type Pod } from "./checks.ts";
@@ -203,7 +202,7 @@ async function start(run: BuildRun, deps: ReviseDeps, impl: Implementation, roun
   }
   let ci: CiFailure | null = null, ciSkip: string | null = null;
   if (due.ci) {
-    const reading = await readFailure(deps.gh, impl.repo, head, await optionalChecks(db, impl.repo));
+    const reading = await ownFailure(db, deps.gh, impl.repo, pr, head);
     if (reading.kind !== "skip") ci = reading.failure;
     else ciSkip = reading.why;
   }

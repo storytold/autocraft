@@ -19,7 +19,7 @@ export type OutsideHoldInfo = { reason: "limit" | "surge"; author: string; kind:
 export const QUEUE_STATES = [
   "ready", "decision-answered-merge", "refused", "waiting-ci", "waiting-premerge", "ci-failed", "conflict",
   "needs-fix-up", "waiting-verify", "verify-failed", "verify-error", "needs-decision", "merged", "held-backlog",
-  "batch-checking", "in-batch", "batch-failed", "ci-approval", "changes-requested", "waiting-main-ci",
+  "batch-checking", "in-batch", "batch-failed", "ci-approval", "changes-requested",
 ] as const;
 export type QueueState = (typeof QUEUE_STATES)[number];
 
@@ -239,8 +239,6 @@ export type PrFacts = {
     commentApproved: boolean; ciApproved: boolean;
     /** The repo has no CI at all. */
     noCi: boolean;
-    /** The default branch's CI is red. */
-    mainRed: boolean;
     /** While the repo's next batch waits out the publish backoff (src/merge/batch-store.ts publishBackoffMs): when it ends (ms). */
     batchBackoffUntil?: number;
     /** The repo's `implement` build feature is on (src/build/features.ts): the switch of an implementation PR's revisions and of the end of its attempt. */
@@ -256,8 +254,16 @@ export type PrFacts = {
   checksHere: boolean;
   /** At the reviewed head: the checks say open and not a draft. */
   checksOpen: boolean;
-  /** CI at the reviewed head with optional checks applied; "pending" while approved runs have not finished; "unknown" when the checks are of another head. */
+  /**
+   * CI at the reviewed head with optional checks applied, and failing checks that fail only where a red main fails (vsMain); "pending"
+   * while approved runs have not finished or that comparison is to be made; "unknown" when the checks are of another head.
+   */
   ci: string;
+  /**
+   * The reviewed head's CI against a red default branch (src/mainci/no-new.ts): `passing`, the failing checks that fail only where main
+   * fails and so let CI pass; `comparing` while that comparison is to be made (at once, or after `at` when a log is read again). Null otherwise.
+   */
+  vsMain: { passing: string[] } | { comparing: true; at: number | null } | null;
   mergeable: string;
   /** The mergeable state has read as unknown since `since`, and was read again `rereads` times (src/merge/mergeable.ts); null when it is known. */
   unknown: { since: string; reads: number; rereads: number; stuck: boolean } | null;

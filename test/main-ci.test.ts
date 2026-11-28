@@ -5,12 +5,10 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { classify, derive, prNumberOf, type HeadRow, type MainCheck } from "../src/mainci/classify.ts";
-import { mainCiRepos, pollMainCi, redMainHolds, redMainRepos } from "../src/mainci/index.ts";
+import { mainCiRepos, pollMainCi, redMainHeads } from "../src/mainci/index.ts";
 import { loadTrip, loadTrips, tripMergeBreakers, tripStage } from "../src/data/control/index.ts";
 import type { Querier } from "../src/mirror.ts";
 import { saveMainHeads } from "../src/data/mirror/mainci.ts";
-import { decidePr } from "../src/core/decide.ts";
-import { prFacts } from "./world.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 
@@ -58,7 +56,7 @@ test("derive: a green head ends the red run; with no green head the oldest red h
   assert.equal(derive([]), null);
 });
 
-test("a red branch stays red while a head's checks run, also a rerun of the red head, and holds a ready PR until a head goes green", async () => {
+test("a red branch stays red while a head's checks run, also a rerun of the red head, comparing with its red head, until a head goes green", async () => {
   mkdirSync(SCRATCH, { recursive: true });
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "main-ci-")), "t.db"));
   const at = (min: number) => new Date(Date.parse("2026-01-01T00:00:00Z") + min * 60_000).toISOString();
@@ -68,10 +66,8 @@ test("a red branch stays red while a head's checks run, also a rerun of the red 
   const poll = async (sha: string, committed: number, state: string, min: number, failing: string[] = []) => await saveMainHeads(db, [{
     repo: "app", sha, branch: "main", state, failing: JSON.stringify(failing.map((name) => ({ name, url: null }))), checks: "[]", committed_at: at(committed), headline: `Change ${sha}`,
   }], at(min));
-  const held = async (nowMs: number) => {
-    const p = decidePr(prFacts({ repoFacts: { mainRed: (await redMainRepos(db, nowMs)).has("app") } }));
-    return p.state === "waiting-main-ci" && p.actions.length === 0;
-  };
+  // Red, and the head a PR's failures are compared with.
+  const held = async (nowMs: number) => (await redMainHeads(db, nowMs)).get("app")?.sha === "b";
   const row = async (nowMs: number) => (await mainCiRepos(db, [], nowMs))[0]!;
 
   await poll("a", 0, "green", 0);
@@ -91,7 +87,7 @@ test("a red branch stays red while a head's checks run, also a rerun of the red 
   // A head without checks may still be registering them; past that it is a repo without CI and holds nothing.
   await poll("e", 40, "none", 40);
   assert.equal(await held(ms(45)), true);
-  const until = (await redMainHolds(db, ms(45))).get("app");
+  const until = (await redMainHeads(db, ms(45))).get("app")?.until;
   assert.ok(until && until > ms(45) && until <= ms(60), "the hold names when its grace ends");
   assert.equal(await held(ms(60)), false);
 

@@ -49,7 +49,7 @@ export type QueueEntry = {
   verify: { state: string; kind: string | null; summary: string | null; note: string | null } | null;
   /** For a conflicting PR: what Fix-up does about it ("conflict: merging main", "conflict: asked the contributor", "conflict: held"), or null. */
   conflictNote?: string | null;
-  /** The PR is one AutoCraft opened to fix main CI (branch prefix MAIN_FIX_BRANCH_PREFIX); it merges alone, also while main is red. */
+  /** The PR is one AutoCraft opened to fix main CI (branch prefix MAIN_FIX_BRANCH_PREFIX); it merges alone. */
   mainFix?: boolean;
   /** The pre-merge review of the head, read for open PRs the rule would otherwise merge; null when not read (outside the rule, or an operator's Merge answer). fix: every defect has a fix and a fix-up may apply them; defect: a defect to decide on; failed: three tries failed; retry: a try failed, more are left. */
   premerge: { state: "none" | "clean" | "fix" | "defect" | "unsure" | "failed" | "retry"; defects: PremergeFinding[]; /** Claims of the description the review could not settle (unknown impact, or unverified). */ unknownClaims: Claim[]; /** On a PR approved for merge, the defects that do not stop it: filed as follow-ups. */ followUps: PremergeFinding[]; minor: number; error: string | null } | null;

@@ -11,7 +11,7 @@ export type RefusalCode =
 /** What an item waits on when nothing of it is due. */
 export type WaitCode = RefusalCode
   | "answer" | "not-started" | "ci" | "mergeable-unknown" | "mergeable-stuck" | "premerge" | "verification" | "verification-failed" | "verification-error"
-  | "ci-approval" | "ci-approval-failed" | "main-red" | "batch" | "batch-failed" | "changes-requested" | "merge-refused" | "refusal-retry"
+  | "ci-approval" | "ci-approval-failed" | "batch" | "batch-failed" | "changes-requested" | "merge-refused" | "refusal-retry"
   | "sign-in" | "hand-over" | "followups" | "leg" | "base-off-default" | "no-ci" | "review-hold" | "review-failed" | "review-cap"
   | "fix-contributor" | "fix-running" | "fix-failed" | "conflict-contributor" | "conflict-person" | "conflict-cap"
   | "ci-contributor" | "ci-running" | "ci-fix-failed" | "ci-own-breakage" | "ci-nothing-to-fix" | "ask-unsent" | "ask-failed" | "lint"
