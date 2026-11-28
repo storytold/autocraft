@@ -1,8 +1,8 @@
 // GET /api/maintain/browse: the Items browser. `q` is the search text with its qualifiers (src/core/item-query.ts); the server
 // filters, sorts and pages over the repos the reader may see, narrowed to the picked project. `presets=1` also counts every preset
 // view and lists the quick-filter values, which the page asks for with its first page only.
-import type { BrowseResult, BrowseRow, PriorityLevel } from "../../../web/src/api/types.ts";
-import { forReader, KIND_NAMES, parseItemQuery, PRESETS } from "../../core/item-query.ts";
+import type { BrowseResult, BrowseRow, BrowseStepState, PriorityLevel } from "../../../web/src/api/types.ts";
+import { forReader, KIND_NAMES, parseItemQuery, PRESETS, stepValueOf } from "../../core/item-query.ts";
 import { countPresets, loadBrowsePage, loadFacets, type BrowseItem, type BrowseScope } from "../../data/views/items-browse.ts";
 import { loadInsiders } from "../../data/intake/index.ts";
 import { WEIGHT_NORMAL } from "../../workflow/types.ts";
@@ -31,12 +31,20 @@ function labelsOf(json: string | null): string[] {
   }
 }
 
+const STEP_STATES: readonly string[] = ["running", "waiting", "answer", "stopped"] satisfies BrowseStepState[];
+
+/** The row's step; none for a step name this version does not know. */
+function stepOf(r: BrowseItem): BrowseRow["step"] {
+  const name = stepValueOf(r.step);
+  return name && r.step_state && STEP_STATES.includes(r.step_state) ? { name, state: r.step_state as BrowseStepState } : null;
+}
+
 const rowOf = (r: BrowseItem): BrowseRow => ({
   repo: r.repo, number: Number(r.number), kind: r.kind === "pr" ? "pr" : "issue", state: itemState(r.state), draft: Number(r.is_draft) === 1,
   title: r.title || `${r.repo}#${r.number}`, author: r.author, outside: Number(r.outside) === 1, team: Number(r.team) === 1, labels: labelsOf(r.labels),
   priority: (r.priority as PriorityLevel | null) ?? null, size: (r.size as BrowseRow["size"]) ?? null, classified: r.classified ? KIND_NAMES[r.classified] ?? r.classified : null,
   area: r.area, comments: Number(r.comments), reactions: Number(r.reactions), discord: Number(r.discord), linked: r.linked === null ? null : Number(r.linked),
-  ci: r.kind === "pr" ? CI[r.ci_state ?? ""] ?? null : null, autocraft: r.autocraft as BrowseRow["autocraft"], asksYou: Number(r.asks_me) === 1,
+  ci: r.kind === "pr" ? CI[r.ci_state ?? ""] ?? null : null, autocraft: r.autocraft as BrowseRow["autocraft"], step: stepOf(r), asksYou: Number(r.asks_me) === 1,
   approved: Number(r.approved) === 1, duplicate: Number(r.duplicate) === 1, createdAt: r.created_at ?? "", updatedAt: r.updated_at ?? "",
 });
 

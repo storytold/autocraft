@@ -2,6 +2,7 @@
 // (docs/dashboard-spec.md, Data) in camelCase.
 
 import type { UserSettings, UserSettingsReply } from "../../../src/remote/protocol.ts";
+import type { StepValue } from "../../../src/core/item-query.ts";
 export type RepoName = string;
 
 export interface ItemRef {
@@ -2880,6 +2881,11 @@ export interface MaintainItems {
 /** AutoCraft's part in an item, in one word: working on it, waiting for a person, held, in the Backlog, done, or never started. */
 /** `stopped`: only the automatic merge rule started it and it stopped; it asks nobody until a maintainer takes it over. */
 export type BrowseAutocraft = "running" | "waiting" | "stopped" | "held" | "backlog" | "done" | "none";
+/**
+ * How a live workflow stands at its step: `running`, `waiting` (on something that moves by itself, such as CI), `answer` (back with its
+ * question or recommendation), `stopped` (at a blocker, or the automatic merge rule stopped it and asks nobody).
+ */
+export type BrowseStepState = "running" | "waiting" | "answer" | "stopped";
 
 /** One row of the Items browser. */
 export interface BrowseRow {
@@ -2910,6 +2916,8 @@ export interface BrowseRow {
   linked: number | null;
   ci: "green" | "red" | "pending" | null;
   autocraft: BrowseAutocraft;
+  /** The step its live workflow is at (a `step:` value of src/core/item-query.ts) and how it stands there; null with no live workflow. */
+  step: { name: StepValue; state: BrowseStepState } | null;
   /** The open question of its workflow is addressed to the reader. */
   asksYou: boolean;
   approved: boolean;

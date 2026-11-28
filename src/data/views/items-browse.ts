@@ -8,7 +8,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { parseSearch } from "../../db/search.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { itemOfValue, KINDS, type ItemQuery, type QueryTerm } from "../../core/item-query.ts";
+import { itemOfValue, KINDS, STEPS, type ItemQuery, type QueryTerm, type StepValue } from "../../core/item-query.ts";
 import { ownerOf } from "../../owners.ts";
 import { reviewBots } from "../../review/bots.ts";
 import { hiddenRepos } from "../control/fragments.ts";
@@ -17,7 +17,10 @@ import { stuckItem } from "../planner/fragments.ts";
 import { quietPrExpr } from "../security/fragments.ts";
 import { hasSecurityVerdict, isDuplicateClose } from "../triage/fragments.ts";
 import { LIVE_STATES } from "../workflow/fragments.ts";
-import { ASKING_STATES, RULE_STARTER } from "../../workflow/types.ts";
+import { ASKING_STATES, RULE_STARTER, type Entry } from "../../workflow/types.ts";
+import { ROUND_STEP, stepsFor } from "../../workflow/status.ts";
+
+const ENTRIES: readonly Entry[] = ["review", "fixup", "implement", "merge"];
 import { textHit } from "./items.ts";
 import type { Scope } from "./types.ts";
 
@@ -29,7 +32,7 @@ export type BrowseItem = {
   repo: string; number: number; kind: string; state: string; is_draft: number | null; title: string | null; author: string | null; outside: number; team: number;
   labels: string | null; priority: string | null; size: string | null; classified: string | null; area: string | null;
   comments: number; reactions: number; discord: number; linked: number | null; ci_state: string | null;
-  autocraft: string; asks_me: number; approved: number; duplicate: number; created_at: string | null; updated_at: string | null;
+  autocraft: string; step: string | null; step_state: string | null; asks_me: number; approved: number; duplicate: number; created_at: string | null; updated_at: string | null;
 };
 
 export type BrowsePage = { rows: BrowseItem[]; total: number };
@@ -100,6 +103,17 @@ function facts(db: Db, scope: BrowseScope, inner: (eb: kx.AnyEb) => Expression<S
         .when("lw.state", "=", "backlog").then("backlog")
         .when("lw.state", "in", ["done", "closed"]).then("done")
         .else("none").end().as("autocraft"),
+      // The step the live workflow's advance pass recorded, while it is one of the workflow's steps (stepNamesOf): none before the
+      // first pass, nor once an approval given or withdrawn since changed the last step.
+      eb.case().when(validStep(eb)).then(eb.ref("w.step")).else(null).end().as("step"),
+      // How it stands at that step, in the step list's words.
+      eb.case()
+        .when("w.id", "is", null).then(null)
+        .when(eb.and([eb("w.state", "in", [...ASKING_STATES]), eb("w.started_by", "=", RULE_STARTER), eb("w.approved_by", "is", null), eb("w.taken_by", "is", null)])).then("stopped")
+        .when("w.state", "=", "recommending").then("answer")
+        .when("w.state", "=", "blocked").then("stopped")
+        .when("w.state", "=", "waiting").then("waiting")
+        .else("running").end().as("step_state"),
       eb.case().when(eb.and([
         eb("w.state", "in", [...ASKING_STATES]),
         eb.or([eb.and([kx.ciEq(db, "w.started_by", eb.val(me)), eb("w.started_by", "<>", RULE_STARTER)]), kx.ciEq(db, eb.fn.coalesce("w.approved_by", eb.val("")), eb.val(me)), kx.ciEq(db, eb.fn.coalesce("w.taken_by", eb.val("")), eb.val(me))]),
@@ -108,6 +122,18 @@ function facts(db: Db, scope: BrowseScope, inner: (eb: kx.AnyEb) => Expression<S
       eb.case().when(isDuplicateClose(db, eb, "i.repo", "i.number")).then(1).else(0).end().as("duplicate"),
     ]);
 }
+
+/** The live workflow `w` has a recorded step that is one of its steps: the entry's steps, then merge when approved (always for the merge queue), else recommend; the review round may stand anywhere. */
+const validStep = (eb: kx.AnyEb) => {
+  const e = eb as any;
+  const approved = e.or([e("w.approved_by", "is not", null), e("w.entry", "=", "merge")]);
+  return e.and([e("w.step", "is not", null), e.or([
+    e("w.step", "=", ROUND_STEP),
+    e.and([e("w.step", "=", "merge"), approved]),
+    e.and([e("w.step", "=", "recommend"), e.not(approved)]),
+    ...ENTRIES.map((entry) => e.and([e("w.entry", "=", entry), e("w.step", "in", stepsFor(entry, true).filter((n) => n !== "merge"))])),
+  ])]) as Expression<SqlBool>;
+};
 
 /** The labels of the item `x` include one of `names`, case-insensitively. */
 const hasLabel = (db: Db, eb: kx.AnyEb, names: string[]) =>
@@ -162,6 +188,8 @@ function termExpr(db: Db, eb: kx.AnyEb, scope: BrowseScope, t: QueryTerm): Expre
     case "review": return eb.exists((eb as any).selectFrom("main.opus_reviews as o").select(one(eb)).whereRef("o.repo", "=", "x.repo").whereRef("o.number", "=", "x.number")
       .whereRef("o.head_oid", "=", "x.head_oid").where("o.verdict", "=", "take").where("o.sure", "=", 1));
     case "autocraft": return eb("x.autocraft", "in", vs);
+    // Null-safe, so `-step:merge` keeps the items with no live workflow.
+    case "step": return eb(eb.fn.coalesce("x.step", eb.val("")), "in", vs.map((v) => STEPS[v as StepValue]));
     case "items": {
       // A written owner must be the tracked repo's owner; an item of another owner's repo of the same name matches nothing.
       const refs = vs.flatMap((v) => {
@@ -221,7 +249,7 @@ function ordered(b: any, q: ItemQuery, normalWeight: number) {
 }
 
 const ROW_COLS = ["repo", "number", "kind", "state", "is_draft", "title", "author", "outside", "team", "labels", "priority", "size", "classified", "area",
-  "comments", "reactions", "discord", "linked", "ci_state", "autocraft", "asks_me", "approved", "duplicate", "created_at", "updated_at"].map((c) => `x.${c}`);
+  "comments", "reactions", "discord", "linked", "ci_state", "autocraft", "step", "step_state", "asks_me", "approved", "duplicate", "created_at", "updated_at"].map((c) => `x.${c}`);
 
 /** The statements of one page of the items matching `q` and of their count (exported for measuring them). */
 export function browseStatements(db: Db, scope: BrowseScope, q: ItemQuery, o: BrowseOpts) {

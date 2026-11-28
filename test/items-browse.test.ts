@@ -128,3 +128,41 @@ test("items: lists exactly the named items of tracked repos; another owner's rep
     await db.close();
   }
 });
+
+test("step: matches the step a live workflow's advance pass recorded while it is one of its steps; negation keeps items with no live workflow", async () => {
+  const db = await connectDb(":memory:");
+  try {
+    const item = (number: number, kind = "pr") => ({ repo: "app", number, kind, state: "OPEN", title: `t${number}`, author: "ann", labels: "[]", created_at: at(number), updated_at: at(number) });
+    await db.run(db.k.insertInto("main.items").values([1, 2, 3, 4, 5, 7, 8].map((n) => item(n)).concat([item(6, "issue")])));
+    const wf = (number: number, o: Record<string, unknown>) => ({ repo: "app", number, kind: "pr", entry: "fixup", state: "running", started_by: "ann", started_at: at(1), started_via: "github", updated_at: at(1), ...o });
+    await db.run(db.k.insertInto("main.item_workflows").values([
+      wf(1, { step: "fix-up" }),
+      wf(2, { step: "merge", state: "blocked", approved_by: "ann" }),
+      wf(3, { entry: "merge", step: "update from main" }),
+      wf(4, { step: "recommend", state: "recommending" }),
+      wf(5, { step: "fix-up", state: "done" }),
+      wf(6, { kind: "issue", entry: "implement", state: "waiting", step: "implement" }),
+      wf(7, {}),
+      wf(8, { step: "recommend", approved_by: "ann" }),
+    ] as never));
+    const scope = (staff: boolean) => ({ repos: ["app"], hidden: Object.assign([], { visible: ["app"] }), staff, login: "ann" });
+    const page = async (q: string, staff = true) => (await loadBrowsePage(db, scope(staff), parseItemQuery(q), { offset: 0, limit: 50, normalWeight: 5 })).rows;
+    const numbers = async (q: string) => (await page(q)).map((r) => Number(r.number)).sort();
+
+    assert.deepEqual(await numbers("step:fix-up"), [1], "a finished workflow is at no step");
+    assert.deepEqual(await numbers("step:merge,update"), [2, 3]);
+    assert.deepEqual(await numbers("step:recommend"), [4], "a recommend step recorded before the merge was approved is no step of the workflow");
+    assert.deepEqual(await numbers("step:implement"), [6]);
+    assert.deepEqual(await numbers("-step:fix-up"), [2, 3, 4, 5, 6, 7, 8]);
+    for (const staff of [true, false]) {
+      const states = Object.fromEntries((await page("", staff)).map((r) => [Number(r.number), r.step === null ? null : `${r.step}/${r.step_state}`]));
+      assert.equal(states[2], "merge/stopped", "a blocker reads stopped for every reader");
+      assert.equal(states[4], "recommend/answer");
+      assert.equal(states[6], "implement/waiting");
+      assert.equal(states[5], null);
+      assert.equal(states[7], null, "before its first pass a workflow is at no step");
+    }
+  } finally {
+    await db.close?.();
+  }
+});
