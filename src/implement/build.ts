@@ -26,7 +26,7 @@ import {
 } from "./session.ts";
 import { applyStuckAnswer, markStuck, opensAsDraft, stuckLine, type DiffCheck, type StuckCause } from "./stuck.ts";
 import { attemptNow, currentAttempt, roundOf, writeStep, type Attempt, type NewRound } from "./attempt.ts";
-import { BUILD_STATES, type Implementation, type ImplementationPatch, type ImplementationRound, type ImplementationState, type SessionReport } from "./types.ts";
+import { BUILD_STATES, type Implementation, type ImplementationPatch, type ImplementationRound, type ImplementationState, type RetryRound, type SessionReport } from "./types.ts";
 
 /** Follow-up turns with the checks' findings before the attempt is stuck (D6). */
 export const FOLLOW_UP_ROUNDS = 3;
@@ -125,11 +125,14 @@ const isDiffRefusal = (r: ImplementationRound) => r.kind === "refusal" && (r.res
 /** Whether the checks ran, or the diff check refused the change, after the turn round `turn`. */
 const checkedAfter = (rounds: ImplementationRound[], turn: ImplementationRound) => rounds.some((r) => r.id > turn.id && (r.kind === "checks" || isDiffRefusal(r)));
 
+/** `retry: false`: a stop of our own that a later run cannot get past, which asks at once (markStuck). */
 class Stuck extends Error {
   cause_: StuckCause;
-  constructor(cause: StuckCause, detail: string) {
+  retry: boolean;
+  constructor(cause: StuckCause, detail: string, o: { retry?: boolean } = {}) {
     super(detail);
     this.cause_ = cause;
+    this.retry = o.retry ?? true;
   }
 }
 
@@ -156,7 +159,7 @@ async function readyWorkspace(run: BuildRun, impl: Implementation): Promise<{ ws
   let wsId = impl.workspaceId, remade = false;
   const live = async (id: number | null) => id !== null && LIVE_STATES.includes((await getWorkspace(db, id))?.state as WorkspaceStateName);
   if (!await live(wsId)) {
-    wsId = await make(await envOf(wsId), wsId === null ? "the session starts again after a stop" : `workspace ${wsId} was gone`);
+    wsId = await make(await envOf(wsId), `workspace ${wsId} was gone`);
     remade = true;
   }
   for (let from = Date.now(), last = "";;) {
@@ -282,7 +285,7 @@ async function checksPhase(run: BuildRun, impl: Implementation, ws: { base: stri
   const lastTurn = turnsOf(rounds).at(-1);
   // Checks a restart cut off after they were stored count once: their rounds are the turn's result. AutoCraft's own retry of
   // checks without a verdict runs them afresh.
-  const retried = rounds.filter((r) => r.kind === "retry").at(-1);
+  const retried = rounds.filter((r) => r.kind === "retry" && (r.result as Partial<RetryRound> | null)?.cause === "checks-no-verdict").at(-1);
   const since = rounds.filter((r) => r.kind === "checks" && (!lastTurn || r.id > lastTurn.id) && (!retried || r.id > retried.id)).map((r) => r.result as CheckRound);
   const noVerdict = (x: CheckRound) => !x.findings.length && !x.needsDependency && (x.noVerdict ?? []).length > 0;
   let c = since.at(-1);
@@ -352,7 +355,8 @@ async function openingPhase(run: BuildRun, deps: BuildDeps, impl: Implementation
     await step(db, impl, { to: "closed", patch: { reason: r.reason } });
     return r.reason;
   }
-  throw new Stuck("push-failed", r.reason);
+  // A refusal a later run cannot get past: the base commit gone, our PR closed, a head that is not our push.
+  throw new Stuck("push-failed", r.reason, { retry: false });
 }
 
 /** One unit of the build bucket for the issue's current attempt: the job's summary line, and whether anything moved. */
@@ -392,7 +396,7 @@ async function buildUnit(run: BuildRun, cur: Attempt | null, deps: BuildDeps): P
     if (e instanceof Left) return `${ref(impl)}: ${e.message}`;
     if (!(e instanceof Stuck)) throw e;
     const now = (await attemptNow(db, impl))?.impl ?? impl;
-    return `${ref(impl)}: ${stuckLine(e.cause_, await markStuck(db, now, e.cause_, e.message || null, { diffCheck: deps.diffCheck }))}`;
+    return `${ref(impl)}: ${stuckLine(e.cause_, await markStuck(db, now, e.cause_, e.message || null, { diffCheck: deps.diffCheck, retry: e.retry }))}`;
   }
 }
 

@@ -164,6 +164,31 @@ export async function loadImplementStamps(db: Db, keys: KeySource): Promise<Map<
   return out;
 }
 
+/**
+ * Per repo, the newest due time (ms) at or before `now` of AutoCraft's own retries of its live attempts (start-retry.ts ownRetryOf).
+ * It moves when a retry falls due, which the implement lane reads so a due retry runs although the lane's last job was idle. 1 statement.
+ */
+export async function loadDueOwnRetries(db: Db, now: number): Promise<Map<string, number>> {
+  const q = queryDb(db);
+  const k = q.k as any;
+  const rows = await q.all(k.selectFrom("main.implementation_rounds as r").innerJoin("main.implementations as im", "im.id", "r.implementation_id")
+    .select(["im.repo", "r.id", "r.implementation_id", "r.kind", "r.call_id", "r.result", "r.at"])
+    .where("r.kind", "in", ["question", "answer", "guidance", "retry"]).where("im.state", "not in", ENDED)
+    .where((eb: any) => eb.exists(eb.selectFrom("main.implementation_rounds as x").select(eb.lit(1).as("one")).whereRef("x.implementation_id", "=", "im.id").where("x.kind", "=", "retry")))
+    .orderBy("r.id")) as (RoundRow & { repo: string })[];
+  const byImpl = new Map<number, { repo: string; rounds: ReturnType<typeof roundOf>[] }>();
+  for (const r of rows) {
+    const id = Number(r.implementation_id);
+    (byImpl.get(id) ?? byImpl.set(id, { repo: r.repo, rounds: [] }).get(id)!).rounds.push(roundOf(r));
+  }
+  const out = new Map<string, number>();
+  for (const { repo, rounds } of byImpl.values()) {
+    const due = ownRetryOf(rounds)?.dueAt;
+    if (due !== undefined && due <= now && due > (out.get(repo) ?? -1)) out.set(repo, due);
+  }
+  return out;
+}
+
 /** The repo of each implementation id, for the visibility check of a screenshot. */
 export async function loadImplementationRepos(db: Db, ids: number[]): Promise<Map<number, string>> {
   if (ids.length === 0) return new Map();
@@ -184,6 +209,7 @@ export async function loadStuckStreaks(db: Db, sinceByRepo: Map<string, string>,
   const v = kx.valuesTable(db, [...sinceByRepo].map(([repo, since]) => ({ repo, since })), { repo: "text", since: "text" }, "w");
   const rows = await q.all(k.selectFrom(k.selectFrom("main.implementations as im").innerJoin(v, (j: any) => j.onRef("w.repo", "=", "im.repo"))
     .select((eb: any) => ["im.repo as repo", "im.number as number", "im.attempt as attempt", "im.state as state", "im.pr_number as pr_number",
+      eb.selectFrom("main.implementation_rounds as nq").select("nq.result").whereRef("nq.implementation_id", "=", "im.id").where("nq.kind", "=", "question").orderBy("nq.id", "desc").limit(1).as("question"),
       eb.fn.agg("row_number").over((o: any) => o.partitionBy("im.repo").orderBy("im.updated_at", "desc").orderBy("im.id", "desc")).as("rn")])
     .where((eb: any) => eb("im.updated_at", ">", eb.ref("w.since")))
     .where((eb: any) => eb.or([eb("im.pr_number", "is not", null), eb("im.state", "in", ["stuck", "failed"])]))
@@ -193,7 +219,11 @@ export async function loadStuckStreaks(db: Db, sinceByRepo: Map<string, string>,
       .where((x: any) => x.not(x.exists(x.selectFrom("main.implementation_rounds as later").select(x.lit(1).as("one"))
         .whereRef("later.implementation_id", "=", "im.id").where("later.kind", "=", "question").whereRef("later.id", ">", "qr.id"))))))))
     .as("t"))
-    .select(["t.repo", "t.number", "t.attempt", "t.state", "t.pr_number"]).where("t.rn", "<=", n).orderBy("t.repo").orderBy("t.rn")) as { repo: string; number: number | string; attempt: number | string; state: ImplementationState; pr_number: number | string | null }[];
-  for (const r of rows) (out.get(r.repo) ?? out.set(r.repo, []).get(r.repo)!).push({ number: Number(r.number), attempt: Number(r.attempt), state: r.state, prNumber: num(r.pr_number) });
+    .select(["t.repo", "t.number", "t.attempt", "t.state", "t.pr_number", "t.question"]).where("t.rn", "<=", n).orderBy("t.repo").orderBy("t.rn")) as { repo: string; number: number | string; attempt: number | string; state: ImplementationState; pr_number: number | string | null; question: string | null }[];
+  for (const r of rows) {
+    const q = parse<{ stuck?: unknown; cause?: unknown; retried?: unknown }>(r.question);
+    const stuck = q?.stuck === true && typeof q.cause === "string" ? { cause: q.cause, retried: typeof q.retried === "number" ? q.retried : null } : null;
+    (out.get(r.repo) ?? out.set(r.repo, []).get(r.repo)!).push({ number: Number(r.number), attempt: Number(r.attempt), state: r.state, prNumber: num(r.pr_number), stuck });
+  }
   return out;
 }

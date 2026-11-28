@@ -9,7 +9,7 @@ import type { ItemFacts } from "../src/core/plan.ts";
 import { loadTrip } from "../src/data/control/trips.ts";
 import { startFailed } from "../src/implement/plan.ts";
 import { IMPLEMENT_RETRIES, IMPLEMENT_START_RETRIES } from "../src/implement/start-retry.ts";
-import { markStuck, STUCK_IN_A_ROW } from "../src/implement/stuck.ts";
+import { markStuck, STUCK_IN_A_ROW, tripIfStuckInARow } from "../src/implement/stuck.ts";
 import type { PlanReply } from "../src/implement/types.ts";
 import { currentImplementation, roundsOf, setImplementationState, startImplementation } from "./implement-rows.ts";
 import { OPERATOR, world } from "./world-db.ts";
@@ -42,9 +42,21 @@ test("AutoCraft's own stops retry on a backoff without asking or counting toward
   assert.ok(!await asked(started.id), "nothing is asked");
   assert.equal(waitWho(await step(7)), "system");
 
+  // Failing checks are the item's own stop: asked at once, and counted toward the breaker.
+  const plan = { summary: "Return None for an empty slice" } as unknown as PlanReply;
+  const failing = async (n: number) => {
+    const impl = await startImplementation(db, { repo: "app", number: n, queuedBy: OPERATOR, textHash: "h" });
+    await setImplementationState(db, impl.id, "checking", { planCallId: 41, plan });
+    const end = await markStuck(db, (await currentImplementation(db, "app", n))!, "checks-failing", "2 findings");
+    assert.equal(end.retry, null);
+    assert.equal(waitWho(await step(n)), "person", "failing checks ask a maintainer");
+  };
+  await failing(11);
+  await failing(13);
+  assert.ok(!await tripped());
+
   // A session the Task Runner kept losing: the attempt starts the session over after the backoff, without asking.
   const lost = await startImplementation(db, { repo: "app", number: 9, queuedBy: OPERATOR, textHash: "h" });
-  const plan = { summary: "Return None for an empty slice" } as unknown as PlanReply;
   const stopAt = async (cause: "session-lost" | "no-report") => {
     await setImplementationState(db, lost.id, "implementing", { planCallId: 41, plan, workspaceId: null });
     return await markStuck(db, (await currentImplementation(db, "app", 9))!, cause, "the session started over 2 times");
@@ -62,14 +74,8 @@ test("AutoCraft's own stops retry on a backoff without asking or counting toward
   assert.equal((await currentImplementation(db, "app", 9))?.state, "stuck");
   assert.equal(waitWho(await step(9, Date.now() + LATER)), "person", "it asks a maintainer");
 
-  // Failing checks are the item's own stop: asked at once. Our own stop neither counts toward the breaker nor breaks the row.
-  for (const n of [11, 13, 15]) {
-    assert.ok(!await tripped(), "no breaker before the item's own stops are in a row");
-    const impl = await startImplementation(db, { repo: "app", number: n, queuedBy: OPERATOR, textHash: "h" });
-    await setImplementationState(db, impl.id, "checking", { planCallId: 41, plan });
-    const end = await markStuck(db, (await currentImplementation(db, "app", n))!, "checks-failing", "2 findings");
-    assert.equal(end.retry, null);
-    assert.equal(waitWho(await step(n)), "person", "failing checks ask a maintainer");
-  }
+  // Our own stop, newer than the item's two, neither counts toward the breaker nor breaks the row.
+  assert.equal(await tripIfStuckInARow(db, "app"), false, "our own stop does not make a third in the row");
+  await failing(15);
   assert.ok(await tripped(), `${STUCK_IN_A_ROW} stops on the item's own cause in a row trip the breaker`);
 });

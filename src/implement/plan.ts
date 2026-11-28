@@ -320,8 +320,8 @@ function goesOnWithAssumptions(rounds: readonly ImplementationRound[]): boolean 
 }
 
 /** Makes the attempt stuck, a blocker of its workflow (stuck.ts). */
-async function stuck(db: Db, impl: Implementation, cause: StuckCause, detail: string, runner = false): Promise<string> {
-  return `${impl.repo}#${impl.number}: ${stuckLine(cause, await markStuck(db, impl, cause, detail, { runner }))}`;
+async function stuck(db: Db, impl: Implementation, cause: StuckCause, detail: string, o: { runner?: boolean; retry?: boolean } = {}): Promise<string> {
+  return `${impl.repo}#${impl.number}: ${stuckLine(cause, await markStuck(db, impl, cause, detail, o))}`;
 }
 
 /**
@@ -347,11 +347,13 @@ async function moveOn(ctx: StepContext, impl: Implementation, p: { round: number
   const db = ctx.db, ref = `${impl.repo}#${impl.number}`;
   const g = await guardItem(db, { repo: impl.repo, number: impl.number }, { kind: "implement", bucket: "plan" }, byOfJob(ctx.job.requestedBy));
   let state: Implementation["state"];
+  // A write the guard refused is refused again on a later run: the stop asks at once instead of being retried.
+  let refused = false;
   try {
     state = await finishPlan(db, impl, p, {
       commentsApproved: await repoApproved(db, impl.repo, "comment") && !("refused" in g),
       postComment: async (text) => {
-        if ("refused" in g) throw new Error(g.refused);
+        if ("refused" in g) { refused = true; throw new Error(g.refused); }
         const r = await ghComment({ db, login: IMPLEMENT_ASKER }, g, exec, "implement-question", { repo: impl.repo, number: impl.number, pr: false }, { by: "model", kind: "comment", model: PROMPT.models[0] }, text, { call: p.callId, round: p.round });
         if (r.code !== 0) throw new Error(`the question comment failed: ${r.stderr.replace(/\s+/g, " ").slice(0, 200)}`);
         return /#issuecomment-(\d+)/.exec(r.stdout)?.[1] ?? null;
@@ -363,7 +365,7 @@ async function moveOn(ctx: StepContext, impl: Implementation, p: { round: number
     await addRounds(db, impl.id, [{ kind: "ask-failed", callId: p.callId, result: { planRound: p.round, error } satisfies AskFailedRound }]);
     // Counted since AutoCraft's own retry of the stop the tries ended in: the retry gets its own tries.
     const tries = sinceRetry((await attemptNow(db, impl))?.rounds ?? []).filter((r) => r.kind === "ask-failed" && (r.result as Partial<AskFailedRound> | null)?.planRound === p.round).length;
-    if (tries >= ASK_TRIES) return await stuck(db, impl, "question-failed", `${tries} tries: ${error}`);
+    if (tries >= ASK_TRIES || refused) return await stuck(db, impl, "question-failed", `${tries} tries: ${error}`, { retry: !refused });
     throw new Error(`${ref}: the questions of plan round ${p.round} were not posted (try ${tries} of ${ASK_TRIES}); the next job tries again from the stored plan: ${error}`);
   }
   ctx.acted(1);
@@ -455,7 +457,7 @@ export async function runPlan(ctx: StepContext, o: PlanOptions): Promise<string>
     return `${ref}: plan call ${planned.callId}: ${r.ready ? "ready" : `${r.questions.length} question(s) (${[...new Set(r.questions.map((q) => q.audience))].join(", ")})`}, size ${r.size}; \`implement show ${ref} --call ${planned.callId}\` prints it`;
   }
   impl = impl!;
-  if ("error" in planned) return await stuck(db, impl, planned.cause, planned.error, planned.runner);
+  if ("error" in planned) return await stuck(db, impl, planned.cause, planned.error, { runner: planned.runner === true });
   if (reset) return await stuck(db, impl, "reset-failed", reset);
   return await moveOn(ctx, impl, stored!);
 }

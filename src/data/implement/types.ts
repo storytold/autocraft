@@ -87,8 +87,11 @@ export type AnswerRound = { by: string; via: string; at: string; option?: string
 export type AskFailedRound = { planRound: number; error: string };
 /** A `start-failed` round: why the workspace did not start. */
 export type StartFailedRound = { error: string };
-/** A `retry` round: the stuck cause AutoCraft retries itself, its detail, whether a Task Runner lost the call, and the state it goes on from. */
-export type RetryRound = { cause: string; detail: string | null; runner: boolean; from: string; to: string };
+/**
+ * A `retry` round: the stuck cause AutoCraft retries itself, its detail, whether a Task Runner lost the call, the states it went
+ * from and to, and `reset` for a revision that starts over on a tree reset to the change last pushed.
+ */
+export type RetryRound = { cause: string; detail: string | null; runner: boolean; from: string; to: string; reset?: boolean };
 export type PlanQuestion = { audience: QuestionAudience; text: string; options: { label: string; hint: string }[]; recommended: string | null };
 
 /**
@@ -166,7 +169,8 @@ export type ImplementFacts = {
 };
 export type ImplementationView = { impl: Implementation; attempts: number; rounds: ImplementationRound[] };
 export type ImplementStamp = { attempts: { id: number; state: ImplementationState; updatedAt: string }[]; rounds: { n: number; newest: string | null; length: number } };
-export type StuckStreakRow = { number: number; attempt: number; state: ImplementationState; prNumber: number | null };
+/** `stuck`: the stuck blocker the attempt's newest question round is, with its cause and AutoCraft's own retries before it; null when that round is none. */
+export type StuckStreakRow = { number: number; attempt: number; state: ImplementationState; prNumber: number | null; stuck: { cause: string; retried: number | null } | null };
 
 export type StartAttempt = { repo: string; number: number; queuedBy: string; textHash: string; baseSha?: string | null };
 export type AttemptStep = {
