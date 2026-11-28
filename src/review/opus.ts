@@ -421,7 +421,9 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
     input.workflow = true;
     const dir = referenceDir(repo);
     const semantic = dir ? deps.semantic ?? defaultSemanticDeps(db, input.ref) : undefined;
-    const r = await inReviewWorkspace(db, deps.workspace, c, c.head_oid, log, async (workspace) => {
+    // A take-fix keeps the workspace for its fix-up.
+    const fixes = (x: { ok: boolean; value?: { review: OpusReview | null } }): boolean => x.ok && x.value?.review?.verdict === "take-fix";
+    const r = await inReviewWorkspace(db, deps.workspace, c, c.head_oid, { prompt: "review.opus", fixes }, log, async (workspace) => {
       const checkout = workspace ? undefined : (await deps.checkout?.(repo, c.number, c.head_oid)) ?? undefined;
       if (checkout) input.repo_dir = REPO_PATH;
       return await runModelStep(db, REVIEW_OPUS, input, {

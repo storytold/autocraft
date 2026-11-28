@@ -12,7 +12,6 @@ import { codeDiff, ghMerged, type MergedFetcher } from "../review/diff.ts";
 import { MAX_DIFF_CHARS } from "../review/opus.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForCommit, checkoutForPr } from "../sandbox/index.ts";
-import { defaultReviewWorkspace, inReviewWorkspace, type ReviewWorkspaceDeps } from "../fixsession/review.ts";
 import { MAX_MERGED_DIFF_CHARS, type FiledBefore, type Finding, type PostmergeCommit, type PostmergePr } from "./parse.ts";
 import { relatedOpen, reviewHistory } from "./related.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
@@ -44,8 +43,6 @@ export type PostmergeDeps = {
   /** Host directory with a read-only checkout of `sha` for a sandboxed call, or null to ask without tools. Absent: no tools. `head` is the PR's last head, the fallback when GitHub names no merge commit. */
   checkout?: (repo: string, number: number, sha: string | null, head: string) => Promise<string | null>;
   semantic?: SemanticDeps;
-  /** Where a review can run in the PR's fix session workspace, at the merge commit (src/fixsession/review.ts); absent: always read-only. */
-  workspace?: ReviewWorkspaceDeps | null;
 };
 export type PostmergeSummary = { runId: string; repo: string; candidates: number; reviewed: number; findings: number; defects: number; failed: string[] };
 
@@ -57,7 +54,6 @@ export function defaultPostmergeDeps(db: Db): PostmergeDeps {
       const { branchOf } = await import("../github/fork.ts");
       return checkoutForCommit(repo, await branchOf(db, repo), sha, console.log);
     },
-    workspace: defaultReviewWorkspace(),
   };
 }
 
@@ -133,17 +129,14 @@ export async function runPostmerge(db: Db, params: PostmergeParams, log: (line: 
       return;
     }
     const { input } = p;
+    const checkout = (await deps.checkout?.(repo, c.number, p.sha, c.head_oid)) ?? undefined;
+    if (checkout) input.repo_dir = REPO_PATH;
     const dir = referenceDir(repo);
     const semantic = dir ? deps.semantic ?? defaultSemanticDeps(db, input.ref) : undefined;
-    // The workspace holds the merge commit, or the PR's last head when GitHub names none.
-    const r = await inReviewWorkspace(db, deps.workspace, c, p.sha ?? c.head_oid, log, async (workspace) => {
-      const checkout = workspace ? undefined : (await deps.checkout?.(repo, c.number, p.sha, c.head_oid)) ?? undefined;
-      if (checkout) input.repo_dir = REPO_PATH;
-      return await runModelStep(db, POSTMERGE_OPUS, input, {
-        model: deps.model, checkout, reference: checkout || workspace ? dir : undefined, ...(workspace && { workspace }), ctx: { dir, semantic },
-        usage: { run: runId, agent: `postmerge-${refOf(c).replace("#", "-")}`, stage: "postmerge", items: (ok) => (ok ? 1 : 0) },
-        onReply: (reply) => { if (reply.fixTurn) log(`  ${refOf(c)}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
-      });
+    const r = await runModelStep(db, POSTMERGE_OPUS, input, {
+      model: deps.model, checkout, reference: checkout ? dir : undefined, ctx: { dir, semantic },
+      usage: { run: runId, agent: `postmerge-${refOf(c).replace("#", "-")}`, stage: "postmerge", items: (ok) => (ok ? 1 : 0) },
+      onReply: (reply) => { if (reply.fixTurn) log(`  ${refOf(c)}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
     });
     const got: Finding[] | null = r.ok ? r.value : null;
     if (got) {

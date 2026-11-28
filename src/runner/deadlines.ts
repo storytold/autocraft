@@ -3,6 +3,8 @@
 // times the items of the job. The registry's `maxMin` (src/stages/registry.ts) is the floor from the history of finished jobs;
 // the deadline is the larger of the two, so a job is never stopped while the code would still let it work.
 import { CHECK_MAX_WALL_MS, LINT_MAX_ROUNDS, REVIEW_WORKSPACE_BUILD_MS, REVIEW_WORKSPACE_READY_MS } from "../core/rules.ts";
+import { FETCH_CALL_MS } from "../build/workspace-fetch.ts";
+import { SEED_LIMIT_MS } from "../build/workspace-launch.ts";
 import { CLAUDE_PROMPTS, type ClaudePromptId } from "../prompts/index.ts";
 import { CHECK_FOLLOW_UPS, FIX_FOLLOW_UP_CALL, FIX_SESSION_CALL } from "../fixsession/report.ts";
 import type { FixStep } from "../data/fixsession/types.ts";
@@ -31,7 +33,7 @@ export const STEP_PLANS: Record<string, Plan> = {
   "areas-suggest": { calls: [item("areas.suggest")], items: 1 },
   "opus-review": { calls: [{ id: "review.opus", workspace: true }], items: 10 },
   premerge: { calls: [{ id: "premerge.opus", workspace: true }], items: 10 },
-  postmerge: { calls: [{ id: "postmerge.opus", workspace: true }], items: 10 },
+  postmerge: { calls: [item("postmerge.opus")], items: 10 },
   fixup: { calls: [item("fixup.patch", true), item("fixup.conflict", true)], items: 5 },
   cifix: { calls: [item("cifix.patch", true)], items: 5 },
   "main-fix": { calls: [item("mainfix.classify"), item("cifix.patch", true)], items: 1 },
@@ -64,14 +66,16 @@ const SESSION_BOUNDS: Record<string, () => { bound: number; longest: number }> =
 
 /**
  * Minutes one call can take: each attempt runs the first turn and the lint follow-ups at the prompt's time limit, a patch call adds the
- * check tool's wall time, and a review in its PR's workspace its build time; that review also waits for the workspace once.
+ * check tool's wall time, and a review in its PR's workspace its build time. That review also gets the workspace ready once: the wait
+ * for it (one deadline, REVIEW_WORKSPACE_READY_MS), then the reseed and the dependency fetch, each at its own limit.
  */
 function callMin(c: Call): number {
   const p = CLAUDE_PROMPTS[c.id];
   const turns = 1 + (c.lint ? LINT_MAX_ROUNDS : 0);
   const check = "sandbox" in p && p.sandbox && "check" in p.sandbox && p.sandbox.check ? CHECK_MAX_WALL_MS / 60_000 : 0;
   const build = c.workspace ? REVIEW_WORKSPACE_BUILD_MS / 60_000 : 0;
-  return p.limits.attempts * (turns * p.limits.timeoutSeconds / 60 + check + build) + (c.workspace ? REVIEW_WORKSPACE_READY_MS / 60_000 : 0);
+  const ready = c.workspace ? (REVIEW_WORKSPACE_READY_MS + SEED_LIMIT_MS + FETCH_CALL_MS) / 60_000 : 0;
+  return p.limits.attempts * (turns * p.limits.timeoutSeconds / 60 + check + build) + ready;
 }
 
 /** The longest the code lets a job of `step` work with `items` items (default: the plan's), in minutes, or null for a step with no model call. */

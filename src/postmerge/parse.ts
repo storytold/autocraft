@@ -40,8 +40,6 @@ export type PostmergePr = {
   repo_dir?: string;
   /** Set when the repo's reference folder is mounted at /reference; not part of the quoted JSON. */
   reference?: boolean;
-  /** Set when the call works in the pull request's workspace pod (askClaude's WorkspaceAsk); not part of the quoted JSON. */
-  workspace?: boolean;
   title: string;
   body: string;
   author: string | null;
