@@ -119,7 +119,7 @@ const STEP_WORD: Record<StepValue, { label: string; short: string }> = {
   batch: { label: "Batch", short: "Batch" },
   merge: { label: "Merge", short: "Merge" },
   recommend: { label: "Recommendation", short: "Waiting" },
-  "new-commits": { label: "Review new commits", short: "New commits" },
+  "new-commits": { label: "Review new commits", short: "Commits" },
 };
 const STEP_STATE: Record<BrowseStepState, { word: string; icon: Icon }> = {
   running: { word: "running", icon: PlayIcon },
@@ -130,9 +130,10 @@ const STEP_STATE: Record<BrowseStepState, { word: string; icon: Icon }> = {
 
 /** "Fix-up · running". Back with its recommendation the state says it all: "Waiting for an answer". */
 function stepText(r: BrowseRow, step: NonNullable<BrowseRow["step"]>): string {
-  const state = r.autocraft === "stopped" ? t("stopped by the rule") : t(STEP_STATE[step.state].word);
-  if (step.name === "recommend" && (step.state === "answer" || step.state === "stopped")) return state.charAt(0).toUpperCase() + state.slice(1);
-  return t("{step} · {state}", { step: t(STEP_WORD[step.name].label), state });
+  const rule = r.autocraft === "stopped";
+  if (step.name === "recommend" && step.state === "answer") return t("Waiting for an answer");
+  if (step.name === "recommend" && step.state === "stopped") return rule ? t("Stopped by the rule") : t("Stopped");
+  return t("{step} · {state}", { step: t(STEP_WORD[step.name].label), state: rule ? t("stopped by the rule") : t(STEP_STATE[step.state].word) });
 }
 
 const priorityTone = (p: string): Tone => (p === "P0" ? "bad" : p === "P1" ? "warn" : "neutral");
@@ -234,7 +235,13 @@ function factsOf(r: BrowseRow, compact = false) {
 function StepBadge({ r, step, short, className }: { r: BrowseRow; step: NonNullable<BrowseRow["step"]>; short: boolean; className?: string }) {
   const text = stepText(r, step);
   const tone = AUTOCRAFT_WORD[r.autocraft]?.tone ?? "accent";
-  if (!short) return <Badge tone={tone} className={cn("relative z-10", className)}>{text}</Badge>;
+  if (!short) {
+    return (
+      <span title={t(AUTOCRAFT_TITLE[r.autocraft])} className="relative z-10">
+        <Badge tone={tone} className={className}>{text}</Badge>
+      </span>
+    );
+  }
   const StateIcon = STEP_STATE[step.state].icon;
   return (
     <span title={text} className="relative z-10">
@@ -283,9 +290,9 @@ function PhoneFacts({ r, byCreated }: { r: BrowseRow; byCreated: boolean }) {
   const more = r.labels.length - shownLabels;
   return (
     <div className={cn("mt-1 flex flex-col gap-1.5 text-xs text-ink/70", UNDER_TITLE)}>
-      {/* Slot widths hold the widest value of each (a state word, P0, XL, two-digit counts, a five-digit number); a longer step widens its slot. */}
+      {/* Slot widths hold the widest value of each (a step's short name with its icon, "Implement", P0, XL, two-digit counts, a five-digit number). */}
       <div className="flex h-5 flex-nowrap items-center gap-1 overflow-hidden">
-        {slot(f.state(true), "min-w-[3.6rem]")}
+        {slot(f.state(true), "w-[5.45rem]")}
         {slot(f.priority, "w-[1.75rem]")}
         {slot(f.size, "w-[1.4rem]")}
         {slot(f.ci, "w-4")}

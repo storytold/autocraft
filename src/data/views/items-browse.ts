@@ -1,5 +1,5 @@
 // reads: mirror.items, mirror.comments, triage.item_rank, triage.item_areas, triage.dupe_group_items, triage.classifications, workflow.item_workflows,
-//        workflow.workflow_events, discord.discord_mentions, security.security_findings, security.security_quiet_prs, review.opus_reviews, intake.outside_holds, planner.liveness_items, access.access
+//        workflow.workflow_events, discord.discord_mentions, review.opus_reviews, intake.outside_holds, planner.liveness_items, access.access
 // The Items browser: the items of the visible repos that match a parsed query (src/core/item-query.ts), one page in the asked order,
 // with the facts each row shows. Every request is a fixed number of statements: the page, its total and, when asked, the count of
 // every preset and the quick-filter values. All of them start from one derived table of an item and its narrow facts.
@@ -17,7 +17,10 @@ import { stuckItem } from "../planner/fragments.ts";
 import { quietPrExpr } from "../security/fragments.ts";
 import { hasSecurityVerdict, isDuplicateClose } from "../triage/fragments.ts";
 import { LIVE_STATES } from "../workflow/fragments.ts";
-import { ASKING_STATES, RULE_STARTER } from "../../workflow/types.ts";
+import { ASKING_STATES, RULE_STARTER, type Entry } from "../../workflow/types.ts";
+import { ROUND_STEP, stepsFor } from "../../workflow/status.ts";
+
+const ENTRIES: readonly Entry[] = ["review", "fixup", "implement", "merge"];
 import { textHit } from "./items.ts";
 import type { Scope } from "./types.ts";
 
@@ -100,23 +103,15 @@ function facts(db: Db, scope: BrowseScope, inner: (eb: kx.AnyEb) => Expression<S
         .when("lw.state", "=", "backlog").then("backlog")
         .when("lw.state", "in", ["done", "closed"]).then("done")
         .else("none").end().as("autocraft"),
-      // The step the live workflow is at: the one its advance pass recorded, or before its first pass where it starts (as stepsOf in
-      // src/dash/api/maintain-item.ts reads a row with no plan yet).
-      eb.case()
-        .when("w.id", "is", null).then(null)
-        .when("w.step", "is not", null).then(eb.ref("w.step"))
-        .when(eb.and([eb("w.state", "=", "recommending"), eb("w.approved_by", "is", null), eb("w.entry", "<>", "merge")])).then("recommend")
-        .when("w.state", "=", "recommending").then("merge")
-        .when("w.entry", "=", "merge").then("update from main")
-        .when(eb.and([eb("w.entry", "=", "implement"), eb("w.kind", "=", "issue")])).then("implement")
-        .else("review").end().as("step"),
-      // How it stands at that step, in the step list's words. A quiet pull request shows a viewer a blocker as a question, as its status comment does.
+      // The step the live workflow's advance pass recorded, while it is one of the workflow's steps (stepNamesOf): none before the
+      // first pass, nor once an approval given or withdrawn since changed the last step.
+      eb.case().when(validStep(eb)).then(eb.ref("w.step")).else(null).end().as("step"),
+      // How it stands at that step, in the step list's words.
       eb.case()
         .when("w.id", "is", null).then(null)
         .when(eb.and([eb("w.state", "in", [...ASKING_STATES]), eb("w.started_by", "=", RULE_STARTER), eb("w.approved_by", "is", null), eb("w.taken_by", "is", null)])).then("stopped")
         .when("w.state", "=", "recommending").then("answer")
-        .when(eb.and([eb("w.state", "=", "blocked"), ...(scope.staff ? [] : [eb.not(quietPrExpr(eb, "i.repo", "i.number"))])])).then("stopped")
-        .when("w.state", "=", "blocked").then("answer")
+        .when("w.state", "=", "blocked").then("stopped")
         .when("w.state", "=", "waiting").then("waiting")
         .else("running").end().as("step_state"),
       eb.case().when(eb.and([
@@ -127,6 +122,18 @@ function facts(db: Db, scope: BrowseScope, inner: (eb: kx.AnyEb) => Expression<S
       eb.case().when(isDuplicateClose(db, eb, "i.repo", "i.number")).then(1).else(0).end().as("duplicate"),
     ]);
 }
+
+/** The live workflow `w` has a recorded step that is one of its steps: the entry's steps, then merge when approved (always for the merge queue), else recommend; the review round may stand anywhere. */
+const validStep = (eb: kx.AnyEb) => {
+  const e = eb as any;
+  const approved = e.or([e("w.approved_by", "is not", null), e("w.entry", "=", "merge")]);
+  return e.and([e("w.step", "is not", null), e.or([
+    e("w.step", "=", ROUND_STEP),
+    e.and([e("w.step", "=", "merge"), approved]),
+    e.and([e("w.step", "=", "recommend"), e.not(approved)]),
+    ...ENTRIES.map((entry) => e.and([e("w.entry", "=", entry), e("w.step", "in", stepsFor(entry, true).filter((n) => n !== "merge"))])),
+  ])]) as Expression<SqlBool>;
+};
 
 /** The labels of the item `x` include one of `names`, case-insensitively. */
 const hasLabel = (db: Db, eb: kx.AnyEb, names: string[]) =>
