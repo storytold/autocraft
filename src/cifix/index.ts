@@ -59,6 +59,7 @@ import { foldFormat, queueLintFor, readLint } from "../prepush/index.ts";
 import { findingsWord, lintVerdict, testsNoteOf } from "../prepush/tests.ts";
 import { dropSessions, SessionLedger, sessionAsk, storeSessions, sweepSessions, type SessionAsk } from "../prepush/resume.ts";
 import type { LintPrevious } from "../fixup/patch.ts";
+import { failureLocations } from "../core/failure-locations.ts";
 import type { CiFailure, CifixPr } from "./types.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { ownerOf, slugOf } from "../owners.ts";
@@ -165,37 +166,13 @@ export function gitFormatDiff(text: string): string {
 }
 
 const DIFF_FILE = /^diff --git a\/(\S+) b\/\S+$/gm;
-const LOCATION = /^\s*--> ([\w./-]+\.rs):(\d+)/;
-const ERROR_LINE = /^\s*error(\[E\d+\])?: /;
-// `thread 'a::tests::b' (437684) panicked at src/a.rs:12:5:` (the thread id is printed by newer toolchains).
-const PANIC = /^\s*thread '([^'\n]*)'(?: \(\d+\))? panicked at ([\w./-]+\.rs):(\d+):\d+:\s*$/;
-const TEST_NAME = /^[A-Za-z_][\w]*(::[A-Za-z_][\w]*)*$/;
-
-/** A place in the repository a failure log names: a compile error or a panic, with the thread's test name for a panic. */
-export type FailureLocation = { file: string; line: number; test: string | null };
-
-/**
- * The places the log names, compile errors first: the compiler location line (`--> path:line`) directly after an `error`
- * line, then Rust panic lines (`thread '...' panicked at path:line:col:`) with a path inside the repository. The log is
- * untrusted, so no other mention counts and a test name is kept only when it is a Rust path.
- */
-export function failureLocations(log: string): FailureLocation[] {
-  const lines = log.split("\n");
-  const errors: FailureLocation[] = [], panics: FailureLocation[] = [];
-  lines.forEach((l, i) => {
-    const m = i > 0 && ERROR_LINE.test(lines[i - 1]!) ? LOCATION.exec(l) : null;
-    if (m) { errors.push({ file: m[1]!, line: Number(m[2]), test: null }); return; }
-    const p = PANIC.exec(l);
-    if (p && !p[2]!.startsWith("/") && !p[2]!.split("/").includes("..")) panics.push({ file: p[2]!, line: Number(p[3]), test: TEST_NAME.test(p[1]!) && p[1] !== "main" ? p[1]! : null });
-  });
-  const seen = new Set<string>();
-  return errors.concat(panics).filter((x) => !seen.has(`${x.file}:${x.line}`) && !!seen.add(`${x.file}:${x.line}`));
-}
-
-/** The files of failureLocations, in its order. */
+/** The files a failure's compiler errors name (failureLocations), first seen first. */
 export function errorFiles(log: string): string[] {
-  return [...new Set(failureLocations(log).map((x) => x.file))];
+  return [...new Set(failureLocations(log).filter((x) => x.what === "error").map((x) => x.file))];
 }
+
+/** The files a failure's panics name. */
+const panicFiles = (log: string): string[] => [...new Set(failureLocations(log).filter((x) => x.what === "panic").map((x) => x.file))];
 
 type Fix = { patch: string; files: string[]; changed: number };
 
@@ -320,9 +297,9 @@ export async function patchFromFailure(db: Db, d: Pick<CifixDeps, "ask" | "check
   const { git, ref, title, repo, head, failure } = r;
   const text = failure.checks.flatMap((x) => x.steps.map((s) => s.tail)).join("\n");
   const scripts = await buildScriptsAt(git, head);
-  // Files a compiler error or a panic points at come first, then the files the diff changes; nothing else is editable. Test files are not editable by a CI fix.
+  // Files a compiler error points at come first, then the files the diff changes, then the files a panic points at; nothing else is editable. Test files are not editable by a CI fix.
   const cited = errorFiles(text);
-  const named = [...new Set(cited.concat([...r.diffText.matchAll(DIFF_FILE)].map((m) => m[1]!)))]
+  const named = [...new Set(cited.concat([...r.diffText.matchAll(DIFF_FILE)].map((m) => m[1]!), panicFiles(text)))]
     .filter((p) => editable(p, scripts) && !TEST_PATH.test(p)).slice(0, MAX_FILES);
   // With a sandbox checkout the model reads the files itself, so they are listed by path and no size limit applies.
   const checkout = (await r.checkout()) ?? undefined;

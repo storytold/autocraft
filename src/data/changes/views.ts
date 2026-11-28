@@ -107,8 +107,8 @@ export async function loadPatchSignature(db: Db, keys: KeySource): Promise<Map<R
   return out;
 }
 
-/** `testIssue`: an issue row of the head is for a failure only in test code (verdict code), not infra. */
-export type MainFixStates = { states: string[]; prNumber: number | null; unreadable?: string; issueNumber?: number; testIssue?: true };
+/** `testIssues`: the issue states (`issue-opening`, ...) whose rows at the head are all failures only in test code (verdict code), none infra. */
+export type MainFixStates = { states: string[]; prNumber: number | null; unreadable?: string; issueNumber?: number; testIssues?: string[] };
 
 /**
  * Main CI page text: the fix states, the lowest number of the fix PRs and of the opened issues, and why the failure log cannot be
@@ -117,6 +117,7 @@ export type MainFixStates = { states: string[]; prNumber: number | null; unreada
 export async function loadMainFixStates(db: Db, heads: { repo: string; headSha: string }[]): Promise<Map<string, MainFixStates>> {
   const out = new Map<string, MainFixStates>();
   if (!heads.length) return out;
+  const infra = new Set<string>(), test = new Map<string, Set<string>>();
   const k = queryDb(db).k as any;
   for (const part of kx.chunks(heads)) {
     const rows = await rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "state", "verdict", "reason", "pr_number", "issue_number"])
@@ -128,8 +129,15 @@ export async function loadMainFixStates(db: Db, heads: { repo: string; headSha: 
       if (r.state === "unreadable" && r.reason) e.unreadable = r.reason;
       if (r.state === "pr-opened" && r.pr_number !== null && (e.prNumber === null || Number(r.pr_number) < e.prNumber)) e.prNumber = Number(r.pr_number);
       if (r.state === "issue-opened" && r.issue_number !== null && (e.issueNumber === undefined || Number(r.issue_number) < e.issueNumber)) e.issueNumber = Number(r.issue_number);
-      if (r.state.startsWith("issue-") && r.verdict === "code") e.testIssue = true;
+      if (r.state.startsWith("issue-")) {
+        if (r.verdict === "code") (test.get(key) ?? test.set(key, new Set()).get(key)!).add(r.state);
+        else infra.add(`${key}\0${r.state}`);
+      }
     }
+  }
+  for (const [key, states] of test) {
+    const kept = [...states].filter((st) => !infra.has(`${key}\0${st}`));
+    if (kept.length) out.get(key)!.testIssues = kept;
   }
   return out;
 }

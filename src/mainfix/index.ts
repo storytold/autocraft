@@ -6,9 +6,9 @@
 //          (repo, check, culprit) is opened under the repo's approval, with the check, the run link and a scrubbed log excerpt: the
 //          row is `issue-opening` before the create, later red heads of the streak reuse its number, and a create whose outcome was
 //          lost is looked up in the audit and on GitHub before another one is made.
-//   code   a compile, test, lint or format failure: recorded as needs-fix for the fix PR step (`onCodeVerdict`). When every place
-//          the log names is test code, which a CI fix may not change, the fix PR step turns the rows into `issue-opening` and
-//          the red streak's issue (as for infra) names the failing test instead.
+//   code   a compile, test, lint or format failure: recorded as needs-fix for the fix PR step (`onCodeVerdict`). When no patch
+//          is made and every place the check's log names is test code, which a CI fix may not change, the fix PR step turns its
+//          rows into `issue-opening` and the red streak's issue (as for infra, kept apart from it by the verdict) names the test.
 // A failure log GitHub does not serve yet is recorded as an `unread` row at the head and read again once per main CI poll interval
 // for an hour, then hourly, while the head is the repo's newest and red (also a fix PR's re-read of the log); a log GitHub no longer
 // has, one with no job of the check, or one still unreadable after a day ends the head as `unreadable`, which needs a person.
@@ -443,20 +443,23 @@ function dueReruns(rows: readonly FixRow[], now: number): Map<number, FixRow[]> 
  */
 async function openInfraIssues(db: Db, repo: string, cur: Current, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By): Promise<string[]> {
   const open: string[] = [];
-  const checks = new Set((await loadMainFixes(db, { repo, states: ["issue-opening"] })).map((r) => r.check));
-  for (const check of checks) {
+  const opening = await loadMainFixes(db, { repo, states: ["issue-opening"] });
+  for (const check of new Set(opening.map((r) => r.check))) {
     const release = await leaseItem(db, `main-issue:${repo}:${check}`, log);
     if (!release) continue;
     try {
-      const why = await openInfraIssue(db, repo, check, cur, deps, log, s, by);
-      if (why) open.push(why);
+      for (const verdict of new Set(opening.filter((r) => r.check === check).map((r) => r.verdict))) {
+        const why = await openInfraIssue(db, repo, check, verdict, cur, deps, log, s, by);
+        if (why) open.push(why);
+      }
     } finally { await release(); }
   }
   return open;
 }
 
-async function openInfraIssue(db: Db, repo: string, check: string, cur: Current, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By): Promise<string | null> {
-  const stored = (await loadMainFixes(db, { repo, states: ["issue-opening", "issue-opened", "declined"] })).filter((r) => r.check === check);
+/** One issue per check and verdict: an infra issue and a failing-test issue (verdict code) of one check are apart. */
+async function openInfraIssue(db: Db, repo: string, check: string, verdict: MainFixVerdict, cur: Current, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By): Promise<string | null> {
+  const stored = (await loadMainFixes(db, { repo, states: ["issue-opening", "issue-opened", "declined"] })).filter((r) => r.check === check && r.verdict === verdict);
   const rows = stored.filter((r) => r.state === "issue-opening");
   const newest = rows.at(-1);
   if (!newest) return null;
@@ -470,7 +473,7 @@ async function openInfraIssue(db: Db, repo: string, check: string, cur: Current,
   const had = streak(newest) ? stored.find((r) => r.state === "issue-opened" && r.issueNumber !== null && streak(r)) ?? stored.find((r) => r.state === "declined" && streak(r)) : undefined;
   if (had) return await end(had.state, { issueNumber: had.issueNumber });
   // A create an earlier run began: its audit row tells the issue, and one that ended without a known outcome is looked up on GitHub.
-  const began = (await listAudit(db, { actions: ["postmerge-file"], targets: rows.map(issueTarget), order: "desc" })).filter((a) => a.details?.check === check && a.at >= rows[0]!.createdAt);
+  const began = (await listAudit(db, { actions: ["postmerge-file"], targets: rows.map(issueTarget), order: "desc" })).filter((a) => a.details?.check === check && (a.details?.verdict ?? "infra") === verdict && a.at >= rows[0]!.createdAt);
   const done = began.map((a) => /\/issues\/(\d+)$/.exec(a.details?.state === "done" ? String(a.details.url ?? "") : "")).find((m) => m !== null);
   if (done) return await end("issue-opened", { issueNumber: Number(done[1]) });
   // The next result tells whether the streak goes on.
@@ -486,7 +489,7 @@ async function openInfraIssue(db: Db, repo: string, check: string, cur: Current,
   const g = await guardRepo(db, repo, "main-fix", by);
   if ("refused" in g) { log(`  ${repo}: issue for ${check} not opened: ${g.refused}`); return await end("issue-failed", {}, oneLine(g.refused, 100)); }
   try {
-    const made = await createIssue({ db, login: ACTOR }, g, deps.exec, { repo, target: issueTarget(newest), title: issueTitle(newest), body: issueBody(newest) }, newest.verdict === "code" ? { by: "fixed" } : { by: "model", kind: "issue", model: NOTE_MODEL }, { check });
+    const made = await createIssue({ db, login: ACTOR }, g, deps.exec, { repo, target: issueTarget(newest), title: issueTitle(newest), body: issueBody(newest) }, verdict === "code" ? { by: "fixed" } : { by: "model", kind: "issue", model: NOTE_MODEL }, { check, verdict });
     await end("issue-opened", { issueNumber: made.number });
     s.issues++;
     log(`  ${repo}: opened ${made.url}`);
@@ -541,6 +544,7 @@ export async function runMainFix(db: Db, params: { repo: string; onHandled?: (n:
       }
     }
   }
+  const unsettled = await openInfraIssues(db, repo, cur, deps, log, s, by);
   if (deps.fix) {
     const asHead = (c: Current | null) => (c ? { headSha: c.headSha, branch: c.branch, state: c.state, redSince: c.redSince, culprit: c.culprit, culpritPr: c.culpritPr } : null);
     const r = await openFixPrs({
@@ -549,9 +553,10 @@ export async function runMainFix(db: Db, params: { repo: string; onHandled?: (n:
       unread: async (head, why, permanent) => await markUnread(db, repo, head, why, permanent, deps.now().toISOString()),
     }, bump);
     s.prs = r.opened;
+    // A check the fix PR step turned into a failing-test issue row gets its issue in this run, at the head as it is now.
+    const now = r.issue ? await currentOf(db, repo) : null;
+    if (now) unsettled.push(...await openInfraIssues(db, repo, now, deps, log, s, by));
   }
-  // After the fix PR step, which turns a failure only in test code into an issue row.
-  const unsettled = await openInfraIssues(db, repo, cur, deps, log, s, by);
   log(`main-fix ${repo}: classified ${s.classified}, reran ${s.reran}, needs fix ${s.needsFix}, issues ${s.issues}, fix PRs ${s.prs}${s.note ? `; ${s.note}` : ""}`);
   // The job fails: the failure backoff spaces the next look (a paced write's message is skipped by it, so the next pass runs it again).
   if (unsettled.length) throw new Error(unsettled.join("; "));

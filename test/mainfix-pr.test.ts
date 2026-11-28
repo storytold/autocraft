@@ -26,7 +26,7 @@ function git(cwd: string, ...args: string[]): string {
 const BROKEN = "fn a() -> i32 {\n    1\n}\nfn main() {\n    let x: i32 = b();\n}\n";
 
 /** A repo whose head has a compile error, the patch that fixes it, and the fork the PR branch is pushed to. */
-async function world(o: { source?: string; log?: string } = {}) {
+async function world(o: { source?: string; log?: string; reply?: string | null } = {}) {
   const work = mkdtempSync(join(dir, "work-"));
   git(work, "init", "-q", "-b", "main");
   mkdirSync(join(work, "src"));
@@ -77,7 +77,7 @@ async function world(o: { source?: string; log?: string } = {}) {
     gh, exec, now: () => new Date(T0), classify: async () => null,
     fix: {
       root: join(dir, "fixups"),
-      ask: async (_db, input) => { const i = (input as { previous?: { patch: string; findings: string[] }; files: unknown }[])[0]!; asked.push({ previous: i.previous, files: i.files }); return patch; },
+      ask: async (_db, input) => { const i = (input as { previous?: { patch: string; findings: string[] }; files: unknown }[])[0]!; asked.push({ previous: i.previous, files: i.files }); return o.reply === undefined ? patch : o.reply; },
       check: async () => '{"verdict":"approve","reasons":"fixes the call","problems":[]}',
       checkout: async () => join(dir, "checkout"),
     },
@@ -140,12 +140,20 @@ test("findings go back to the model with the earlier patch; the second clean pat
   assert.equal(l.asked.length, 2);
 });
 
-test("a red head whose log names only a panic inside a test of a src file opens an issue instead of a patch", async () => {
+test("a panic inside a test whose patch could not be made opens an issue naming the test; one outside the tests stays fix-failed", async () => {
   const source = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {\n        assert_eq!(super::add(1, 1), 3);\n    }\n}\n";
-  const w = await world({ source, log: "test\tcargo test\tthread 'tests::adds' (437684) panicked at src/lib.rs:9:9:\ntest\tcargo test\tassertion `left == right` failed\n" });
+  const panicAt = (line: number) => `test\tcargo test\tthread 'tests::adds' (437684) panicked at src/lib.rs:${line}:9:\ntest\tcargo test\tassertion \`left == right\` failed\n`;
+  const row = async (db: Db) => (await db.get(db.k.selectFrom("main_fixes").select(["state", "issue_number as issue", "reason"])))!;
+
+  const w = await world({ source, log: panicAt(9), reply: null });
   await w.step();
-  const row = await w.db.get(w.db.k.selectFrom("main_fixes").select(["state", "issue_number as issue", "reason"]));
-  assert.deepEqual([row!.state, Number(row!.issue), w.asked.length, w.log.opened, w.log.issues.length], ["issue-opened", 41, 0, 0, 1]);
-  assert.match(String(row!.reason), /tests::adds .*src\/lib\.rs:9/);
+  const r = await row(w.db);
+  assert.deepEqual([r.state, Number(r.issue), w.asked.length, w.log.opened, w.log.issues.length], ["issue-opened", 41, 1, 0, 1], "the patch is tried first");
+  assert.match(String(r.reason), /tests::adds fails at src\/lib\.rs:9/);
+  assert.match(w.log.issues[0]!.title, /failing test/);
   assert.match(w.log.issues[0]!.body, /No fix PR was opened: test tests::adds fails at src\/lib\.rs:9/);
+
+  const lib = await world({ source, log: panicAt(2), reply: null });
+  await lib.step();
+  assert.deepEqual([(await row(lib.db)).state, lib.log.issues.length], ["fix-failed", 0]);
 });

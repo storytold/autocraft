@@ -9,7 +9,8 @@ const DISABLING = new Set(["allow", "ignore", "warn", "expect", "cfg_attr", "sho
 
 type Range = { from: number; to: number };
 type Code = { t: string; line: number }[];
-type Attr = { inner: boolean; name: string; last: string; idents: Set<string>; span: Range; item: Range | null };
+/** `block`: for an inner `cfg` attribute with `test`, the lines of the block it sits in (a `mod x { #![...] }`); null at the file's top level. */
+type Attr = { inner: boolean; name: string; last: string; idents: Set<string>; span: Range; item: Range | null; block: Range | null };
 
 /** The tokens of `src` other than comments (see rustTokenSpans), each with its 1-based line; null when not tokenizable. */
 function codeTokens(src: string): Code | null {
@@ -33,6 +34,17 @@ function closing(code: Code, i: number): number {
   for (let j = i; j < code.length; j++) {
     if (OPEN.has(code[j]!.t)) depth++;
     else if (CLOSE.has(code[j]!.t) && --depth === 0) return j;
+  }
+  return -1;
+}
+
+/** The index of the `{` of the innermost block that holds token `i`, or -1 at the top level. */
+function opening(code: Code, i: number): number {
+  let depth = 0;
+  for (let j = i - 1; j >= 0; j--) {
+    const t = code[j]!.t;
+    if (CLOSE.has(t)) depth++;
+    else if (OPEN.has(t)) { if (depth === 0 && t === "p:{") return j; if (depth > 0) depth--; }
   }
   return -1;
 }
@@ -79,7 +91,14 @@ function attributes(code: Code): Attr[] | null {
       if (end < 0) return null;
       item = { from: code[i]!.line, to: code[end]!.line };
     }
-    out.push({ inner, name, last, idents, span: { from: code[i]!.line, to: code[close]!.line }, item });
+    let block: Range | null = null;
+    if (inner && name === "cfg" && idents.has("test")) {
+      const b = opening(code, i);
+      const end = b < 0 ? -1 : closing(code, b);
+      if (b >= 0 && end < 0) return null;
+      if (b >= 0) block = { from: code[b]!.line, to: code[end]!.line };
+    }
+    out.push({ inner, name, last, idents, span: { from: code[i]!.line, to: code[close]!.line }, item, block });
   }
   return out;
 }
@@ -161,8 +180,8 @@ export function guardPatch(diff: string, sides: Map<string, { before: string; af
 }
 
 /**
- * Whether line `line` (1-based) of `path` is test code: a test file (TEST_PATH), a Rust file that is test-only
- * (`#![cfg(test)]`), or a line inside an item a test attribute guards (`#[cfg(test)]`, `#[test]`, `#[tokio::test]`; not
+ * Whether line `line` (1-based) of `path` is test code: a test file (TEST_PATH), a Rust file or module that is test-only
+ * (`#![cfg(test)]` at its top), or a line inside an item a test attribute guards (`#[cfg(test)]`, `#[test]`, `#[tokio::test]`; not
  * `cfg(not(test))` or `cfg(any(test, ...))`). False when `src` cannot be read as Rust.
  */
 export function isTestLine(path: string, src: string, line: number): boolean {
@@ -172,7 +191,8 @@ export function isTestLine(path: string, src: string, line: number): boolean {
   const attrs = code && attributes(code);
   if (!attrs) return false;
   const onlyTest = (a: Attr): boolean => a.last === "test" || (isTestCfg(a) && !a.idents.has("not") && !a.idents.has("any"));
-  return attrs.some((a) => onlyTest(a) && (a.inner || (a.item !== null && line >= a.item.from && line <= a.item.to)));
+  const within = (r: Range | null): boolean => r !== null && line >= r.from && line <= r.to;
+  return attrs.some((a) => onlyTest(a) && (a.inner ? a.block === null || within(a.block) : within(a.item)));
 }
 
 /** Pairs of punctuation characters that form one operator; written apart (`- >`) they are other tokens. Other neighbours (`=&`, `{ }`) may be respaced freely. */
