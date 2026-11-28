@@ -40,9 +40,9 @@ import { loadHeldFixups } from "../../data/views/held-fixups.ts";
 import { queuedOfItems } from "../../runner/why-queued.ts";
 import * as promptApi from "../api/prompts.ts";
 import { BODY_MAX_BYTES } from "../../prompts/checks.ts";
-import { GUIDANCE_PROMPT_ID } from "../../prompts/index.ts";
+import { BASE_SCOPE, GUIDANCE_PROMPT_ID } from "../../prompts/index.ts";
 import { joinSegments } from "../../prompts/locks.ts";
-import { listRevisions } from "../../data/prompts/index.ts";
+import { listRevisions, textAt } from "../../data/prompts/index.ts";
 import type { PromptDiffLine, PromptRevisionInfo, PromptSaveReply } from "../../../web/src/api/types.ts";
 
 export const MCP_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -293,7 +293,7 @@ export const PROMPT_READ_TOOLS = [
   },
   {
     name: "get_prompt",
-    description: "One prompt's text as it runs, in its text form: editable text with the locked blocks marked ⟦locked:NAME⟧…⟦/locked⟧, which an edit keeps exactly as they are (edit_prompt takes the same form). Jev prompts are shown as their request. With repo: that repository's guidance.",
+    description: `One prompt's text as it runs, in its text form: editable text with the locked blocks marked ⟦locked:NAME⟧…⟦/locked⟧, which an edit keeps exactly as they are (edit_prompt takes the same form). A Jev prompt's text form is the JSON of its questions' editable text, {"questions": {key: {"instructions": text, "criteria": {label: text}}}}, without each question's fixed opening sentence. With repo: that repository's guidance.`,
     inputSchema: {
       type: "object", additionalProperties: false, required: ["id"],
       properties: {
@@ -330,7 +330,7 @@ export const PROMPT_READ_TOOLS = [
 export const PROMPT_EDIT_TOOLS = [
   {
     name: "edit_prompt",
-    description: `Saves a new revision of a prompt, which runs from the next call on: the whole text form as get_prompt gives it, with every locked block unchanged, and a note saying why. The same checks as the Prompts page (locked blocks, placeholders, size, no credentials); a refused text stores nothing and the reply lists each problem. Instance-wide prompts: operators and maintainers with write access on a tracked repo with the pipeline on. With id ${GUIDANCE_PROMPT_ID} and repo: that repository's guidance (markdown, at most 4000 characters; empty removes it), for maintainers with write access on it. Jev prompts are edited with the Jev form on the dashboard. Send only text your user wrote or approved.`,
+    description: `Saves a new revision of a prompt, which runs from the next call on: the whole text form as get_prompt gives it, with every locked block unchanged, and a note saying why. The same checks as the Prompts page (locked blocks, placeholders, size, no credentials); a refused text stores nothing and the reply lists each problem. Instance-wide prompts: operators and maintainers with write access on a tracked repo with the pipeline on. With id ${GUIDANCE_PROMPT_ID} and repo: that repository's guidance (markdown, at most 4000 characters; empty removes it), for maintainers with write access on it. A Jev prompt takes the JSON text form get_prompt gives it, checked as a Jev prompt before it is saved: the same question keys and criteria labels, no type, model or state, no opening sentence, and no empty or oversized text. Send only text your user wrote or approved.`,
     inputSchema: {
       type: "object", additionalProperties: false, required: ["id", "body", "note"],
       properties: {
@@ -629,6 +629,11 @@ async function listPrompts(env: McpEnv, raw: unknown): Promise<ToolResult> {
     `Repository guidance (${GUIDANCE_PROMPT_ID}; received by ${g.prompts.join(", ")}): ${guided.length ? "" : "none yet."}`, ...guided].join("\n") };
 }
 
+/** A Jev prompt's JSON text form, indented to read and edit; as stored when it does not parse. */
+function indented(text: string): string {
+  try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
+}
+
 async function getPrompt(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const a = args(raw, { id: "id", repo: "repo", raw: "flag" }, ["id"]);
   const user = await env.user(false);
@@ -642,7 +647,7 @@ async function getPrompt(env: McpEnv, raw: unknown): Promise<ToolResult> {
   }
   if (query.repo) throw new BadArgs(`a repository has one guidance text: id ${GUIDANCE_PROMPT_ID} with repo`);
   const p = await promptApi.prompt(env.db, reqOf(user, { params }));
-  const body = p.runner === "claude" ? joinSegments(p.segments) : p.template;
+  const body = p.runner === "claude" ? joinSegments(p.segments) : indented(await textAt(env.db, p.id, BASE_SCOPE, "active"));
   if (a.raw) return { text: body };
   const e = p.edit;
   const head = [`${p.id} (${p.stage}, ${p.runner}): ${e.following ? "the release default runs" : "an edit runs"}${e.rev !== null ? `, active revision r${e.rev}` : ", no revision stored (the release default is r1)"}.`,
@@ -650,7 +655,7 @@ async function getPrompt(env: McpEnv, raw: unknown): Promise<ToolResult> {
     e.structureChanged ? "The edit no longer fits the release's locked blocks, so the release's text runs." : "",
     e.sameAs ? `It runs the text of ${e.sameAs}; edit that one.` : "",
     e.guidanceSlot ? "It receives each repository's guidance." : "",
-    p.runner === "jev" ? "Jev prompts are edited with the Jev form on the dashboard." : e.mayEdit ? `Your user may edit it: edit_prompt with the whole text form below, locked blocks unchanged${e.rev !== null ? `, base_rev ${e.rev}` : ""}.` : "Your user may read it only."].filter(Boolean).join("\n");
+    e.mayEdit ? `Your user may edit it: edit_prompt with the whole text form below, ${p.runner === "jev" ? "question keys and criteria labels" : "locked blocks"} unchanged${e.rev !== null ? `, base_rev ${e.rev}` : ""}.` : "Your user may read it only."].filter(Boolean).join("\n");
   return { text: `${head}\n\n${promptText(p.id, body)}` };
 }
 
