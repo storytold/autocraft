@@ -275,7 +275,7 @@ export const leasedBy = async (db: Db, login: string): Promise<number> => leased
 export const leaseTurnover = async (db: Db, login: string): Promise<string> => (await runners.loadLeaseTurnover(db, [login])).get(login.toLowerCase()) ?? "0:";
 
 /** Whether the queued call is for work the caller started or approved (started.ts): never a call bound to a user. */
-const startedBy = (s: StartedCalls, r: Cand, login: string): boolean => r.forLogin === null && s.owners(r.refs, r.step, r.tier).has(login.toLowerCase());
+const startedBy = (s: StartedCalls, r: Cand, login: string): boolean => r.forLogin === null && s.owners(r.refs, r.step, r.tier, r.repos).has(login.toLowerCase());
 
 /** What the claim order reads of the caller: Manual only, skipped tasks, item filter; whose calls are whose; whose picks count. */
 type OrderReads = { manual: boolean; skip: ReadonlySet<string>; items: ItemFilter; started: StartedCalls; pickers: ReadonlySet<string> };

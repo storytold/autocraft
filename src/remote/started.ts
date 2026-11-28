@@ -14,13 +14,15 @@
 // readyWithRoomExpr in src/data/runners/cross.ts): the starter's runner comes first, the taker's takes the work while it cannot.
 // An item workflow's work bound to a person (the implement step's calls, takeableBound) goes the same way: a taker's runner takes it
 // while no runner of that person is ready with room (boundTakers; the lease's condition is boundTakeAllows in cross.ts).
+// A repo's Fix red main approval (src/mainfix/approval.ts) makes the main-fix step's calls in that repo, which name no item, the work
+// of the person who gave it, until it is revoked (approvedFix; the lease's condition is the MAINFIX_STEP branch of startedWorkAllows).
 import type { ItemRef } from "../../web/src/api/types.ts";
 import type { Db } from "../db/index.ts";
 import type { Entry } from "../workflow/types.ts";
 import { judges, roleFits } from "./rules.ts";
 import { taskOfStep } from "./my-tasks.ts";
 import type { Tier } from "./protocol.ts";
-import { IDLE_FRESH_MS, LIVE_LEASE_MS, POSTMERGE_STEP, takeableBound } from "../data/runners/index.ts";
+import { IDLE_FRESH_MS, LIVE_LEASE_MS, MAINFIX_STEP, POSTMERGE_STEP, takeableBound } from "../data/runners/index.ts";
 import { scaled } from "./time-scale.ts";
 import { canWriteOf, freshReady, loadView, settingsOf, tiersOf, type RemoteView } from "./view.ts";
 
@@ -41,9 +43,10 @@ export type StartedCalls = {
   /**
    * The lowercase logins whose call one with these items is: those that started or approved work on every one of them, or took it onto
    * their Task Runner while no runner of those is ready with room. For a call of the
-   * post-merge review (`step` postmerge), a merged PR's workflow that ended done through that merge lately counts as such work.
+   * post-merge review (`step` postmerge), a merged PR's workflow that ended done through that merge lately counts as such work. A call
+   * of the main-fix step that names no item is the work of who approved Fix red main on every one of `repos`.
    */
-  owners: (refs: readonly ItemRef[], step?: string, tier?: Tier) => ReadonlySet<string>;
+  owners: (refs: readonly ItemRef[], step?: string, tier?: Tier, repos?: readonly string[]) => ReadonlySet<string>;
   /** The tiers the lowercase login's fresh, ready Task Runners offer while the login is not cooling off (empty: none). */
   tiersOf: (login: string) => ReadonlySet<Tier>;
   /** Whether one of the login's such runners, of a credential other than `refusedToken`, may take a call on `repos` of `prompt_id`. */
@@ -53,7 +56,7 @@ export type StartedCalls = {
   /**
    * The lowercase logins whose started work a call or job is: with `refs`, owners(refs); without (a job asked about before its
    * items are known), the logins with such a runner that have, in every one of `repos`, a live workflow AutoCraft is working
-   * on (running or waiting) whose steps include `step`'s task. No step: none.
+   * on (running or waiting) whose steps include `step`'s task, or for the main-fix step that approved Fix red main there. No step: none.
    */
   ownersFor: (c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; tier?: Tier }) => ReadonlySet<string>;
   /**
@@ -135,6 +138,13 @@ function buildStarted(v: RemoteView): StartedCalls {
     if (w.taken_by?.length) (taken.get(key) ?? taken.set(key, []).get(key)!).push(w);
   }
   for (const p of merged) add(byMerged, p.repo, p.prNumber, [p.started_by, p.approved_by]);
+  // Who approved Fix red main, by repo: the main-fix step's item-less calls there are theirs.
+  const fixers = new Map<string, string>(snapshot.started.mainfix.map((a) => [a.repo, a.by.toLowerCase()]));
+  const approvedFix = (repos: readonly string[], step?: string): ReadonlySet<string> => {
+    if (step !== MAINFIX_STEP || !repos.length) return NONE;
+    const by = fixers.get(repos[0]!);
+    return by !== undefined && repos.every((x) => fixers.get(x) === by) ? new Set([by]) : NONE;
+  };
   const runnersOf = new Map<string, { role: string; tokens: Map<number, Set<Tier>> }>();
   for (const r of snapshot.runners) {
     if (r.role === null || !freshReady(snapshot, r, nowMs)) continue;
@@ -155,9 +165,10 @@ function buildStarted(v: RemoteView): StartedCalls {
   const tokenLogins = [...tokensOf.keys()];
   // The room's write rule: only a non-write permission confirmed within the cache's lifetime leaves a login out.
   const canWrite = canWriteOf(snapshot);
-  const owners = (refs: readonly ItemRef[], step?: string, tier?: Tier): ReadonlySet<string> => {
+  const owners = (refs: readonly ItemRef[], step?: string, tier?: Tier, repos: readonly string[] = []): ReadonlySet<string> => {
+    if (!refs.length) return approvedFix(repos, step);
     const postmerge = step === POSTMERGE_STEP;
-    if (!refs.length || (!byItem.size && !(postmerge && byMerged.size))) return NONE;
+    if (!byItem.size && !(postmerge && byMerged.size)) return NONE;
     const of = (r: ItemRef): ReadonlySet<string> | undefined => {
       const key = `${r.repo}#${r.number}`, a = byItem.get(key), b = postmerge ? byMerged.get(key) : undefined;
       const t = (taken.get(key) ?? []).flatMap((w) => takersOf(w, tier));
@@ -169,8 +180,12 @@ function buildStarted(v: RemoteView): StartedCalls {
   };
   /** owners(refs) with `refs`; without, those of `logins` with a working live workflow in every repo whose steps include the step's task. */
   const startedBy = (logins: readonly string[], c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; tier?: Tier }): ReadonlySet<string> => {
-    if (c.refs) return owners(c.refs, c.step, c.tier);
+    if (c.refs) return owners(c.refs, c.step, c.tier, c.repos);
     if (c.step === undefined || !c.repos.length) return NONE;
+    if (c.step === MAINFIX_STEP) {
+      const fix = approvedFix(c.repos, c.step);
+      return new Set(logins.filter((l) => fix.has(l)));
+    }
     const task = taskOfStep(c.step);
     const working = live.filter((w) => WORKING.has(w.state) && ENTRY_TASKS[w.entry as Entry]?.has(task));
     return new Set(logins.filter((l) => c.repos.every((x) => working.some((w) => w.repo === x && peopleOf(w, c.tier).some((b) => b?.toLowerCase() === l)))));
@@ -216,6 +231,6 @@ export function heldFor(s: StartedCalls, c: HeldCall, login: string | null, nowM
   if (c.forLogin !== null || c.since < nowMs - STARTED_HOLD_MS) return null;
   const self = login?.toLowerCase() ?? null;
   const judging = judges(c.prompt_id);
-  for (const o of s.owners(c.refs, c.step, c.tier)) if (o !== self && !(judging && c.authors.has(o)) && s.canTake(o, c)) return o;
+  for (const o of s.owners(c.refs, c.step, c.tier, c.repos)) if (o !== self && !(judging && c.authors.has(o)) && s.canTake(o, c)) return o;
   return null;
 }

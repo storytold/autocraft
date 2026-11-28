@@ -26,7 +26,7 @@ const row = (tokenId: number, login: string, o: Partial<RunnerRow> = {}): Runner
 });
 const view = (runners: RunnerRow[], settings: Record<string, Partial<UserSettings>> = {}): RemoteView => ({
   now: NOW, accepted: ACCEPTED, snapshot: {
-    at: NOW, runners, cooled: new Map(), denied: new Set(), leasedByLogin: new Map(), started: { live: [], prs: [], merged: [] },
+    at: NOW, runners, cooled: new Map(), denied: new Set(), leasedByLogin: new Map(), started: { live: [], prs: [], merged: [], mainfix: [] },
     settings: new Map(Object.entries(settings).map(([l, s]) => [l as never, { reserve: { fiveHour: 20, weekly: 20 }, repos: [], maxCalls: null, interactiveSlots: null, manualOnly: false, skipTasks: [], taskItems: "all", runnerPrivate: false, ...s }])),
   } satisfies RunnerSnapshot,
 });

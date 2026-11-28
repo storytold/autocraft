@@ -1,4 +1,4 @@
-// reads: workflow.item_workflows, workflow.item_runners (and through workflow.worksOnPr implement.implementations), mirror.items, access.mcp_tokens, access.access
+// reads: workflow.item_workflows, workflow.item_runners (and through workflow.worksOnPr implement.implementations), mirror.items, access.mcp_tokens, access.access, control.repo_step_approvals
 // The conditions that must hold at the instant of the lease, under the login's lock, so they cannot be loaded beforehand.
 import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
@@ -14,6 +14,9 @@ import { unlease } from "./calls-unlease.ts";
 
 /** The step of the post-merge review: its calls (the review and the calls it makes, a reference check say) are work of the workflow that merged their PR (endedByMerge), also once it ended. */
 export const POSTMERGE_STEP = "postmerge";
+
+/** The step of Fix red main: its calls name no item and are the work of who approved Fix red main on the call's repo (repo_step_approvals, step `mainfix`). */
+export const MAINFIX_STEP = "main-fix";
 
 /**
  * Some Task Runner of a login the workflow `alias` (an `item_workflows` row) names in `cols` could run the call now: a live runner
@@ -48,15 +51,16 @@ export function readyWithRoomExpr(db: Db, eb: Eb, alias: string, cols: readonly 
 }
 
 /**
- * The started-work condition inside the lease update: every item of the call (`remote_call_items`) has a live workflow started or
- * approved by `login`, or is the PR that one works on. A live workflow whose work `login` took onto their Task Runner (`item_runners`,
+ * The started-work condition inside the lease update: the call names at least one item (`remote_call_items`) and every one has a live
+ * workflow started or approved by `login`, or is the PR that one works on. A live workflow whose work `login` took onto their Task Runner (`item_runners`,
  * not released) counts too while no Task Runner of its starter or approver could run the call now (readyWithRoomExpr, over `tierTokens`:
  * the credentials that serve the call's tier; none given, none does). With `stepRef` (the
  * call's `step` column), a call of the post-merge review's item may instead be a merged PR whose workflow, started or approved by
  * `login`, ended done through that merge since `now` less MERGED_WORK_MS (src/data/workflow/fragments.ts endedByMerge, which the Task
- * Runner snapshot reads too).
+ * Runner snapshot reads too). With `stepRef` and `repoRef` (the call's `repo` column), a call of the main-fix step (MAINFIX_STEP) that
+ * names no item may instead be on a repo whose Fix red main approval `login` gave (StartedCalls.owners in src/remote/started.ts).
  */
-export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: string, o: { stepRef?: string; now?: number; tierTokens?: readonly number[] } = {}): Expression<SqlBool> {
+export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: string, o: { stepRef?: string; repoRef?: string; now?: number; tierTokens?: readonly number[] } = {}): Expression<SqlBool> {
   const w = schemaEb(eb) as any;
   const one = w.lit(1).as("one");
   const now = o.now ?? Date.now();
@@ -75,7 +79,15 @@ export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: stri
       .where((x: any) => by(x, "mw")).where((x: any) => endedByMerge(x, "mw", `${item}.repo`, `${item}.number`, since, via))));
     return e.or([live, e.and([e(o.stepRef, "=", POSTMERGE_STEP), e.or(merged)])]);
   };
-  return w.not(w.exists(schemaEb(w).selectFrom("main.remote_call_items as ci").select(one).where("ci.call_id", "=", ref<number>(callIdRef)).where((e: any) => e.not(owns(e, "ci")))));
+  const items = () => schemaEb(w).selectFrom("main.remote_call_items as ci").select(one).where("ci.call_id", "=", ref<number>(callIdRef));
+  const itemsOwned = w.and([w.exists(items()), w.not(w.exists(items().where((e: any) => e.not(owns(e, "ci")))))]);
+  if (o.stepRef === undefined || o.repoRef === undefined) return itemsOwned;
+  const fixApproved = w.and([
+    w(o.stepRef, "=", MAINFIX_STEP),
+    w.not(w.exists(items())),
+    w.exists(schemaEb(w).selectFrom("main.repo_step_approvals as fa").select(one).where("fa.repo", "=", ref<string>(o.repoRef)).where("fa.step", "=", "mainfix").where(ciEq(db, "fa.by", w.val(login)))),
+  ]);
+  return w.or([itemsOwned, fixApproved]);
 }
 
 /**

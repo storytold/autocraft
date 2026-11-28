@@ -26,6 +26,7 @@ import { takerTest } from "../src/remote/takers.ts";
 import { insertWorkflow, updateWorkflow } from "../src/workflow/store.ts";
 import { releaseItemRunner, takeItemRunner } from "../src/data/workflow/index.ts";
 import { STARTED_HOLD_MS } from "../src/remote/started.ts";
+import { setMainFixApproval } from "../src/mainfix/approval.ts";
 import { allocation, poolRoom, repoBatches } from "../src/agents/call.ts";
 import { pool } from "../src/classify/run.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -549,6 +550,21 @@ describe("picks and Manual only", async () => {
     await setUserRepos(db, "alice", []);
     await updateWorkflow(db, wf, { state: "done" });
     for (const login of ["alice", "bob", "olga"]) await ready(login);
+    await clear();
+  });
+
+  test("a repo's Fix red main approval makes its main-fix calls the approver's: their runner takes them outside its repos, others pass them over", async () => {
+    await setUserRepos(db, "alice", ["deckcraft"]);
+    const call = await q({ items: [], promptId: "mainfix.classify" });
+    await db.run(db.k.updateTable("remote_calls").set({ repo: "photocraft" }).where("id", "=", call));
+    dropQueueCache(db);
+    assert.equal(await leased("alice"), null, "no approval: photocraft is outside her repos");
+    await setMainFixApproval(db, "alice", "photocraft", true);
+    dropQueueCache(db);
+    assert.equal(await leased("bob"), null, "bob's runner passes the approver's call over");
+    assert.equal(await leased("alice"), call, "her runner takes it outside her repos");
+    await setMainFixApproval(db, "alice", "photocraft", false);
+    await setUserRepos(db, "alice", []);
     await clear();
   });
 

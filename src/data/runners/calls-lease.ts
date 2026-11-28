@@ -53,7 +53,7 @@ export async function leaseCall(db: Db, req: LeaseRequest): Promise<Lease | "lim
         .where((eb) => eb.or([eb("for_login", "is", null), eb("for_login", "=", login), boundTakeAllows(db, eb, login, { now, tierTokens: req.tierTokens ?? [] })]))
         // A call whose items all merged or closed meanwhile is no one's work any more (sync withdraws it).
         .where((eb) => eb.not(itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login", step: "remote_calls.step" })))
-        .where((eb) => (req.started ? startedWorkAllows(db, eb, login, "remote_calls.id", { stepRef: "remote_calls.step", now, tierTokens: req.tierTokens ?? [] })
+        .where((eb) => (req.started ? startedWorkAllows(db, eb, login, "remote_calls.id", { stepRef: "remote_calls.step", repoRef: "remote_calls.repo", now, tierTokens: req.tierTokens ?? [] })
           : eb.or([eb.not(manualOnlyExpr(eb, eb.val(login))), eb("parent_id", "is not", null), eb("picked_by", "=", login), eb("for_login", "is not", null)])))
         .where((eb) => eb.exists(schemaEb(eb).selectFrom("main.mcp_tokens as lt").select(eb.lit(1).as("one")).where("lt.id", "=", caller.tokenId).where("lt.kind", "=", "runner").where("lt.expires_at", ">", new Date(now).toISOString())))
         .$if(caps.perLogin !== null, (b) => b.where((eb) => eb(leasedCountExpr(db, eb, eb.val(login)), "<", caps.perLogin!)))

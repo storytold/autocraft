@@ -67,6 +67,8 @@ export type StartedWork = {
   prs: { repo: string; prNumber: number; started_by: string; approved_by: string | null; taken_by?: string[] }[];
   /** Merged PRs whose workflow ended done through the merge lately: only their post-merge review calls are its work (src/remote/started.ts). */
   merged: { repo: string; prNumber: number; started_by: string; approved_by: string | null }[];
+  /** Repos approved for Fix red main and who approved each: the main-fix step's calls in the repo are that person's work (src/remote/started.ts). */
+  mainfix: { repo: string; by: string }[];
 };
 export type RunnerSnapshot = {
   at: number; runners: RunnerRow[]; settings: Map<LowerLogin, UserSettings>; cooled: Map<LowerLogin, { until: string; reason: string }>;
