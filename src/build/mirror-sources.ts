@@ -6,16 +6,17 @@
 //    sources it names (build_state rows; no live topic, so nothing is planned from them).
 //  - The runner writes the ConfigMap when the list changed. It never creates it: the cluster's configuration does, once.
 // Only default branches count, so a source added by an unmerged pull request is never served. A derived entry must be on
-// github.com (the only host the mirror fetches from), belong to the owner of a tracked repo or of a hand-listed one, and
-// not be a tracked private repo (the mirror fetches without credentials).
+// github.com (the only host the mirror fetches from), belong to the owner of a tracked repo or of a hand-listed one, and be
+// public (the mirror fetches without credentials): a source's visibility is checked when a Cargo.lock first names it, and a
+// tracked repo whose `repos` row is private or internal is left out.
 import type { Db } from "../db/index.ts";
 import { normalizeRepo } from "../cratemirror/git.ts";
-import { loadMirrorSources, saveMirrorSources, type MirrorSources } from "../data/build/index.ts";
+import { loadMirrorSources, saveMirrorSources } from "../data/build/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { envVar } from "../env.ts";
 import { loadRepos } from "../data/mirror/index.ts";
 import type { Head } from "../mainci/index.ts";
-import type { Querier } from "../mirror.ts";
+import { Transient, type Querier } from "../mirror.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
 import { MIRROR_ALLOWLIST_CONFIGMAP, MIRROR_ALLOWLIST_DATA_KEY, MIRROR_DERIVED_CONFIGMAP, parseAllowlist } from "./caches.ts";
 import type { ConfigMapApi } from "./kube-api.ts";
@@ -36,36 +37,122 @@ export function cargoLockGitRepos(text: string): string[] {
   return [...out].sort();
 }
 
-type BlobNode = { object?: { text?: string | null; isTruncated?: boolean } | null } | null;
+/** Repositories per visibility query. */
+const REPOS_PER_QUERY = 30;
 
-/** Reads the Cargo.lock of every head whose sha differs from the one its stored sources were read at, and stores what it names. Returns the repos read. */
+/** One aliased field: its variables (renamed per alias), their declarations and the field, both naming the variables `$<name>`. */
+type Field = { vars: Record<string, string>; decl: string; body: string };
+type Answer = { node: Record<string, unknown> | null } | { error: string };
+
+const message = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, 200);
+
+/**
+ * Asks each field under its own alias in one query. GitHub fails the whole query when one alias cannot be read (a repo that
+ * is gone or that AutoCraft may not read), so then each field is asked alone and one that still fails answers its error.
+ * Rate limits and other transient failures are thrown.
+ */
+async function perAlias(client: Querier, fields: Field[]): Promise<Answer[]> {
+  const ask = async (fs: Field[]): Promise<Answer[]> => {
+    const vars: Record<string, string> = {};
+    const decl: string[] = [], parts: string[] = [];
+    fs.forEach((f, j) => {
+      const rename = (t: string) => t.replace(/\$([a-z]+)\b/g, (_m, v: string) => `$${v}${j}`);
+      for (const [k, v] of Object.entries(f.vars)) vars[`${k}${j}`] = v;
+      decl.push(rename(f.decl));
+      parts.push(`a${j}: ${rename(f.body)}`);
+    });
+    const data = await client.query(`query(${decl.join(", ")}) {\n  rateLimit { cost remaining resetAt }\n  ${parts.join("\n  ")}\n}`, vars) as Record<string, Record<string, unknown> | null | undefined>;
+    return fs.map((_, j) => ({ node: data[`a${j}`] ?? null }));
+  };
+  try {
+    return await ask(fields);
+  } catch (e) {
+    if (e instanceof Transient) throw e;
+    if (fields.length === 1) return [{ error: message(e) }];
+  }
+  const out: Answer[] = [];
+  for (const f of fields) {
+    try {
+      out.push(...await ask([f]));
+    } catch (e) {
+      if (e instanceof Transient) throw e;
+      out.push({ error: message(e) });
+    }
+  }
+  return out;
+}
+
+type LockObject = { __typename?: string; text?: string | null; isTruncated?: boolean } | null | undefined;
+
+/** The sources a Cargo.lock answer names, or why it could not be read (the older sources are then kept). */
+function lockSources(a: Answer): { repos: string[] } | { note: string } {
+  if ("error" in a) return { note: `the repository could not be read: ${a.error}` };
+  if (!a.node) return { note: "the repository could not be read" };
+  const obj = a.node.object as LockObject;
+  if (!obj) return { repos: [] };
+  if (obj.__typename !== "Blob") return { note: `Cargo.lock is a ${obj.__typename?.toLowerCase() ?? "path"}, not a file` };
+  if (obj.isTruncated) return { note: "the Cargo.lock is too large to read" };
+  if (typeof obj.text !== "string") return { note: "the Cargo.lock is not text" };
+  return { repos: cargoLockGitRepos(obj.text) };
+}
+
+/**
+ * Of `repos`, those the mirror can fetch: public on GitHub. A repo with a `repos` row takes the visibility stored there; any
+ * other is asked from GitHub, and one GitHub does not show (gone, or private to AutoCraft) is left out.
+ */
+async function publicRepos(db: Db, client: Querier, repos: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!repos.length) return out;
+  const known = new Map<string, string | null>();
+  for (const r of (await loadRepos(db, { all: true })).values()) known.set(`${r.owner ?? DEFAULT_OWNER}/${r.name}`.toLowerCase(), r.visibility?.toLowerCase() ?? null);
+  const ask: string[] = [];
+  for (const r of repos) {
+    const v = known.get(r);
+    if (v === "public") out.add(r);
+    else if (v == null) ask.push(r);
+  }
+  for (let i = 0; i < ask.length; i += REPOS_PER_QUERY) {
+    const chunk = ask.slice(i, i + REPOS_PER_QUERY);
+    const answers = await perAlias(client, chunk.map((r) => {
+      const [owner, name] = r.split("/") as [string, string];
+      return { vars: { o: owner, n: name }, decl: "$o: String!, $n: String!", body: "repository(owner: $o, name: $n) { visibility }" };
+    }));
+    chunk.forEach((r, j) => {
+      const a = answers[j]!;
+      if ("node" in a && a.node?.visibility === "PUBLIC") out.add(r);
+    });
+  }
+  return out;
+}
+
+/** Reads the Cargo.lock of every head whose sha differs from the one its stored sources were read at, and stores the public git sources it names. Returns the repos read. */
 export async function refreshMirrorSources(db: Db, client: Querier, heads: Head[], log: (line: string) => void = () => {}): Promise<number> {
   if (!heads.length) return 0;
   const [stored, rows] = await db.together(() => Promise.all([loadMirrorSources(db, heads.map((h) => h.repo)), loadRepos(db, { names: heads.map((h) => h.repo), all: true })]));
   const due = heads.filter((h) => stored.get(h.repo)?.sha !== h.sha);
   for (let i = 0; i < due.length; i += LOCKS_PER_QUERY) {
     const chunk = due.slice(i, i + LOCKS_PER_QUERY);
-    const vars: Record<string, string> = {};
-    const parts = chunk.map((h, j) => {
-      vars[`o${j}`] = rows.get(h.repo)?.owner ?? DEFAULT_OWNER;
-      vars[`e${j}`] = `${h.sha}:Cargo.lock`;
-      return `r${j}: repository(owner: $o${j}, name: ${JSON.stringify(h.repo)}) { object(expression: $e${j}) { ... on Blob { text isTruncated } } }`;
-    });
-    const query = `query(${chunk.map((_, j) => `$o${j}: String!, $e${j}: String!`).join(", ")}) {\n  rateLimit { cost remaining resetAt }\n  ${parts.join("\n  ")}\n}`;
-    const data = await client.query(query, vars) as Record<string, BlobNode | undefined>;
-    const save: { repo: string; sources: MirrorSources }[] = [];
-    chunk.forEach((h, j) => {
-      const obj = data[`r${j}`]?.object;
-      const was = stored.get(h.repo);
-      let sources: MirrorSources;
-      if (!obj) sources = { sha: h.sha, repos: [], note: null };
-      else if (typeof obj.text !== "string" || obj.isTruncated) sources = { sha: h.sha, repos: was?.repos ?? [], note: "the Cargo.lock is too large to read" };
-      else sources = { sha: h.sha, repos: cargoLockGitRepos(obj.text), note: null };
-      if (sources.note && sources.note !== was?.note) log(`crate mirror: ${h.repo}@${h.sha.slice(0, 8)}: ${sources.note}`);
-      const before = new Set(was?.repos ?? []);
-      const added = sources.repos.filter((r) => !before.has(r));
-      if (added.length) log(`crate mirror: ${h.repo}@${h.sha.slice(0, 8)} names git source${added.length === 1 ? "" : "s"} ${added.join(", ")}`);
-      save.push({ repo: h.repo, sources });
+    const answers = await perAlias(client, chunk.map((h) => ({
+      vars: { o: rows.get(h.repo)?.owner ?? DEFAULT_OWNER, n: h.repo, e: `${h.sha}:Cargo.lock` },
+      decl: "$o: String!, $n: String!, $e: String!",
+      body: "repository(owner: $o, name: $n) { object(expression: $e) { __typename ... on Blob { text isTruncated } } }",
+    })));
+    const read = chunk.map((h, j) => ({ h, was: stored.get(h.repo), got: lockSources(answers[j]!) }));
+    // A source already stored was public when it was first named; only new ones are checked.
+    const fresh = [...new Set(read.flatMap(({ was, got }) => ("repos" in got ? got.repos.filter((r) => !was?.repos.includes(r)) : [])))];
+    const open = await publicRepos(db, client, fresh);
+    const save = read.map(({ h, was, got }) => {
+      const at = `${h.repo}@${h.sha.slice(0, 8)}`;
+      if ("note" in got) {
+        if (got.note !== was?.note) log(`crate mirror: ${at}: ${got.note}`);
+        return { repo: h.repo, sources: { sha: h.sha, repos: was?.repos ?? [], note: got.note } };
+      }
+      const keep = got.repos.filter((r) => was?.repos.includes(r) || open.has(r));
+      const added = keep.filter((r) => !was?.repos.includes(r));
+      const closed = got.repos.filter((r) => !keep.includes(r));
+      if (added.length) log(`crate mirror: ${at} names git source${added.length === 1 ? "" : "s"} ${added.join(", ")}`);
+      if (closed.length) log(`crate mirror: ${at} names git source${closed.length === 1 ? "" : "s"} the mirror cannot fetch (not public): ${closed.join(", ")}`);
+      return { repo: h.repo, sources: { sha: h.sha, repos: keep, note: null } };
     });
     await saveMirrorSources(db, save);
   }
@@ -82,7 +169,7 @@ export async function derivedAllowlist(db: Db, listed: Iterable<string>): Promis
     const row = rows.get(name);
     const full = `${row?.owner ?? DEFAULT_OWNER}/${name}`.toLowerCase();
     owners.add(full.split("/")[0]!);
-    if (row?.visibility?.toLowerCase() === "private") privateRepos.add(full);
+    if (row?.visibility && row.visibility.toLowerCase() !== "public") privateRepos.add(full);
   }
   for (const r of listed) owners.add(r.split("/")[0]!.toLowerCase());
   const out = new Set<string>();
