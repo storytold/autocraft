@@ -483,6 +483,8 @@ const STATE_COLUMNS: [table: string, column: string, type: string][] = [
   ["discord_alert_msgs", "rec_at", "TEXT"],
   // The model that wrote a question's answer, named in the answer's note line.
   ["github_commands", "model", "TEXT"],
+  // When a person's turn was answered or failed: a question's lost answer is swept a while after it.
+  ["conversation_turns", "ended_at", "TEXT"],
 ];
 
 const STATE_INDEXES = [

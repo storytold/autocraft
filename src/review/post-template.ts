@@ -3,7 +3,7 @@
 // (cleaned: it is untrusted model output) and the short head commit. No Node imports:
 // the Prompts page lists the template through src/act/templates.ts.
 
-import { dropMarkup, outsideCode, scrubMarkdown } from "./public-text.ts";
+import { dropMarkup, outsideCode, scrubMarkdown, type ScrubOptions } from "./public-text.ts";
 import type { MergePath } from "../core/plan.ts";
 
 export { outsideCode };
@@ -76,7 +76,7 @@ function keptLink(url: string, owner: string | undefined): string | null {
  * notify another thread, reads "issue 12". Code keeps its text (colours, anchors). What is left of the link syntax is
  * escaped (see scrubMarkdown).
  */
-export function stripLinks(s: string, owner?: string): string {
+export function stripLinks(s: string, owner?: string, o?: ScrubOptions): string {
   return scrubMarkdown(s, (t, keep) => t
     .replace(/(^|\n)[ \t>]*\[[^\]]*\]:[^\n]*/g, "$1")
     .replace(/!?\[([^[\]]*)\]\[[^\]]*\]/g, "$1")
@@ -90,7 +90,7 @@ export function stripLinks(s: string, owner?: string): string {
       return href ? `${keep(href)}${tail}` : `(link removed)${tail}`;
     })
     .replace(/(?<![A-Za-z0-9])GH-(\d{1,7})(?![A-Za-z0-9])/gi, "issue $1")
-    .replace(/(?<![A-Za-z0-9/&])(?:[\w.-]+\/[\w.-]+)?#(\d{1,7})(?![A-Za-z0-9])/g, "issue $1"));
+    .replace(/(?<![A-Za-z0-9/&])(?:[\w.-]+\/[\w.-]+)?#(\d{1,7})(?![A-Za-z0-9])/g, "issue $1"), o);
 }
 
 /** What the pipeline will do next with the PR, as far as the posting moment shows. */

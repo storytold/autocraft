@@ -504,6 +504,7 @@ export interface ConversationTurns {
   claim: string | null;
   claimed_at: string | null;
   progress: string | null;
+  ended_at: string | null;
   conversation_id: number | null;
 }
 
@@ -3262,7 +3263,7 @@ export const COLUMNS = {
   conflict_merges: ["repo", "number", "from_head", "to_head", "base_sha", "state", "reason", "files", "attempt", "created_at", "session", "patch", "lint_task", "lint_round", "own_diff", "own_delta"],
   conversation_cards: ["id", "turn_id", "repo", "number", "kind", "params", "text", "description", "state", "result", "result_url", "error", "acted_by", "acted_at", "edited_by", "edited_at", "seen", "choice_id", "queued_at", "queue_args", "dispute_by", "dispute_reason", "dispute_at"],
   conversation_includes: ["repo", "number", "source", "by", "at", "sent_turn"],
-  conversation_turns: ["id", "repo", "number", "kind", "login", "at", "body", "block", "status", "error", "notes", "seq", "claim", "claimed_at", "progress", "conversation_id"],
+  conversation_turns: ["id", "repo", "number", "kind", "login", "at", "body", "block", "status", "error", "notes", "seq", "claim", "claimed_at", "progress", "ended_at", "conversation_id"],
   conversations: ["repo", "number", "item_block", "item_sig", "created_at", "created_by"],
   db_stats: ["scope", "minute", "statements", "round_trips", "ms", "calls"],
   decision_choices: ["id", "decision_id", "repo", "number", "turn_id", "stamp", "seen", "source", "drafts", "added", "pick", "state", "created_at", "asked_by"],

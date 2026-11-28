@@ -171,7 +171,12 @@ export async function linkingComment<T>(db: Db, commentId: number, login: string
  * a failure throws, and nothing is asked. False when no message was found to link.
  */
 export async function linkAskTurn(db: Db, o: { repo: string; number: number; login: string; via: ChatVia; turnId: number; commentId?: number }): Promise<boolean> {
-  const m = o.commentId === undefined ? null : await loadCommentMessage(db, o.commentId);
-  if (m) { await linkMessage(db, m.id, { turnId: o.turnId }); return true; }
+  if (o.commentId !== undefined) {
+    // A comment's own stored message, never another message of the asker's.
+    const m = await loadCommentMessage(db, o.commentId);
+    if (!m) return false;
+    await linkMessage(db, m.id, { turnId: o.turnId });
+    return true;
+  }
   return await linkNewestSaid(db, { repo: o.repo, number: o.number, author: o.login, via: o.via, turnId: o.turnId }) !== null;
 }

@@ -1808,7 +1808,7 @@ export interface ConversationCard {
 export interface ConversationTurn {
   id: number;
   kind: "operator" | "maintainer" | "opus" | "system";
-  /** The writer's login, "opus" or "system". */
+  /** The writer's login, "opus", "system", or "item-update" for a turn that says what changed in the item. */
   login: string;
   at: string;
   body: string;

@@ -244,8 +244,11 @@ async function updateTurn(db: Db, s: ItemState, deps?: StoreDeps): Promise<Refre
   if (was.flow !== now.flow || was.rec !== now.rec) { changed.push("workflow"); data.workflow = workflowPart(s.workflow); }
   if (!changed.length) return null;
   const text = `The ${pr ? "PR" : "issue"} was updated (${changed.join(", ")}). The current values of these fields follow; they replace the item block where they differ.`;
-  return { expectSig: c.item_sig, sig: JSON.stringify(now), turn: storedTurn(i.repo, i.number, { kind: "system", login: "system", body: text, block: systemBlock(text, data) }) };
+  return { expectSig: c.item_sig, sig: JSON.stringify(now), turn: storedTurn(i.repo, i.number, { kind: "system", login: UPDATE_LOGIN, body: text, block: systemBlock(text, data) }) };
 }
+
+/** The login of a system turn that says what changed in the item (updateTurn), apart from card results and follow-up lines. */
+export const UPDATE_LOGIN = "item-update";
 
 /** Adds a system turn carrying what changed in the item (see updateTurn). False when nothing changed, or another run wrote the same update. */
 export async function refreshItem(db: Db, repo: string, n: number, deps?: StoreDeps): Promise<boolean> {
@@ -294,12 +297,13 @@ export const setTurnProgress = async (db: Db, repo: string, n: number, claim: st
 
 /**
  * The pieces of the next prompt: the stored item block and the turns in prompt order, the claimed message last. `alone`: a question whose
- * answer is posted in public (GitHub, Discord) gets none of the chat's earlier messages and replies, only the item's update turns.
+ * answer is posted in public (GitHub, Discord) gets none of the chat's earlier turns (messages, replies, card results with their notes,
+ * follow-up lines), only the item's update turns (UPDATE_LOGIN).
  */
 export async function promptParts(db: Db, repo: string, n: number, wait: TurnRow, o: { alone?: boolean } = {}): Promise<{ item: string; turns: string; earlier: string; message: string; seen: string | null } | null> {
   const t: Thread | undefined = (await loadThreads(db, [refOf(repo, n)], { blocks: true })).get(refOf(repo, n));
   if (!t) return null;
-  const earlier = t.turns.filter((x: ThreadTurn) => x.seq !== null && (!o.alone || x.kind === "system")).map((x) => x.block ?? "").join("");
+  const earlier = t.turns.filter((x: ThreadTurn) => x.seq !== null && (!o.alone || (x.kind === "system" && x.login === UPDATE_LOGIN))).map((x) => x.block ?? "").join("");
   return { item: t.conversation.item_block, turns: earlier + wait.block, earlier, message: wait.block, seen: seenOf(t.conversation) };
 }
 

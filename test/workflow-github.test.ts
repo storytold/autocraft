@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { safeEqual } from "../src/dash/server/crypto.ts";
 import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
-import { drainCommands, type CommandDeps, type CommentNow } from "../src/github/commands.ts";
+import { drainCommands, readingsDone, type CommandDeps, type CommentNow } from "../src/github/commands.ts";
 import { handleDelivery, signatureOf } from "../src/github/webhooks.ts";
 import { runPrStatus, statusDue } from "../src/prstatus/index.ts";
 import type { Exec } from "../src/fixup/git.ts";
@@ -58,7 +58,7 @@ async function comment(w: World, body: string, o: { login?: string; id?: number;
 
 const PERM: Record<"write" | "read", AppPermission> = { write: { kind: "ok", permission: "write" }, read: { kind: "ok", permission: "read" } };
 /** Drains after the re-reads, with GitHub answering: the comment as written, each PR unchanged at its mirror head. */
-async function drain(w: World, perm: "write" | "read" = "write") {
+async function drain(w: World, perm: "write" | "read" = "write", extra: Partial<CommandDeps> = {}) {
   const db = w.db;
   for (const { number } of await db.all(db.k.selectFrom("main.github_commands").select("number").distinct())) {
     await db.run(db.k.insertInto("main.item_reads").values({ repo: "app", number, synced_at: new Date(Date.now() + 1000).toISOString() })
@@ -71,6 +71,7 @@ async function drain(w: World, perm: "write" | "read" = "write") {
       return { kind: "ok", authorId: r.github_id, body: bodies.get(id)! };
     },
     pr: async (_q, _repo, n) => ({ head: (await db.get(db.k.selectFrom("main.items").select("head_oid").where("repo", "=", "app").where("number", "=", n)))!.head_oid!, opened: T0, changed: false }),
+    ...extra,
   };
   return await drainCommands(db, deps);
 }
@@ -325,6 +326,16 @@ test("a question's answer is posted cleaned, with the AI note, and AutoCraft's o
     await comment(w, body, { login: "craft-box", id: 303 });
     await comment(w, `@${SLUG} merge`, { login: "craft-box", id: 303 });
     assert.equal((await commands(w)).length, before, "no comment of AutoCraft's own account is read as a command");
+
+    // A comment the model reads as only a question is asked as `ask` would ask it, and its answer is posted by the next drain.
+    await comment(w, `@${SLUG} what happens to transparency in the preview`, { login: "maint", id: 202 });
+    await drain(w, "write", { read: { translate: async () => ({ command: "ask", confidence: 0.99 }), score: async () => 0.99 } });
+    await readingsDone();
+    assert.equal((await commands(w)).at(-1)?.state, "asked");
+    await answerPending(db, { kind: "maintainer", checkout: async () => null, usageRun: "t", log: () => {} });
+    await drainCommands(db, { querier: w.gh.querier, permission: async () => PERM.write, slug: SLUG, exec, mint: async () => "token" });
+    assert.equal(posted.length, 2, "the read question's answer is posted");
+    assert.equal((await commands(w)).at(-1)?.reply, "posted");
   } finally {
     await runner.stop();
   }

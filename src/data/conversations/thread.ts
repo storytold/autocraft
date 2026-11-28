@@ -315,7 +315,7 @@ export async function releaseTurn(db: Db, ref: RefKey, claim: string): Promise<b
 async function settle(db: Db, repo: string, number: number, status: string, error: string | null, match: (b: any) => any): Promise<number | null> {
   const q = queryDb(db);
   const upd = q.k.updateTable("main.conversation_turns").set((eb) => ({
-    status, error, claim: null, progress: null,
+    status, error, claim: null, progress: null, ended_at: new Date().toISOString(),
     seq: eb.selectFrom("main.conversation_turns as m").select((e) => e(e.fn.coalesce(e.fn.max("m.seq"), e.lit(0)), "+", 1).as("s")).where("m.repo", "=", repo).where("m.number", "=", number),
   })).where("repo", "=", repo).where("number", "=", number);
   const row = await q.get(match(upd).returning("seq") as ReturnType<typeof upd.returning>) as { seq: number } | undefined;

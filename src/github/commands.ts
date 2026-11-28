@@ -40,7 +40,7 @@ import { namesOption, READ_BACKGROUND_WAIT_MS, runText, type ReadDeps } from "..
 import { commentLines } from "./comment-lines.ts";
 import { commentCondition, commentQuestion, parseComment, withoutMention } from "../workflow/parse.ts";
 import { linkAskTurn, linkingComment, recordSaid } from "../workflow/said.ts";
-import { askQuestion, sweepAskedCommands } from "../conversations/ask.ts";
+import { askQuestion } from "../conversations/ask.ts";
 import type { ItemRef, Parsed } from "../workflow/types.ts";
 import type { Db } from "../db/index.ts";
 
@@ -427,7 +427,8 @@ function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { acto
     try {
       const res = await linkingComment(db, id, r.login, () => runText(db, o.actor, "github", { parsed: o.again, items: [{ repo: r.repo, number: r.number }], ...(o.mention ? { mention: o.mention } : {}), at: clock().toISOString(), asked: () => r.created_at },
         { text: o.text, own: [{ repo: r.repo, number: r.number }], named: false, condition: o.condition, waitMs: READ_BACKGROUND_WAIT_MS, parse: { repo: r.repo }, pin, ask, ...(deps.read ? { deps: deps.read } : {}) }));
-      if (asked) { await settle(db, d, r, "asked", null, clock()); return; }
+      // The drain posts the answer once the turn has settled it; it passes over rows still being read.
+      if (asked) { await settle(db, d, r, "asked", null, clock()); reading.delete(id); return; }
       const out = res.items[0];
       if (out?.question && o.reply) await markQuestionShown(db, r.repo, r.number, `${out.question.workflowId}:${out.question.recAt}`, clock().toISOString());
       state = out?.outcome === "run" ? "done" : "refused";
@@ -520,8 +521,6 @@ export async function drainCommands(db: Db, deps: CommandDeps): Promise<number> 
   // Rows that wait for a re-read or a retry are passed over without a GitHub call, so they never keep a newer command out. `limit`
   // bounds the rows that call GitHub in one drain. Rows never tried come first, oldest first, then retries by their last try, so due
   // retries cannot fill the limit drain after drain either.
-  // Questions whose answer never came back are settled first, so this drain posts them.
-  await sweepAskedCommands(db, t0.getTime()).catch((e: Error) => deps.log?.(`github command: asked sweep failed: ${oneLine(e.message)}`));
   const rows = await loadCommandWork(db, { limit: DRAIN_ROWS, retryBefore: new Date(t0.getTime() - RETRY_MS).toISOString() });
   const { openPrsClosing } = await import("../dash/api/queue-page.ts");
   const d: Drain = { settled: new Map(), closing: openPrsClosing };

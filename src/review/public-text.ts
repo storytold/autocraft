@@ -85,15 +85,26 @@ const escapeLinks = (t: string): string => t
   .replace(/&(?!(?:amp|lt);)(?=#?[A-Za-z0-9]+;)/g, "&amp;")
   .replace(/</g, "&lt;");
 
+/** Escapes only the brackets of what is left of the link syntax: for a surface that renders no HTML and shows entities as typed (Discord). */
+const escapeBrackets = (t: string): string => t.replace(/\\*([[\]])/g, "\\$1");
+
+/**
+ * How text is cleaned beyond the defaults: `codeMentions` keeps an `@` inside code (code does not ping when it is rendered as
+ * code); `entities` false escapes brackets only, for a surface that shows HTML entities as typed.
+ */
+export type ScrubOptions = { codeMentions?: boolean; entities?: boolean };
+
 /**
  * Model text for a Markdown body that AutoCraft posts. `step` removes the shapes the caller does not want (links,
  * URLs, references) from text outside code; it is applied with tag and mention removal until nothing changes, and gets
  * `keep` for a link the caller wants to stay as it is (its text must hold no Markdown). Then the remaining link syntax
  * outside code is escaped.
  */
-export function scrubMarkdown(s: string, step: (t: string, keep: (link: string) => string) => string): string {
+export function scrubMarkdown(s: string, step: (t: string, keep: (link: string) => string) => string, o: ScrubOptions = {}): string {
   const kept: string[] = [];
   const keep = (link: string): string => `\u0000${kept.push(link) - 1}\u0000`;
-  const clean = settle(s.replace(/\u0000/g, ""), (t) => dropMentions(outsideCode(t, (x) => step(x, keep).replace(TAG, ""))));
-  return outsideCode(clean, escapeLinks).replace(/\u0000(\d+)\u0000/g, (_m, k: string) => kept[Number(k)] ?? "");
+  const clean = settle(s.replace(/\u0000/g, ""), o.codeMentions
+    ? (t) => outsideCode(t, (x) => dropMentions(step(x, keep).replace(TAG, "")))
+    : (t) => dropMentions(outsideCode(t, (x) => step(x, keep).replace(TAG, ""))));
+  return outsideCode(clean, o.entities === false ? escapeBrackets : escapeLinks).replace(/\u0000(\d+)\u0000/g, (_m, k: string) => kept[Number(k)] ?? "");
 }

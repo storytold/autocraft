@@ -109,7 +109,7 @@ export const STAGES: StageDef[] = [
     lanes: [{ name: "conversation", steps: ["conversation"], order: 20 }, { name: "conversation-maintainer", steps: ["conversation-maintainer"], order: 21 }],
     models: [{ model: "opus", use: "Conversation replies" }],
     promptIds: ["conversation.turn", "interactive.conversation-turn"], promptStage: "Decide",
-    waits: [{ name: "Lost question answer", why: "A question from GitHub or Discord whose turn ended without its answer sent (a crash or a failed write between the reply and the post) waits for the Conversation step to send it, then gets the pointer to the item's chat", howLong: "15 minutes after the sweep first sees the turn ended (LOST_ANSWER_MS, src/conversations/ask.ts)", showsAs: "The GitHub command stays `asked`; the Discord question has no reply yet", kind: "backoff" }],
+    waits: [{ name: "Lost question answer", why: "A question from GitHub or Discord whose turn ended without its answer sent (a crash or a failed write between the reply and the post) waits for the Conversation step to send it, then gets the pointer to the item's chat", howLong: "15 minutes after the turn's stored end (LOST_ANSWER_MS, src/conversations/ask.ts); the runner sweeps GitHub questions once a minute, the Discord process its questions every 3 minutes while any waits", showsAs: "The GitHub command stays `asked`; the Discord question has no reply yet", kind: "backoff" }],
     writes: [],
     person: "A person runs the commands a reply proposes",
   },

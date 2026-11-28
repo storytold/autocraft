@@ -1745,7 +1745,7 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
   repo TEXT NOT NULL,
   number INTEGER NOT NULL,
   kind TEXT NOT NULL,                 -- operator | maintainer | opus | system
-  login TEXT NOT NULL,                -- the writer's login, 'opus' or 'system'
+  login TEXT NOT NULL,                -- the writer's login, 'opus', 'system', or 'item-update' for a system turn that says what changed in the item
   at TEXT NOT NULL,
   body TEXT NOT NULL,
   block TEXT NOT NULL,
@@ -1755,7 +1755,8 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
   seq INTEGER,                        -- position in the prompt; NULL while pending, answering or held
   claim TEXT,                         -- answering: token of the run that holds the message
   claimed_at TEXT,
-  progress TEXT                       -- answering: JSON array of the last few progress lines, newest last
+  progress TEXT,                      -- answering: JSON array of the last few progress lines, newest last
+  ended_at TEXT                       -- operator and maintainer turns: when the turn was answered or failed
 );
 CREATE INDEX IF NOT EXISTS conversation_turns_item ON conversation_turns(repo, number, id);
 CREATE INDEX IF NOT EXISTS conversation_turns_at ON conversation_turns(at);

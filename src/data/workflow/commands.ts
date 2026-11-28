@@ -131,13 +131,15 @@ export async function settleAsked(db: Db, commentId: number, o: { state: "done" 
   });
 }
 
-/** The commands that wait for the answer to their question, with the state of the Opus turn their comment's message was put as (null: no such turn). */
-export async function loadAskedCommands(db: Db): Promise<{ commentId: number; repo: string; number: number; turnStatus: string | null; turnError: string | null }[]> {
+/** The commands that wait for the answer to their question, with the state and end time of the Opus turn their comment's message was put as (null: no such turn). */
+export async function loadAskedCommands(db: Db): Promise<{ commentId: number; repo: string; number: number; requestedAt: string; turnStatus: string | null; turnError: string | null; turnEndedAt: string | null }[]> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom(`${T} as g`)
     .leftJoin("main.chat_messages as m", (j) => j.onRef("m.github_comment_id", "=", "g.comment_id").on("m.turn_id", "is not", null))
     .leftJoin("main.conversation_turns as t", "t.id", "m.turn_id")
-    .select(["g.comment_id as comment_id", "g.repo as repo", "g.number as number", "t.status as status", "t.error as error"])
+    .select(["g.comment_id as comment_id", "g.repo as repo", "g.number as number", "g.requested_at as requested_at", "t.status as status", "t.error as error", "t.ended_at as ended_at"])
     .where("g.state", "=", "asked").orderBy("g.comment_id"));
-  return rows.map((r) => ({ commentId: Number(r.comment_id), repo: r.repo, number: Number(r.number), turnStatus: r.status ?? null, turnError: r.error ?? null }));
+  return rows.map((r) => ({
+    commentId: Number(r.comment_id), repo: r.repo, number: Number(r.number), requestedAt: r.requested_at, turnStatus: r.status ?? null, turnError: r.error ?? null, turnEndedAt: r.ended_at ?? null,
+  }));
 }

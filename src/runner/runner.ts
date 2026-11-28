@@ -65,6 +65,8 @@ export const TICK_FAILURE_MARK = "tick_failure";
 export const WEBHOOK_DRAIN_MS = 5_000;
 /** How often the runner checks for a repo due for its daily reconcile. */
 export const RECONCILE_CHECK_MS = 5 * 60_000;
+/** How often the runner sweeps GitHub questions whose answer was lost. */
+const ASKED_SWEEP_MS = 60_000;
 const CLI = fileURLToPath(new URL("../cli.ts", import.meta.url));
 
 /**
@@ -158,6 +160,8 @@ export class Runner {
   private repinning: Promise<void> | null = null;
   private webhookClient: import("../mirror.ts").Client | null = null;
   private reconcileAt = 0;
+  private askedSweepAt = 0;
+  private askedSweeping: Promise<void> | null = null;
   private reconciling: Promise<void> | null = null;
   private reconcileClient: import("../mirror.ts").Client | null = null;
   private planning: Promise<void> | null = null;
@@ -279,6 +283,7 @@ export class Runner {
       }
     } catch (e) { this.fault("webhooks", e); }
     this.reconcileTick();
+    this.askedSweepTick();
     await this.pruneTick();
     this.workerUpdateTick();
     await this.autopilot(read);
@@ -380,6 +385,21 @@ export class Runner {
       c.resetAt = null;
     }
     return c;
+  }
+
+  /**
+   * GitHub questions whose turn ended LOST_ANSWER_MS ago without their answer settled get the pointer (src/conversations/ask.ts),
+   * off the tick, at most once a minute. An `asked` command is no command work, so this does not wait for the comment drain; the rows
+   * it settles are, and the drain posts them.
+   */
+  private askedSweepTick(): void {
+    if (this.askedSweeping || Date.now() - this.askedSweepAt < ASKED_SWEEP_MS) return;
+    this.askedSweepAt = Date.now();
+    this.askedSweeping = (async () => {
+      const { sweepAskedCommands } = await import("../conversations/ask.ts");
+      const k = await sweepAskedCommands(this.db);
+      if (k) this.o.log(`github commands: ${k} questions whose answer was lost get the pointer to the item's chat`);
+    })().catch((e) => this.o.log(`github commands: asked sweep: ${(e as Error).message}`)).finally(() => (this.askedSweeping = null));
   }
 
   /**

@@ -222,16 +222,17 @@ export async function setPayloadFields(db: Db, id: number, fields: Record<string
 }
 
 /**
- * The question messages from Discord written after `since` (linked to a turn), with their items, payloads and the state of their Opus
- * turn (null: the turn is gone), oldest first.
+ * The question messages from Discord written after `since` (linked to a turn), with their items, payloads and the state and end time
+ * of their Opus turn (null: the turn is gone), oldest first.
  */
-export async function loadDiscordQuestions(db: Db, since: string): Promise<{ id: number; repo: string; number: number; payload: unknown; turnStatus: string | null; turnError: string | null }[]> {
+export async function loadDiscordQuestions(db: Db, since: string): Promise<{ id: number; repo: string; number: number; at: string; payload: unknown; turnStatus: string | null; turnError: string | null; turnEndedAt: string | null }[]> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.chat_messages as m").innerJoin("main.chat_conversations as c", "c.id", "m.conversation_id")
     .leftJoin("main.conversation_turns as t", "t.id", "m.turn_id")
-    .select(["m.id as id", "c.repo as repo", "c.number as number", "m.payload as payload", "t.status as status", "t.error as error"])
+    .select(["m.id as id", "c.repo as repo", "c.number as number", "m.at as at", "m.payload as payload", "t.status as status", "t.error as error", "t.ended_at as ended_at"])
     .where("m.via", "=", "discord").where("m.kind", "=", "said").where("m.turn_id", "is not", null).where("m.at", ">=", since).orderBy("m.id"));
   return rows.flatMap((r) => (r.repo === null || r.number === null ? [] : [{
-    id: Number(r.id), repo: String(r.repo), number: Number(r.number), payload: parse(r.payload as string | null), turnStatus: r.status ?? null, turnError: r.error ?? null,
+    id: Number(r.id), repo: String(r.repo), number: Number(r.number), at: String(r.at), payload: parse(r.payload as string | null), turnStatus: r.status ?? null, turnError: r.error ?? null,
+    turnEndedAt: r.ended_at ?? null,
   }]));
 }
