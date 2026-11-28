@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import * as helper from "../worker/autocraft.mjs";
 import type * as H from "../worker/autocraft.mjs";
 
@@ -156,4 +156,23 @@ test("macOS's git stub is found through symlinks: only /usr/bin/git without the 
   assert.equal(helper.appleGitStub("/usr/bin/git", () => true), false);
   // /usr/local/bin/git linking to the stub resolves to /usr/bin/git before this check; another git is never the stub.
   assert.equal(helper.appleGitStub("/opt/homebrew/Cellar/git/2.47.0/bin/git", () => false), false);
+});
+
+test("the service runs node through the PATH link that resolves to it, so a Homebrew upgrade does not strand it", () => {
+  const d = mkdtempSync(join(tmpdir(), "autocraft-node-"));
+  try {
+    const real = join(d, "Cellar", "node");
+    const other = join(d, "other");
+    for (const dir of [join(d, "Cellar"), join(d, "bin"), other]) mkdirSync(dir);
+    writeFileSync(real, "");
+    writeFileSync(join(other, "node"), "");
+    symlinkSync(real, join(d, "bin", "node"));
+    assert.equal(helper.serviceNode(real, [other, join(d, "missing"), join(d, "bin")].join(":")), join(d, "bin", "node"));
+    assert.equal(helper.serviceNode(real, other), real);
+    assert.equal(helper.serviceNode(real, undefined), real);
+    // A relative entry depends on the directory the install ran in, and systemd refuses a relative ExecStart.
+    assert.equal(helper.serviceNode(real, relative(process.cwd(), join(d, "bin"))), real);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
 });

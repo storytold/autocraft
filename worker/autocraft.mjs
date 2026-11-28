@@ -34,7 +34,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync, chmodSync, closeSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -4672,6 +4672,21 @@ function lingerOff() {
   return r.status === 0 && r.stdout.trim() === "no";
 }
 
+/**
+ * The node the service runs: the first `node` in an absolute PATH entry that is this same binary, else `execPath`. Node
+ * reports its real path (Homebrew's Cellar/node/<version>/bin/node), which an upgrade deletes; the PATH link follows
+ * upgrades. A relative entry is skipped: it names a different file from the service's directory, and systemd refuses it.
+ * @param {string} execPath @param {string | undefined} path
+ */
+export function serviceNode(execPath, path) {
+  const real = realpathSync(execPath);
+  for (const d of (path ?? "").split(delimiter).filter(isAbsolute)) {
+    const c = join(d, "node");
+    try { if (realpathSync(c) === real) return c; } catch { /* next */ }
+  }
+  return execPath;
+}
+
 /** `service install [--parallel N] | uninstall | status`. @param {string[]} argv */
 async function cmdService(argv) {
   const [action, ...rest] = argv;
@@ -4684,7 +4699,7 @@ async function cmdService(argv) {
   if (action === "install") {
     parallelOf(rest);
     needLogin(loadConfig());
-    const run = [process.execPath, realpathSync(self), "work", ...rest];
+    const run = [serviceNode(process.execPath, process.env.PATH), realpathSync(self), "work", ...rest];
     const env = Object.fromEntries(SERVICE_ENV.flatMap((k) => (process.env[k] ? [[k, String(process.env[k])]] : [])));
     mkdirSync(dirname(file), { recursive: true });
     if (mac) {
