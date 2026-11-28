@@ -8,6 +8,7 @@ import { setCommentApproval } from "../src/act/approval.ts";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
 import { FORMAT_ARTIFACT, gitFormatDiff, runCifix, type CifixDeps } from "../src/cifix/index.ts";
 import { formattingOnly, guardPatch } from "../src/cifix/guard.ts";
+import { ASK_PATCH_MAX, ASK_TOO_LARGE_REASON, diffLineCounts } from "../src/cifix/template.ts";
 import { parseFailedLog, parseJobLog, readFailure } from "../src/cifix/logs.ts";
 import { triage, unrelatedTests } from "../src/cifix/triage.ts";
 import type { CifixPr, CiFailure } from "../src/cifix/types.ts";
@@ -465,6 +466,33 @@ test("nothing is posted on a quiet pull request: no ask, and no patch as a comme
     await run();
     assert.ok(w.log.some((l) => l.startsWith("comment:") || l === "model"), `${tries} tries, no longer quiet`);
   }
+});
+
+test("a CI fix over the comment limit is posted as its files and line counts, never as a cut patch, and held for a person", async () => {
+  const long = `+const S: &str = "${"x".repeat(ASK_PATCH_MAX)}";\n`;
+  const big = GOOD.replace("@@ -1,2 +1,2 @@", "@@ -1,2 +1,3 @@") + long;
+  const w = world({ canModify: false, reply: big });
+  const db = await fresh(w.head, { canModify: false, comment: true });
+  const out: string[] = [];
+  const run = () => runCifix(db, { repo: "app", dryRun: false }, (l) => out.push(l), w.deps);
+  await run();
+  const task = (await db.all(db.k.selectFrom("build_tasks").select("id")))[0]?.id;
+  assert.ok(task !== undefined, out.join("\n"));
+  await db.run(db.k.updateTable("build_tasks").set({ state: "done", ended_at: new Date().toISOString() }).where("id", "=", task));
+  const tmp = tempPath(task);
+  writeFileSync(tmp, '{"reason":"build-finished","success":true}\n');
+  await storeArtifact(db, task, CLIPPY_ARTIFACT, tmp);
+  await run();
+  const comments = w.log.filter((l) => l.startsWith("comment:"));
+  assert.equal(comments.length, 1, out.join("\n"));
+  assert.match(comments[0]!, /too large to post as a comment/);
+  assert.match(comments[0]!, /`src\/lib\.rs`: \+3 −2/);
+  assert.ok(!comments[0]!.includes("```") && !comments[0]!.includes("xxxx"), "no part of the patch is posted");
+  const rows = await db.all(db.k.selectFrom("ci_fixes").select(["state", "reason"]).orderBy(rowid("ci_fixes")));
+  assert.deepEqual(rows.at(-1), { state: "cannot-push", reason: ASK_TOO_LARGE_REASON });
+  // Paths git quotes, or writes with spaces, are listed as they are.
+  assert.deepEqual(diffLineCounts('diff --git "a/src/\\303\\251 a.rs" "b/src/\\303\\251 a.rs"\n@@ -1 +1 @@\n-x\n+y\ndiff --git a/src/b c.rs b/src/b c.rs\n@@ -1 +1,2 @@\n-x\n+y\n+z\n').map((f) => [f.path, f.added, f.removed]),
+    [["src/é a.rs", 1, 1], ["src/b c.rs", 2, 1]]);
 });
 
 test("a failure log that stays unreadable is read again hourly after the backoffs, never a counted try until GitHub no longer has it", async () => {

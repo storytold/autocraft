@@ -21,14 +21,51 @@ const ASK_FILES_MAX = 50;
 /** The reason of the hold row when the patch was too large for its comment. */
 export const ASK_TOO_LARGE_REASON = `the change is over the ${ASK_PATCH_MAX} character limit of a comment, so the comment lists its files and line counts`;
 
+/** A path git wrote C-quoted (`"a/x\tb"`, octal escapes for the bytes of non-ASCII names), from `s` at its opening quote. */
+function unquoted(s: string): { text: string; rest: string } | null {
+  const bytes: number[] = [];
+  const esc: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+  for (let i = 1; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch === '"') return { text: new TextDecoder().decode(new Uint8Array(bytes)), rest: s.slice(i + 1) };
+    if (ch !== "\\") { bytes.push(...new TextEncoder().encode(ch)); continue; }
+    const oct = /^[0-7]{3}/.exec(s.slice(i + 1));
+    if (oct) { bytes.push(parseInt(oct[0], 8)); i += 3; continue; }
+    const code = esc[s[i + 1] ?? ""];
+    if (code === undefined) return null;
+    bytes.push(code);
+    i++;
+  }
+  return null;
+}
+
+/**
+ * The new path of a `diff --git` header: both paths C-quoted when git quotes them, or plain, where a path with spaces is the same
+ * on both sides (a rename's new path comes from its `rename to` line).
+ */
+function headerPath(line: string): string | null {
+  const rest = line.slice("diff --git ".length);
+  if (rest.startsWith('"') || rest.includes(' "b/')) {
+    const a = rest.startsWith('"') ? unquoted(rest) : { text: "", rest: rest.slice(rest.indexOf(' "b/')) };
+    const b = a && a.rest.startsWith(" ") ? (a.rest.startsWith(' "') ? unquoted(a.rest.slice(1)) : { text: a.rest.slice(1), rest: "" }) : null;
+    return b?.text.startsWith("b/") ? b.text.slice(2) : null;
+  }
+  if (!rest.startsWith("a/")) return null;
+  const n = (rest.length - 5) / 2;
+  const same = Number.isInteger(n) ? rest.slice(2, 2 + n) : "";
+  if (same && rest === `a/${same} b/${same}`) return same;
+  const at = rest.lastIndexOf(" b/");
+  return at < 0 ? null : rest.slice(at + 3);
+}
+
 /** The files of a git diff with the lines each adds and removes, in diff order. */
 export function diffLineCounts(patch: string): { path: string; added: number; removed: number }[] {
   const out: { path: string; added: number; removed: number }[] = [];
   let cur: { path: string; added: number; removed: number } | null = null, inHunk = false;
   for (const line of patch.split("\n")) {
-    const m = /^diff --git a\/(\S+) b\/(\S+)/.exec(line);
-    if (m) { cur = { path: m[2]!, added: 0, removed: 0 }; out.push(cur); inHunk = false; continue; }
+    if (line.startsWith("diff --git ")) { cur = { path: headerPath(line) ?? line.slice(11), added: 0, removed: 0 }; out.push(cur); inHunk = false; continue; }
     if (!cur) continue;
+    if (!inHunk && line.startsWith("rename to ")) { cur.path = line.slice(10).startsWith('"') ? unquoted(line.slice(10))?.text ?? cur.path : line.slice(10); continue; }
     if (line.startsWith("@@")) { inHunk = true; continue; }
     if (!inHunk) continue;
     if (line.startsWith("+")) cur.added++;

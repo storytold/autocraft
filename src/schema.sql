@@ -1214,7 +1214,8 @@ CREATE TABLE IF NOT EXISTS workspaces (
   layout INTEGER NOT NULL DEFAULT 1,  -- 1: checkout /work/src, CARGO_HOME /work/cargo; 2: the CI paths (src/build/workspace-layout.ts)
   prepared TEXT,                      -- layout 2: JSON WorkspacePrepared, the CI gate's env at the base commit
   warm TEXT,                          -- layout 2: JSON WorkspaceWarm, how the current volume's target started
-  warm_commit TEXT                    -- the warm version the target was copied from; null when it started cold
+  warm_commit TEXT,                   -- the warm version the target was copied from; null when it started cold
+  fail_kind TEXT                      -- failed: capacity (its pod was never scheduled: no node had room or the quota was used); null for any other failure
 );
 CREATE INDEX IF NOT EXISTS workspaces_env ON workspaces(env_id, state);
 

@@ -8,7 +8,7 @@ import { guardedApi, inClusterApi } from "../build/kube-api.ts";
 import { prPackages, runGate, type GateResult, type StepGate } from "../fixsession/gates.ts";
 import type { StepTurn } from "../fixsession/messages.ts";
 import { lintParent, prStep, runStep, type StepEnv, type StepOutcome } from "../fixsession/turn.ts";
-import { openSession, WorkspaceUnavailable } from "../fixsession/workspace.ts";
+import { endSessionWorkspaces, openSession, WorkspaceUnavailable } from "../fixsession/workspace.ts";
 import type { FixCandidate } from "./candidates.ts";
 import type { Git } from "./git.ts";
 import type { BuildScripts } from "./patch.ts";
@@ -52,8 +52,8 @@ export type SessionPatch =
   /**
    * Nothing recorded, and the item is no try: another job works the session (runStep left a skip on the session's lease), the
    * workspace is starting or cannot be had now (registry wait FIX_WORKSPACE_WAIT), or its tree is at another head (the lane's planner
-   * reading, fixWorkspaceReading, wakes the step on either); or the session ended meanwhile (its PR closed, a person stopped it),
-   * so the plan lists the item again only once a person goes on with it.
+   * reading, fixWorkspaceReading, wakes the step on either); or the session ended meanwhile, and the item's next session, which has
+   * no workspace yet, moves that reading once (a stopped item gets none: the plan lists it again once a person goes on with it).
    */
   | { kind: "wait"; reason: string };
 
@@ -89,8 +89,16 @@ export async function sessionPatch(r: SessionRun, c: FixCandidate, t: SessionFix
   }
   switch (out.kind) {
     case "wait":
-    case "ended":
       return { kind: "wait", reason: out.reason };
+    case "ended": {
+      // The session ended under the step (its PR closed, a person stopped it, or the sweep ended it): its workspace goes with it,
+      // and the item gets its next session now, without a workspace, so the lanes' reading moves once and the next step makes one.
+      // A stopped item gets none: the plan lists it again once a person goes on with it.
+      const next = await openSession(db, "pr", c.repo, c.number, { head: t.turn.head });
+      const old = out.workspaceId;
+      if (old !== null && ("refused" in next || next.session.workspaceId !== old)) await endSessionWorkspaces(db, [{ workspaceId: old }]);
+      return { kind: "wait", reason: out.reason };
+    }
     case "failed":
       return { kind: "failed", reason: `fix session: ${out.reason}` };
     case "report":

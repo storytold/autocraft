@@ -219,8 +219,9 @@ function background(c: Ctx, id: number, f: () => Promise<void>): void {
   c.state.busy.set(id, p);
 }
 
-async function fail(c: Ctx, w: WorkspaceRow, reason: string): Promise<void> {
-  if (!await moveWorkspace(c.d.db, w.id, [w.state as WorkspaceStateName], "failed", { error: reason.slice(0, 300) }, c.now())) return;
+/** `kind` capacity: the pod was never scheduled (no node had room, or the quota was used), which a fix session does not count as a failed start. */
+async function fail(c: Ctx, w: WorkspaceRow, reason: string, kind: "capacity" | null = null): Promise<void> {
+  if (!await moveWorkspace(c.d.db, w.id, [w.state as WorkspaceStateName], "failed", { error: reason.slice(0, 300), fail_kind: kind }, c.now())) return;
   c.d.log(`workspace launcher: workspace ${w.id} failed: ${reason}`);
   if (w.pod) await c.api.deletePod(c.s.namespace, w.pod).catch(() => {});
   if (w.pvc) await c.api.deletePvc(c.s.namespace, w.pvc).catch(() => {});
@@ -231,8 +232,8 @@ async function fail(c: Ctx, w: WorkspaceRow, reason: string): Promise<void> {
  * volume and its checkpoint, counting the try: the launcher resumes it again while its call is live, up to RESUME_TRIES.
  * Any other fails. A volume made for this start holds nothing the checkpoint lacks and is deleted.
  */
-async function giveUp(c: Ctx, w: WorkspaceRow, reason: string): Promise<void> {
-  if (!w.base_commit) return fail(c, w, reason);
+async function giveUp(c: Ctx, w: WorkspaceRow, reason: string, kind: "capacity" | null = null): Promise<void> {
+  if (!w.base_commit) return fail(c, w, reason, kind);
   const tries = w.resume_tries + 1;
   const keep = w.pvc !== null && w.volume_fresh === 0;
   const what = `${keep ? "its volume" : ""}${keep && w.checkpoint_at ? " and " : ""}${w.checkpoint_at ? "its checkpoint" : ""}` || "nothing to rebuild from";
@@ -499,8 +500,9 @@ async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
       if (gone) return dropVolume(c, w, gone);
     }
     if (age > PENDING_LIMIT_MS) {
-      const why = sched?.status === "False" ? clean(sched.message ?? sched.reason ?? "not scheduled") : pull ? pull.state!.waiting!.reason! : "its container did not become ready";
-      return giveUp(c, w, `The workspace pod did not start within ${PENDING_LIMIT_MS / 60_000} min: ${why}`);
+      const unscheduled = sched?.status === "False";
+      const why = unscheduled ? clean(sched.message ?? sched.reason ?? "not scheduled") : pull ? pull.state!.waiting!.reason! : "its container did not become ready";
+      return giveUp(c, w, `The workspace pod did not start within ${PENDING_LIMIT_MS / 60_000} min: ${why}`, unscheduled ? "capacity" : null);
     }
     return;
   }

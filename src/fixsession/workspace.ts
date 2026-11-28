@@ -80,8 +80,9 @@ export type WorkspaceReady = {
 };
 
 /**
- * The planner's reading for the lanes of PR fix steps (fix-up, CI fix): the workspaces of PR fix sessions that are starting or
- * failed, the kubernetes environments a workspace can run in, and when one was last changed. A step that waited for its workspace
+ * The planner's reading for the lanes of PR fix steps (fix-up, CI fix): what the steps of PR fix sessions wait for (a workspace
+ * starting, failed, off the session's head or gone, or room for its pod; loadFixWorkspaceWaits), the kubernetes environments a
+ * workspace can run in, and when one was last changed. A step that waited for its workspace
  * records nothing, so its job handled nothing; it runs again when this changes (the workspace gets ready or fails, an environment is
  * enabled, disabled or edited). A session out of starts at a head lets go of its failed workspace once and makes no new one there,
  * so the reading then stays as it is.
@@ -137,7 +138,7 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
    */
   const outOfStarts = async (failures: number): Promise<WorkspaceWait | WorkspaceFailed> => {
     const cur = id !== null ? await getWorkspace(db, id) : undefined;
-    if (cur?.state === "failed" && cur.base_sha === at) {
+    if (cur?.state === "failed" && cur.base_sha === at && cur.fail_kind !== "capacity") {
       if (!await updateSession(db, session.id, { workspaceId: null }, now())) throw gone();
       env.log(`fix session ${session.id}: workspace ${cur.id} failed to start, start failure ${failures} at ${short(at)}; the step fails`);
       return { kind: "failed", reason: `the fix session's workspace failed to start ${failures} times at ${short(at)}${cur.error ? `: ${cur.error}` : ""}` };

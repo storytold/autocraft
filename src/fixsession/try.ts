@@ -23,8 +23,9 @@ import type { TryStep } from "./cli.ts";
 import { prPackages, type StepGate } from "./gates.ts";
 import type { StepTurn } from "./messages.ts";
 import { fixSessionLease, prStep, runStep, type StepEnv, type StepOutcome } from "./turn.ts";
-import { lastTurn, loadSessions } from "./store.ts";
-import { openSession, parkSession } from "./workspace.ts";
+import { endStepPod } from "./park.ts";
+import { lastTurn } from "./store.ts";
+import { openSession } from "./workspace.ts";
 
 
 const indent = (s: string) => s.trimEnd().split("\n").map((l) => `  ${l}`).join("\n");
@@ -90,8 +91,7 @@ export async function runSessionTry(db: Db, repo: string, number: number, step: 
   try {
     out = await runStep(env, opened.session, prStep(db, turn, () => gate));
   } finally {
-    const live = out?.session ?? (await loadSessions(db, [opened.session.id])).get(opened.session.id);
-    if (live?.workspaceId != null) await parkSession(env, live).catch((e: unknown) => log(`parking the workspace: ${(e as Error).message}`));
+    if (out?.kind !== "wait") await endStepPod(env, { repo, number });
   }
 
   log("\nturns:");

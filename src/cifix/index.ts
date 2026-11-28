@@ -436,10 +436,16 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     } catch {
       return;
     }
-    await endStepPod(env, { repo, number: c.number });
+    await endStepPod(env, { repo, number: c.number }, (raw) => scrubReason(oneLine(raw), d.root));
   };
-  // A stored change the plan no longer lists has no lint follow-up any more.
-  if (sessions) for (const x of dropped) await endStep(x);
+  // A stored change the plan no longer lists has no lint follow-up any more; another job working the PR parks it itself.
+  if (sessions) {
+    for (const x of dropped) {
+      const release = await leaseItem(db, `pr:${repo}#${x.number}`, log);
+      if (!release) continue;
+      try { await endStep(x); } finally { await release(); }
+    }
+  }
 
   /** Why `readPr` returned null for a PR; items run at once, so it is kept per PR. */
   const gone = new Map<number, string>();

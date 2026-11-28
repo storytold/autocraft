@@ -329,6 +329,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["workspaces", "prepared", "TEXT"],
   ["workspaces", "warm", "TEXT"],
   ["workspaces", "warm_commit", "TEXT"],
+  // Why a workspace failed, where it matters to a fix session's start count (src/fixsession/workspace.ts): capacity, or null.
+  ["workspaces", "fail_kind", "TEXT"],
   ["remote_calls", "base_stdin", "TEXT"],
   // A call only this user's own Task Runners take: a maintainer's conversation turn runs on their own inference.
   ["remote_calls", "for_login", "TEXT COLLATE NOCASE"],

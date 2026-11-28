@@ -2850,6 +2850,7 @@ export interface Workspaces {
   prepared: string | null;
   warm: string | null;
   warm_commit: string | null;
+  fail_kind: string | null;
 }
 
 export interface DB {
@@ -3537,7 +3538,7 @@ export const COLUMNS = {
   workflow_events: ["id", "workflow_id", "repo", "number", "login", "via", "kind", "parsed", "line", "at", "seen_at"],
   workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "deadline_at", "finished_at", "run_id"],
   workspace_sessions: ["id", "kind", "repo", "base_sha", "item", "prompt", "env_id", "keep", "deadline_sec", "state", "outcome", "workspace_id", "remote_call_id", "job_id", "requested_by", "for_login", "created_at", "updated_at", "ended_at"],
-  workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id", "volume_fresh", "resume_tries", "checkpoint_error", "restored", "restored_at", "layout", "prepared", "warm", "warm_commit"],
+  workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id", "volume_fresh", "resume_tries", "checkpoint_error", "restored", "restored_at", "layout", "prepared", "warm", "warm_commit", "fail_kind"],
 } as const;
 
 /** The columns that hold bytes: BLOB on SQLite, bytea on Postgres. */

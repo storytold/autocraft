@@ -37,26 +37,42 @@ export async function loadLiveFixSession(db: Db, kind: FixSessionKind, repo: str
 }
 
 /**
- * The workspaces of live fix sessions of `kind` that are neither ready nor parked, as `id:state`, and those at another commit than
- * their session's head, as `id:state@commit`, sorted by id: a step that waited for one runs again when it moves
- * (fixWorkspaceReading). 1 statement.
+ * What a step that waited on a live fix session of `kind` waits for, sorted: a workspace neither ready nor parked as `id:state`, one at
+ * another commit than its session's head as `id:state@commit`, a session without a workspace as `s<id>:none`, and one whose pod found
+ * no room as `s<id>:capacity`, the same over every such try. While a session waits for room, each environment's last time a workspace
+ * gave up its pod (parked, ended, or failed other than for room) follows as `env=time`: room may have come free. A step that waited
+ * runs again when this moves (fixWorkspaceReading). 1 statement, 2 while a session waits for room.
  */
 export async function loadFixWorkspaceWaits(db: Db, kind: FixSessionKind): Promise<string> {
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom("main.fix_sessions as fs").innerJoin("main.workspaces as w", "w.id", "fs.workspace_id")
-    .select(["w.id", "w.state", "w.base_sha", "fs.head"]).where("fs.kind", "=", kind).where("fs.state", "=", "live")
-    .where((eb) => eb.or([eb("w.state", "not in", ["ready", "parked"]), eb.and([eb("fs.head", "is not", null), eb("w.base_sha", "<>", eb.ref("fs.head"))])])).orderBy("w.id"));
-  return rows.map((r: Raw) => `${Number(r.id)}:${r.state}${r.head !== null && r.base_sha !== r.head ? `@${String(r.base_sha).slice(0, 12)}` : ""}`).join(",");
+  const rows = await q.all(q.k.selectFrom("main.fix_sessions as fs").leftJoin("main.workspaces as w", "w.id", "fs.workspace_id")
+    .select(["fs.id as sid", "fs.head", "w.id", "w.state", "w.base_sha", "w.fail_kind", "w.env_id"]).where("fs.kind", "=", kind).where("fs.state", "=", "live")
+    .where((eb) => eb.or([eb("w.id", "is", null), eb("w.state", "not in", ["ready", "parked"]), eb.and([eb("fs.head", "is not", null), eb("w.base_sha", "<>", eb.ref("fs.head"))])])).orderBy("fs.id"));
+  const out: string[] = [];
+  const short = new Set<string>();
+  for (const r of rows as Raw[]) {
+    if (r.id === null) out.push(`s${Number(r.sid)}:none`);
+    else if (r.state === "failed" && r.fail_kind === "capacity") { out.push(`s${Number(r.sid)}:capacity`); short.add(r.env_id); }
+    else out.push(`${Number(r.id)}:${r.state}${r.head !== null && r.base_sha !== r.head ? `@${String(r.base_sha).slice(0, 12)}` : ""}`);
+  }
+  if (short.size) {
+    const freed = await q.all(q.k.selectFrom("main.workspaces").select((eb) => ["env_id", eb.fn.max("state_at").as("at")])
+      .where(kx.inList(db, "env_id", [...short])).where("state", "in", ["parked", "ended", "failed"])
+      .where((eb) => eb.or([eb("fail_kind", "is", null), eb("fail_kind", "<>", "capacity")])).groupBy("env_id").orderBy("env_id"));
+    out.push(...freed.map((r: Raw) => `${r.env_id}=${r.at}`));
+  }
+  return out.sort().join(",");
 }
 
 /**
- * Workspaces of `owner` (a fix session) at `head` that failed before they were ever ready, failed after `since` when given: the
- * session's start failures at that head. 1 statement.
+ * Workspaces of `owner` (a fix session) at `head` that failed to start before they were ever ready, failed after `since` when given:
+ * the session's start failures at that head. A pod that found no room (fail_kind capacity) is a wait, not a failed start. 1 statement.
  */
 export async function countFixStartFailures(db: Db, owner: string, head: string, since: string | null): Promise<number> {
   const q = queryDb(db);
   const r = await q.get(q.k.selectFrom("main.workspaces").select((eb) => eb.fn.countAll<number>().as("n"))
     .where("owner", "=", owner).where("base_sha", "=", head).where("state", "=", "failed").where("base_commit", "is", null)
+    .where((eb) => eb.or([eb("fail_kind", "is", null), eb("fail_kind", "<>", "capacity")]))
     .$if(since !== null, (b) => b.where("state_at", ">", since!)));
   return Number(r?.n ?? 0);
 }

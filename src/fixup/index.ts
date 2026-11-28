@@ -264,10 +264,17 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   /** A fix-up's step on the PR's fix session ended (it did not wait): the pod is parked, or kept live for a pending lint follow-up. */
   const endStep = async (number: number): Promise<void> => {
     const deps = (d.fixSession ?? defaultSessionDeps)(db);
-    if (deps) await endStepPod({ ...deps, db, log }, { repo, number });
+    if (deps) await endStepPod({ ...deps, db, log }, { repo, number }, (raw) => scrubReason(oneLine(raw), d.root));
   };
-  // A stored change the plan no longer lists has no lint follow-up any more.
-  for (const x of await rec.dropUnlisted(repo, sel.listed)) await endStep(x.number);
+  const dropped = await rec.dropUnlisted(repo, sel.listed);
+  // A stored change the plan no longer lists has no lint follow-up any more; another job working the PR parks it itself.
+  if (dropped.length && await fixSessionsOn(db, "fixup", repo)) {
+    for (const x of dropped) {
+      const release = await leaseItem(db, `pr:${repo}#${x.number}`, log);
+      if (!release) continue;
+      try { await endStep(x.number); } finally { await release(); }
+    }
+  }
 
   // Not approved for comments: no GitHub write, recorded once per head.
   for (const c of sel.cannotPush) {
@@ -498,6 +505,8 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
           split = { diff: c.lint!.patch, changes: c.lint!.changes };
           sessionTurn = c.lint!.sessionTurn;
         } else {
+          // The item works on the session from here: a throw ends the step's hold on the pod too (a wait does not).
+          onSession = true;
           const got = await sessionPatch({ db, deps: sessionDeps!, git, log, by: params.by === undefined || params.by === "pipeline" ? "pipeline" : params.by.operator, ...(c.lint && findings.length && { lint: { findings, patch: c.lint.patch, sessionTurn: c.lint.sessionTurn } }) }, c, task);
           if (got.kind === "wait") {
             // Nothing recorded and no try: the step runs again once the session's lease is free or its workspace moves (the lane's
@@ -506,7 +515,6 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
             log(`  ${ref}: waiting: ${got.reason}`);
             return;
           }
-          onSession = true;
           if (got.kind !== "ok") { await fail(got.kind, got.reason); return; }
           v = got;
           split = { diff: got.patch, changes: got.changes };

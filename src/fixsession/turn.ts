@@ -452,7 +452,16 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
     }
     if (diff === "") return done({ kind: "empty", report, callId }, ws.workspaceId);
     const g = diff === null ? { ok: false as const, problems: [(d as { reason: string }).reason] } : await runGate(spec.gate(pod), diff, report);
-    if (g.ok) return done({ kind: "ok", gate: g, diff: diff!, base: ws.baseCommit, baseSha: (await getWorkspace(db, ws.workspaceId))?.base_sha ?? "", diffHash, report, callId, turnId: cur.id }, ws.workspaceId);
+    if (g.ok) {
+      const row = await getWorkspace(db, ws.workspaceId);
+      if (!row) {
+        // The workspace is gone with the change: the session lets go of it, so the next step makes a new one (and the lanes'
+        // reading, which lists a session without a workspace, moves once).
+        await updateSession(db, s.id, { workspaceId: null });
+        return done({ kind: "wait", reason: `workspace ${ws.workspaceId} is gone with the change` }, null);
+      }
+      return done({ kind: "ok", gate: g, diff: diff!, base: ws.baseCommit, baseSha: row.base_sha, diffHash, report, callId, turnId: cur.id }, ws.workspaceId);
+    }
     env.log(`fix session ${s.id}: the ${spec.step} gates refused the change: ${g.problems.join("; ")}`);
     if (undone) return done({ kind: "refused", problems: g.problems, report, callId, diff }, ws.workspaceId);
     undone = true;
