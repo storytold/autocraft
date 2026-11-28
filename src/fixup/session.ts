@@ -108,8 +108,11 @@ export async function sessionPatch(r: SessionRun, c: FixCandidate, t: SessionFix
       return { kind: "failed", reason: "the fix session reported done but the tree holds no change" };
     case "refused":
       return { kind: "refused", reason: out.problems.join("; ") };
-    case "ok":
-      // The diff is against the workspace's base commit, whose tree is the turn's head: the fix-up applies it on that head.
+    case "ok": {
+      // The change must be on the head the fix-up applies it to; another one means the branch moved meanwhile.
+      const seeded = (out as { baseSha?: string }).baseSha;
+      if (seeded !== undefined && seeded !== t.turn.head) return { kind: "skip", reason: `the fix session's tree is at ${seeded.slice(0, 7)}, not at ${t.turn.head.slice(0, 7)}` };
       return { kind: "ok", patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed, changes: out.report.changes, turnId: out.turnId };
+    }
   }
 }

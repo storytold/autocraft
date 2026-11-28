@@ -2,6 +2,8 @@
 // the review's fix list into a unified diff, our code validates and applies
 // it on top of the reviewed head, and the result is pushed to the
 // contributor's branch. The new head gets reviewed again by the Review stage.
+// With fix sessions on for the step (setting fix_sessions), the PR's fix session edits and checks the tree in its workspace
+// instead, and its gated change goes through the same apply, patch check, lint and push (./session.ts).
 //
 //   autocraft-server fixup --repo R [--limit N] [--apply]
 //   autocraft-server fixup repost R#N [--apply]

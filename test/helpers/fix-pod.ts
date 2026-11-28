@@ -46,14 +46,19 @@ export function fixPod(db: Db, o: { top: string; src: string; head: string; repo
       const code = await new Promise<number | null>((r) => p.on("close", r));
       return { exitCode: code, stdout: Buffer.concat(out), stderr: Buffer.alloc(0), truncated: false };
     },
+    deletePod: async () => {},
   } as unknown as KubeApi;
+  // The launcher's part: a parked workspace that is resumed gets its pod back on the same volume, tree and base kept.
+  setInterval(() => {
+    for (const ws of roots.keys()) void moveWorkspace(db, ws, ["requested"], "ready", { pod: `ws-${ws}` }).catch(() => {});
+  }, 50).unref();
 
   const queued: WorkspaceCallRequest[] = [];
   let edits: (r: WorkspaceCallRequest) => Record<string, string> = () => ({});
   let report: Record<string, unknown> = { status: "done", summary: "Made the change." };
   let unclaimed: (r: WorkspaceCallRequest) => boolean = () => false;
-  const deps: Pick<StepEnv, "api" | "agents" | "checks" | "calls"> = {
-    api,
+  const deps: Pick<StepEnv, "api" | "agents" | "checks" | "calls" | "pollMs"> = {
+    api, pollMs: 50,
     agents: async () => "Build with cargo build --offline.\n",
     checks: async (_pod, c) => ({ round: c.round, base: c.base, diffStat: "", files: [], crates: [], findings: [], notes: [], noVerdict: [], diffHash: "", needsDependency: false, clean: true } as unknown as CheckRound),
     calls: {
