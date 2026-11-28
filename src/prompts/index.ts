@@ -1715,7 +1715,7 @@ const COMMAND_READ: ClaudePrompt = {
   id: "command.read",
   stage: "Commands",
   runner: "claude",
-  purpose: "Reads a message to AutoCraft that the command parser could not read, on any surface, into one command in the parser's words, or into ask when the message is only a question. This id runs on the sender's own Task Runner, outside its slots; interactive.command-read is the same prompt on any Task Runner's Interactive slots.",
+  purpose: "Reads a message to AutoCraft that the command parser could not read, on any surface, into one command in the parser's words, or into ask when the message is only a question, when Jev's choice (command.read.jev) does not run. This id runs on the sender's own Task Runner, outside its slots; interactive.command-read is the same prompt on any Task Runner's Interactive slots.",
   models: ["haiku"],
   effort: "low",
   placeholders: { ask: `A JSON object indented by one space: message (the text, first ${READ_TEXT_CHARS} characters) and items (at most ${READ_ITEMS_MAX}: ref, kind, work, and with an open question its recommendation and up to ${READ_PARTS_MAX} plan parts by number and title).` },
@@ -1736,7 +1736,7 @@ const COMMAND_READ_JEV: JevPrompt = {
   id: "command.read.jev",
   stage: "Commands",
   runner: "jev",
-  purpose: "Reads a message to AutoCraft that the command parser could not read, on any surface. The command question picks one of the commands the message's items can take now, listed by the code as the question's criteria (the open recommendation as written, its plan parts dropped or fixed, the commands the items' state allows, a fix with the message as its instruction, ask on a surface that answers questions, and \"none of these\"); it is asked alone. When Jev gives no answer, Haiku (command.read) translates the message and this prompt's exact or question score is asked alone for Haiku's command.",
+  purpose: "Reads a message to AutoCraft that the command parser could not read, on any surface. The command question picks one of the commands the message's items can take now, listed by the code as the question's criteria (the open recommendation as written, its plan parts dropped or fixed, the commands the items' state allows, a fix with the message as its instruction, ask on a surface that answers questions, and \"none of these\"); it is asked alone. When the choice does not run (Jev unsure or no answer), Haiku (command.read) translates the message and this prompt's exact or question score is asked alone for Haiku's command.",
   models: ["jev-latest"],
   placeholders: { ask: `The command question: the message (first ${READ_TEXT_CHARS} characters) and its items (at most ${READ_ITEMS_MAX}: ref, kind, work, and with an open question its recommendation and up to ${READ_PARTS_MAX} plan parts), as one JSON string. The scores: the message, Haiku's command and the meanings of its command words.` },
   request: {
@@ -1749,7 +1749,7 @@ const COMMAND_READ_JEV: JevPrompt = {
     },
   },
   output: `{"answers": {"command": {"choice", "confidence", "probabilities": {label: p}}}, "usage": {"input_tokens", "output_tokens"}}, or for a score {"answers": {"exact": {"noul": p}} or {"question": {"noul": p}}}`,
-  validation: `The choice is kept only when command.choice is one of the labels asked. It runs as if the sender had typed it only at ${READ_RUN_SCORE} or more with a lead of ${READ_MARGIN} or more over the next label, on the message's own items, and with no condition, negation, hedge or question in the message (a hold runs anyway); ask at the same bar, on one item, puts the message to Opus as "ask <message>" would. Below the bar the reply proposes the chosen command, and the next one too when it is ${READ_SECOND_SCORE} or more; "${NONE_CHOICE}" runs and proposes nothing. Without an answer (Jev not configured, an error, a timeout) Haiku translates the message; its command runs only with this prompt's score for it (exact.noul, or question.noul for ask) at ${READ_RUN_SCORE} or more, and is proposed otherwise.`,
+  validation: `The choice is kept only when command.choice is one of the labels asked. It runs as if the sender had typed it only at ${READ_RUN_SCORE} or more with a lead of ${READ_MARGIN} or more over the next label, on the message's own items, and with no condition, negation, hedge or question in the message (a hold runs anyway); ask at the same bar, on one item, puts the message to Opus as "ask <message>" would. "${NONE_CHOICE}" runs and proposes nothing. Below the bar, or without an answer (Jev not configured, an error, a timeout), Haiku translates the message; its command runs only with this prompt's score for it (exact.noul, or question.noul for ask) at ${READ_RUN_SCORE} or more. When it does not run either, or no Task Runner takes the call, the reply proposes the chosen command, and the next one too when it is ${READ_SECOND_SCORE} or more (Haiku's command when Jev gave no answer).`,
   limits: { perCall: 1, attempts: 1, timeoutSeconds: 30 },
   extra: [{ label: "Run", value: "Outside the pipeline, once per command read from a message" }],
 };

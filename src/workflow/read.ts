@@ -1,18 +1,18 @@
 // A model reading of text the command parser could not read, on every surface. When parse() gives `ambiguous` and the sender may
 // send commands on the items, the code lists the commands the items can take now (read-choice.ts) and Jev picks one with a single
-// choice question, server side, with no Task Runner. It runs through runCommand as if the sender had typed it only with Jev's
-// probability at READ_RUN_SCORE or more, a lead of READ_MARGIN or more over the next choice, the message's own items (a text that names
-// another item is only proposed), and no condition or hedge in the text (a hold runs anyway); otherwise the reply proposes it, and the
-// next choice too at READ_SECOND_SCORE or more. "None of these" is no reading. A reading of `ask` (the text is only a question) puts the
-// text to Opus as `ask <text>` would (ReadText.ask) at the same bar when the text is about one item; otherwise the reply proposes it. On
-// a surface without questions `ask` is no choice.
-// When Jev gives no answer (unavailable, an error), Haiku translates the text into one command in the parser's words: on the sender's
-// own Task Runner first (a bound call, outside its slots), else on any Task Runner's Interactive slots (never for a quiet item), never
-// on pipeline slots. The command must parse in full, name no item the text does not, and hold no word in a fix's instructions that the
-// text (or a plan part's title) does not; Jev's score of whether the text asks for exactly it decides as above, and without one it is
-// only proposed. With no reading (no Task Runner took the call, it failed or timed out, or the model found it unclear) the reply is the
-// parser's own. The text goes only into the calls, whose recorded texts are deleted when they end; each reading is logged as a `read`
-// event with the text's hash.
+// choice question, server side, with no Task Runner; choices that would run the same command count as one. It runs through runCommand
+// as if the sender had typed it only with Jev's probability at READ_RUN_SCORE or more, a lead of READ_MARGIN or more over the next
+// choice, the message's own items (a text that names another item is only proposed), and no condition or hedge in the text (a hold
+// runs anyway). "None of these" is no reading. A reading of `ask` (the text is only a question) puts the text to Opus as `ask <text>`
+// would (ReadText.ask) at the same bar when the text is about one item. On a surface without questions `ask` is no choice.
+// When Jev's choice does not run (Jev unsure, or no answer), Haiku translates the text into one command in the parser's words: on the
+// sender's own Task Runner first (a bound call, outside its slots), else on any Task Runner's Interactive slots (never for a quiet
+// item), never on pipeline slots. The command must parse in full, name no item the text does not, and hold no word in a fix's
+// instructions that the text (or a plan part's title) does not; Jev's score of whether the text asks for exactly it decides as above.
+// When Haiku's reading does not run either, or no Task Runner takes the call, the reply proposes Jev's choice, and the next one too at
+// READ_SECOND_SCORE or more (Haiku's reading when Jev gave no answer). With no reading at all the reply is the parser's own. The text
+// goes only into the calls, whose recorded texts are deleted when they end; each reading is logged as a `read` event with the text's
+// hash.
 import { createHash } from "node:crypto";
 import { runModelStep, type ClaudeStep, type JevStep } from "../agents/step.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
@@ -298,11 +298,20 @@ async function chosen(db: Db, read: ReadText, ask: ReadAsk, items: ChoiceItem[],
   return { ...base, command: pick.command, parsed, fit: others ? "text" : "own" };
 }
 
-/** The command a model reads in the text: Jev's choice, or when Jev gives no answer, Haiku's translation checked by the parser and scored; null when there is none. */
+/**
+ * The command a model reads in the text: Jev's choice when it runs; otherwise Haiku's translation, checked by the parser and scored,
+ * when that runs; otherwise Jev's choice to propose (or Haiku's, when Jev gave no answer). Null when there is none or Jev chose none.
+ */
 export async function readCommand(db: Db, login: string, read: ReadText): Promise<Reading | null> {
   const { ask, quiet, choice, states } = await askOf(db, read);
   const picked = await chosen(db, read, ask, choice, states);
-  if (picked !== undefined) return picked;
+  if (picked === null || (picked && readingRuns(picked, read))) return picked;
+  const haiku = await translated(db, login, read, ask, quiet);
+  return picked && !(haiku && readingRuns(haiku, read)) ? picked : haiku;
+}
+
+/** Haiku's translation of the text, checked by the parser and scored by Jev; null when there is none. */
+async function translated(db: Db, login: string, read: ReadText, ask: ReadAsk, quiet: boolean): Promise<Reading | null> {
   const tr = await (read.deps?.translate ?? translate)(db, ask, login, { ownOnly: quiet });
   if (!tr?.command) return null;
   if (readsAsk(tr.command)) {
