@@ -3044,7 +3044,8 @@ CREATE TABLE IF NOT EXISTS dupe_drops (
   PRIMARY KEY (repo, key)
 ) WITHOUT ROWID;
 
--- What a person told AutoCraft to do on GitHub (workflow): a close, comment-close or merge made as that person.
+-- What a person told AutoCraft to do on GitHub (workflow): a close, comment-close or merge made as that person, or the comment
+-- (ask-author, as the app) that asks a pull request's author for more work.
 -- state: pending | waiting-token | waiting-permission | done | failed | stopped | skipped. head is the head the person saw:
 -- a push after the command stops a close or merge.
 CREATE TABLE IF NOT EXISTS workflow_actions (
@@ -3052,7 +3053,7 @@ CREATE TABLE IF NOT EXISTS workflow_actions (
   workflow_id INTEGER NOT NULL,
   repo TEXT NOT NULL,
   number INTEGER NOT NULL,
-  kind TEXT NOT NULL,                 -- close | comment-close | merge
+  kind TEXT NOT NULL,                 -- close | comment-close | merge | ask-author
   by TEXT NOT NULL,
   head TEXT,
   state TEXT NOT NULL,

@@ -328,6 +328,7 @@ function waitOf(why: Refusal): Wait {
     case "duplicate": return person(why.code, "a maintainer to start it or the item it duplicates");
     case "request-unnamed": return person(why.code, "a maintainer to ask for the fix-up again");
     case "scope": return system(why.code, "not in scope");
+    case "author-ask": return { code: why.code, who: "contributor", text: "the author's push" };
     case "pipeline-off": return person(why.code, "the pipeline to be on");
     case "other": return why;
   }
@@ -513,11 +514,19 @@ export const unapprovedStop = (f: PrFacts): "conflict" | "ci" | null =>
  * or the contributor or another person has to resolve it, and nothing is fixed or merged before.
  */
 export type ConflictPath = "merge" | "contributor" | "person";
-/** The conflict path of a started PR; null when it does not conflict, or when nothing at its head says it is wanted (no take or take-fix review, and no merge entry). */
+/**
+ * Whether the PR is wanted at its head, so the base branch may be merged into it: a merge entry, a take or take-fix review there, an
+ * approved merge (AutoCraft makes the fixes a hold asks for itself), or a person's fix-up queued at the head.
+ */
+export function conflictWanted(f: PrFacts): boolean {
+  const r = f.review;
+  return mergeEntry(f) || !!(r && (r.verdict === "take" || r.verdict === "take-fix") && r.head === f.head && !r.stale) || !!workflowOf(f)?.approved || !!f.operator?.fix;
+}
+
+/** The conflict path of a started PR; null when it does not conflict, or when nothing at its head says it is wanted (conflictWanted). */
 export function conflictPath(f: PrFacts | null): ConflictPath | null {
   if (f?.mergeable !== "CONFLICTING") return null;
-  const r = f.review;
-  if (!mergeEntry(f) && !(r && (r.verdict === "take" || r.verdict === "take-fix") && r.head === f.head && !r.stale)) return null;
+  if (!conflictWanted(f)) return null;
   const path = settlesConflict(f);
   // A PR a person approved for merge is never left to its contributor: that person is asked (conflict-person).
   return path === "contributor" && mergeOwned(f) ? "person" : path;
@@ -786,8 +795,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     actions.push(act("fixup", f.head, { bucket: "fix", source: "premerge" }));
   }
 
-  // Merge the base branch into a conflicting PR, or ask the contributor.
-  if (f.conflict && f.conflict.baseOk && f.mergeable === "CONFLICTING" && fixAllowed(f) && (mx || (r && takeReview && r.head === f.head && !r.stale)) && !f.draft && !held && !f.inActiveBatch) {
+  // Merge the base branch into a conflicting PR that is wanted, or ask the contributor. A person's fix-up queued at the head lets the base
+  // in first, also on a PR whose review holds it: the fix-up follows the merge (src/workflow/advance.ts carryFixups).
+  if (f.conflict && f.conflict.baseOk && f.mergeable === "CONFLICTING" && (fixAllowed(f) || !!f.operator?.fix) && conflictWanted(f) && !f.draft && !held && !f.inActiveBatch) {
     // No push to a PR whose maintainer asked for changes: those come first.
     if ((f.conflict.bucket === "merge" && !f.changesRequested) || f.conflict.bucket === "ask") actions.push(act("conflict", f.head, { bucket: f.conflict.bucket }));
   }

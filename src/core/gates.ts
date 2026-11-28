@@ -73,7 +73,9 @@ function commandedBy(f: PrFacts | ItemFacts, a: Want): string | null {
   if (a.kind === "implement") return ("ghState" in f ? ownImplementation(f)?.queuedBy : f.implement.queuedBy) ?? null;
   if (a.kind === "issue-review" || a.kind === "issue-review-post") return "ghState" in f ? null : f.issueReview?.requestedBy ?? null;
   if (a.kind === "post-review" || a.kind === "followups") return showsWorkFor(f);
-  return a.kind === "act" && !("ghState" in f) ? f.close?.by ?? null : null;
+  if (a.kind !== "act" || "ghState" in f) return null;
+  // The comment the review asked for acts for the person the started work acts for, while they count on the repo.
+  return f.close?.auto ? showsWorkFor(f) : f.close?.by ?? null;
 }
 
 const refuse = (code: RefusalCode, text: string, params?: Params): Permission => ({ ok: false, why: { code, who: refusalWho(code), ...(params ? { params } : {}), text } });
@@ -126,12 +128,15 @@ export function gatePermission(f: PrFacts | ItemFacts, a: Want, by: By): Permiss
     const asks = pr?.may.workflow?.blocker;
     return unapproved("blocked", `The workflow asks again${asks ? `: ${asks}` : ""}`, asks ? { blocker: asks } : {});
   }
+  // A PR whose workflow waits for its author's push (src/workflow/types.ts AuthorAsk) gets no work of AutoCraft's but its bookkeeping and the comment to them.
+  if (pr && pr.may.workflow?.waitsForAuthor && !GOES_ON.has(a.kind)) return unapproved("author-ask", "The workflow waits for the author's push");
   // A stage that stopped itself on the item's repo (circuit breaker) writes nothing there until it is resumed, whoever asks.
   const stage = tripStageOf(a);
   const tripped = stage && f.tripped?.[stage];
   if (tripped) return refuse("breaker", `${stage[0]!.toUpperCase()}${stage.slice(1)} is paused: ${tripped}`, { stage, reason: tripped });
   const commander = commandedBy(f, a);
   if (a.kind === "act" && commander !== null) return { ok: true, as: "app", by: { kind: "person", login: commander } };
+  if (a.kind === "act" && !("ghState" in f) && f.close?.auto) return standingRefusal(f, a, true) ?? refuse("not-approved", "Nobody who counts on the repo started the work whose review asks the author");
   if (a.kind === "implement" && commander === null) return refuse("not-approved", "The issue is not queued");
   if ((a.kind === "issue-review" || a.kind === "issue-review-post") && commander === null) return refuse("not-approved", "Nobody asked for a review of the issue");
   // A revision is a push of the implementation session.

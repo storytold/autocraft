@@ -8,6 +8,8 @@ export type MayApproval = { by: string; at: string };
 export type MayWorkflow = {
   live: boolean; entry: "review" | "fix-up" | "implement" | "merge"; state: string; startedBy: string; approvedBy: string | null; approvedAt: string | null;
   blocker: string | null; baseHead: string | null; accepted?: readonly string[]; leg: { state: string; head: string | null } | null;
+  /** The PR's workflow waits for its author's push (src/workflow/types.ts authorAsk). */
+  waitsForAuthor?: true;
 };
 
 /** Why an outside author's item waits for model work: over the author's daily budget, or created in a surge. */
@@ -117,6 +119,8 @@ export type WorkflowFact = {
    * and only while the head is the one they were dropped at or follows it through our own pushes (an accepted push of the author ends them).
    */
   overruled?: string[];
+  /** As on src/data/workflow/types.ts WorkflowFact: the PR's workflow waits for its author, asked by the review (`auto`) or a person. */
+  authorAsk?: "auto" | "person";
 };
 
 /** The state of an item's latest workflow when none is live (src/workflow/types.ts WorkflowState). Each means hands off (done: an open PR whose workflow ended with an answer that runs nothing): not even the auto path takes the item up again until someone starts it. */
@@ -468,7 +472,7 @@ export type ItemFacts = {
   };
 
   /** A person's close of the item that the Act step carries out now (a `workflow_actions` row in `pending`), as that person. */
-  close: { id: number; by: string; weight: number; at: string } | null;
+  close: { id: number; by: string; weight: number; at: string; /** A comment to the PR's author that the review asked for, which acts for the person the work acts for. */ auto?: true } | null;
 
   /** The open PR of an issue: one that closes or addresses it (`closes`), which holds it, else a person's PR that mentions it by number; null when there is none. */
   openPr: { number: number; closes: boolean } | null;

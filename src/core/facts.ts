@@ -455,7 +455,21 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.gateRed = true;
     base.cifix = cifixOf(head);
   }
-  if (!take) return base;
+  /**
+   * The conflict with the base branch at the queue head. A held PR has it only while someone works it (a live workflow, or a person's
+   * fix-up queued at its head), since an approval or that fix-up merges the base into it (decide.ts conflictWanted); a hold nobody
+   * started keeps the facts it always had.
+   */
+  const conflictFacts = (): void => {
+    if (base.mergeable !== "CONFLICTING" || !i.base_ref) return;
+    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff, uncapped: owned !== null }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved && !base.quiet }, now);
+    const until = bucket === "capped" ? nextUtcMidnight(now) : bucket === "ask-retry" ? conflictAskRetryAtOf(patch.conflicts, qh, now) : undefined;
+    base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
+  };
+  if (!take) {
+    if (verdict === "hold" && state === "OPEN" && (wfFact || base.operator?.fix)) conflictFacts();
+    return base;
+  }
 
   const wait = d.merge.runs.get(`${ref}@${qh}`);
   const checksHere = ch?.head_oid === qh;
@@ -520,11 +534,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
       if (premergeFixRunningIn(patch.fixups, qh, pushedOff)) base.premergeFixRunning = true;
     }
   }
-  if (base.mergeable === "CONFLICTING" && i.base_ref) {
-    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff, uncapped: owned !== null }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved && !base.quiet }, now);
-    const until = bucket === "capped" ? nextUtcMidnight(now) : bucket === "ask-retry" ? conflictAskRetryAtOf(patch.conflicts, qh, now) : undefined;
-    base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
-  }
+  conflictFacts();
   if (!mx && verdict === "take-fix") base.fixup = { fixes: parseFixes(JSON.stringify(fixes)).length, attempts: attemptsIn(patch.fixups, owned ?? undefined), ...fixupAtHead(patch.fixups, qh, now) };
   for (const l of lintAt(qh, base.brokeByUs || base.gateRed ? head ?? qh : qh)) if (l.source === "review" || l.source === "premerge") base.lint.push({ ...l, source: l.source });
   if (base.lint.length) base.inFlight = true;

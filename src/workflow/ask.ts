@@ -6,7 +6,7 @@ import { implementStep } from "../core/decide-item.ts";
 import type { Action, ItemFacts, Plan, PrFacts, StandingFact } from "../core/plan.ts";
 import { t } from "../i18n/index.ts";
 import { nobodyFixes, nobodyFixesFor } from "../preapproval/paths.ts";
-import { afterSteps, droppedOf, onConflict, planned, textFor, without, type Conflict, type ReviewView } from "./recommend.ts";
+import { afterSteps, droppedOf, onConflict, planned, some, textFor, without, type Conflict, type ReviewView } from "./recommend.ts";
 import { earlierReview, listText } from "./status.ts";
 import { asSentence, clipText } from "../prose.ts";
 import type { Blocker, PlanPart, Recommendation } from "./types.ts";
@@ -107,7 +107,7 @@ function recFor(code: WaitCode, f: PrFacts, wait: string | null, o: Asked): Reco
   // The session does not make the review's fixes: a fix-up of ours does.
   const fix = code === "revision-failed" && o.review?.verdict === "take-fix" ? planned(o.parts) : [];
   const again = fix.length ? {} : { again: "review" as const };
-  return { text: `${why} ${textFor({ fix, merges, ...again })}`, parts: { ...parts, fix }, merges, ...again, ...(RED_CI.has(code) ? { cause: { code: "red-ci" as const } } : {}) };
+  return { text: `${why} ${textFor(some(fix) ? { fix, merges } : { again: "review", merges })}`, parts: { ...parts, fix }, merges, ...again, ...(RED_CI.has(code) ? { cause: { code: "red-ci" as const } } : {}) };
 }
 
 /** Waits on red CI that nothing repairs: no answer merges it. */
@@ -121,7 +121,7 @@ function reviewFailed(o: Pick<Asked, "approved" | "parts" | "review">): Recommen
   const again = "review" as const, merges = o.approved;
   const parts = o.review ? planned(o.parts) : [], v = o.review?.verdict, verdict = v === "hold" || v === "close" ? v : undefined;
   return {
-    text: `${REVIEW_AGAIN["review-failed"]!()} ${textFor({ fix: [], merges, again })} ${parts.length || verdict ? earlierReview(parts, verdict) : t("Write merge to merge it without that review when CI is green.")}`,
+    text: `${REVIEW_AGAIN["review-failed"]!()} ${textFor({ again, merges })} ${parts.length || verdict ? earlierReview(parts, verdict) : t("Write merge to merge it without that review when CI is green.")}`,
     parts: { fix: [], drop: droppedOf(o.parts) }, merges, again, skipsReview: { parts, ...(verdict ? { verdict } : {}) },
   };
 }
@@ -162,8 +162,9 @@ function asItStands(rec: Recommendation, f: PrFacts): Recommendation {
   if (code === null) return f.screenshots && rec.merges ? { ...rec, text: regression(f, rec.text) } : rec;
   if (!rec.merges) return rec;
   const text = ON_GITHUB[code](), { parts } = rec;
-  return parts.fix.length
-    ? { text: `${text} ${textFor({ fix: parts.fix, merges: false })}`, parts, merges: false }
+  const fix = parts.fix;
+  return some(fix)
+    ? { text: `${text} ${textFor({ fix, merges: false })}`, parts, merges: false }
     : { text, parts, merges: false, ...(rec.again ? { again: rec.again } : { goes: "look" as const, cause: { code } }) };
 }
 

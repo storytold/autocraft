@@ -1,6 +1,6 @@
 import type { StepApproval } from "../data/control/types.ts";
 import type { ActionState, EndedWorkflow, Preapproval, WorkflowAction } from "../data/workflow/types.ts";
-import { RULE_STARTER, type ItemWorkflow } from "../workflow/types.ts";
+import { authorAsk, RULE_STARTER, type ItemWorkflow } from "../workflow/types.ts";
 import type { RefusalCode } from "./codes.ts";
 import { acceptedHeads, chainsOwn, type OwnPush } from "./evidence.ts";
 
@@ -17,6 +17,8 @@ export type WorkflowGate = {
   accepted?: readonly string[];
   /** Its merge leg on the PR while the leg is active; null before it starts and once it ended (cancelled, failed). */
   leg: { state: string; head: string | null } | null;
+  /** The PR's workflow waits for its author's push (src/workflow/types.ts authorAsk). */
+  waitsForAuthor?: true;
 };
 
 /**
@@ -30,7 +32,7 @@ export function workflowGate(w: ItemWorkflow | null | undefined, o: { legs?: rea
   return {
     live: true, entry: w.entry === "fixup" ? "fix-up" : w.entry, state: w.state, startedBy: w.startedBy, approvedBy: w.approvedBy, approvedAt: w.approvedAt,
     blocker: w.blocker, baseHead: w.kind === "issue" ? leg?.head ?? null : w.baseHead, accepted: acceptedHeads(w, legs),
-    leg: leg ? { state: leg.state, head: leg.head } : null,
+    leg: leg ? { state: leg.state, head: leg.head } : null, ...(authorAsk(w) ? { waitsForAuthor: true as const } : {}),
   };
 }
 

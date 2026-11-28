@@ -68,7 +68,8 @@ const askedSince = (a: IssueAttempt): string => a.question?.at ?? a.attempt.upda
 /** The item's close to carry out. */
 function closeOf(d: ItemPassData, ref: string): ItemFacts["close"] {
   const a = d.closes.get(ref);
-  return a ? { id: a.id, by: a.by, weight: a.weight, at: a.created_at } : null;
+  const auto = a?.kind === "ask-author" && d.workflow.live.get(ref)?.authorAsk === "auto";
+  return a ? { id: a.id, by: a.by, weight: a.weight, at: a.created_at, ...(auto ? { auto: true as const } : {}) } : null;
 }
 
 /** The open tracked items of the load, in repo and number order. */

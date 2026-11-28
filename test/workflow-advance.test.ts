@@ -25,9 +25,12 @@ import { T0, T1, untilQuiet, world, type World } from "./world-db.ts";
 import { currentAttempt, writeStep } from "../src/implement/attempt.ts";
 import { openQuestion } from "../src/implement/questions.ts";
 import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
+import { recordEvents, saveWorkflows } from "../src/data/workflow/index.ts";
 import { applyStuckAnswer, markStuck } from "../src/implement/stuck.ts";
 import { resumeRetiredStops } from "../src/workflow/retired-stops.ts";
-import { actor, approvedReview, asked, ASKS, fixup, implementationOpened, implementIssue, keep, labelOf, later, leg8, legState, MAINT, nextStep, ownPush, pause, review, review8, say } from "./workflow-advance-world.ts";
+import { actor, approvedReview, asked, ASKS, fixup, implementationOpened, implementIssue, keep, labelOf, later, leg8, legState, MAINT, nextStep, ownPush, pause, review, review8, say, ticks } from "./workflow-advance-world.ts";
+import { decidePr } from "../src/core/decide.ts";
+import { loadPrFact } from "../src/core/facts.ts";
 
 test("each blocker stops an approved item and keeps its approval", async () => {
   const cases: [Blocker, (w: World) => Promise<unknown>][] = [
@@ -364,6 +367,96 @@ test("a started PR that is not approved comes back with the review's recommendat
   assert.deepEqual([wf.state, wf.rec?.text, wf.rec?.parts.fix, wf.rec?.merges, wf.plan.map((p) => p.title)], ["recommending", "Fix 1, then merge.", [1], true, ["guard empty input", "typo"]]);
 });
 
+test("a started review whose hold finds the PR incomplete asks its author at once and waits; the author's push ends the wait and their commits are reviewed", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  await w.pr(2, { label: "feature", author: "octo-dev" });
+  assert.equal((await runCommand(db, actor, "dashboard", { parsed: parse("review"), items: [{ repo: "app", number: 2 }] })).items[0]!.outcome, "run");
+  await db.run(db.k.insertInto("main.opus_reviews").values({
+    repo: "app", number: 2, head_oid: "sha2", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r",
+    public_review: JSON.stringify({ summary: "The group editor the description promises has no caller.", points: [] }),
+    workflow: JSON.stringify({ outside_purpose: null, recommendation: { text: "Ask the author to wire in the group editor.", fix: [], merge: false, close: false, author: true }, hold: { class: "off-purpose", why: "Most of the promised UI is missing." } }),
+  }));
+  await advanceWorkflows(db);
+  const wf = (await liveWorkflow(db, "app", 2))!;
+  assert.deepEqual([wf.state, wf.rec], ["waiting", null], "no question comes back first");
+  const asks = await db.all(db.k.selectFrom("main.workflow_actions").select(["kind", "state", "head"]).where("number", "=", 2));
+  assert.deepEqual(asks, [{ kind: "ask-author", state: "pending", head: "sha2" }]);
+  const ask = (wf.blockerParams as { author: { text: string; auto?: true } }).author;
+  assert.ok(ask.auto && ask.text.startsWith("@octo-dev") && ask.text.includes("group editor"), ask.text);
+  await w.synced(2, "sha9");
+  await advanceWorkflows(db);
+  assert.equal((await liveWorkflow(db, "app", 2))!.state, "running");
+  assert.ok(decidePr((await loadPrFact(db, "app", 2))!).actions.some((a) => a.kind === "review" && a.head === "sha9"), "the author's push is reviewed");
+});
+
+test("a hold review never asks the author by itself when it has no blocking class, was read again after the person went on, or the author is a bot: the person gets the question", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  const send = async (text: string, n: number) => { const r = (await runCommand(db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: n }] })).items[0]!; assert.equal(r.outcome, "run", JSON.stringify(r)); };
+  const asks = async () => (await db.all(db.k.selectFrom("main.workflow_actions").select("number"))).map((r) => Number(r.number));
+  const blocking = { class: "off-purpose", why: "Most of the promised UI is missing." };
+  // 2: a review stored before holds were classed; 3: a blocking hold, which asks; 4: a bot's PR.
+  const cases: [number, string, object | null][] = [[2, "octo-dev", null], [3, "octo-dev", { hold: blocking }], [4, "dependabot[bot]", { hold: blocking }]];
+  for (const [n, author, wf] of cases) {
+    await w.pr(n, { label: "feature", author });
+    await send("review", n);
+    await db.run(db.k.insertInto("main.opus_reviews").values({
+      repo: "app", number: n, head_oid: `sha${n}`, run_id: "rv", at: new Date().toISOString(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r",
+      workflow: wf && JSON.stringify({ outside_purpose: null, recommendation: null, ...wf }),
+    }));
+  }
+  await advanceWorkflows(db);
+  const states = async () => await Promise.all([2, 3, 4].map(async (n) => { const wf = (await liveWorkflow(db, "app", n))!; return [wf.state, wf.rec?.author ?? (wf.rec?.backlog ? "backlog" : null)]; }));
+  assert.deepEqual(await states(), [["recommending", "scope"], ["waiting", null], ["recommending", "backlog"]]);
+  assert.deepEqual(await asks(), [3]);
+  // The person went on after that review (an answer, as when a question's cause went): the same review, read again, comes back as the
+  // question instead of asking again.
+  await db.run(db.k.deleteFrom("main.workflow_actions"));
+  const wf3 = (await liveWorkflow(db, "app", 3))!;
+  const at = new Date(Date.now() + 1_000).toISOString();
+  await saveWorkflows(db, [{ id: wf3.id, patch: { state: "running", blocker: null, blockerParams: null }, at }]);
+  await recordEvents(db, [{ workflowId: wf3.id, repo: "app", number: 3, login: MAINT, via: "dashboard", kind: "answered", line: "yes", at }]);
+  await advanceWorkflows(db);
+  assert.deepEqual((await states())[1], ["recommending", "ask"]);
+  assert.deepEqual(await asks(), []);
+});
+
+/** PR 2, conflicting with its base branch, started with `start`, and a hold review at sha2 with one fix and no recommendation. */
+async function heldConflicting(start: string): Promise<World> {
+  const w = await approvedReview();
+  const db = w.db;
+  await w.pr(2, { label: "feature" });
+  await db.run(db.k.updateTable("main.items").set({ base_ref: "main", mergeable: "CONFLICTING" }).where("number", "=", 2));
+  await db.run(db.k.updateTable("main.pr_checks").set({ mergeable: "CONFLICTING" }).where("number", "=", 2));
+  assert.equal((await runCommand(db, actor, "dashboard", { parsed: parse(start), items: [{ repo: "app", number: 2 }] })).items[0]!.outcome, "run");
+  await db.run(db.k.insertInto("main.opus_reviews").values({
+    repo: "app", number: 2, head_oid: "sha2", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r",
+    fixes: JSON.stringify([{ file: "src/a.rs", change: "x", title: "wire in the group editor" }]), workflow: JSON.stringify({ outside_purpose: null, recommendation: null }),
+  }));
+  return w;
+}
+
+test("a hold with fixes on a PR that conflicts with its base branch recommends the fixes after the base merge, never the backlog", async () => {
+  const w = await heldConflicting("review");
+  await advanceWorkflows(w.db);
+  const rec = (await liveWorkflow(w.db, "app", 2))!.rec!;
+  assert.ok(/conflicts/.test(rec.text) && !/again|backlog/i.test(rec.text), rec.text);
+  assert.deepEqual([rec.again, rec.backlog, rec.parts.fix], [undefined, undefined, [1]]);
+});
+
+test("an approved PR whose review holds it and that conflicts merges the base branch and asks for the fix-up, with no backlog", async () => {
+  const w = await heldConflicting("review and merge");
+  const db = w.db;
+  await ticks(w);
+  const wf = (await liveWorkflow(db, "app", 2))!;
+  assert.ok(wf.state !== "blocked" && !wf.rec, JSON.stringify(wf.rec));
+  const fixups = await db.all(db.k.selectFrom("main.operator_fixups").select(["from_head", "state"]).where("number", "=", 2));
+  assert.deepEqual(fixups, [{ from_head: "sha2", state: "queued" }], "the fix-up is asked for as the approver");
+  const plan = decidePr((await loadPrFact(db, "app", 2))!).actions;
+  assert.ok(plan.some((a) => a.kind === "conflict"), JSON.stringify(plan));
+});
+
 test("a recommendation's fix numbers follow the stored fixes, not the model's list", () => {
   const reply = JSON.stringify({
     ref: "app#1", verdict: "take-fix", sure: true, reason: "two fixes", risks: [],
@@ -567,6 +660,7 @@ test("one workflow's change that cannot be stored loses no other's, and the pass
     try { await advanceWorkflows(db, () => {}, () => { woken++; }); } finally { db.write = write; }
     return (await Promise.all([2, 3].map((n) => liveWorkflow(db, "app", n)))).map((x) => x!.state).sort();
   };
+  // A hold with no recommendation and no class of its own comes back to the person first.
   assert.deepEqual(await pass(), ["recommending", "running"]);
   assert.ok(woken > 0);
   assert.deepEqual(await pass(), ["recommending", "recommending"]);

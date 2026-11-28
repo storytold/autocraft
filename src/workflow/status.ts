@@ -6,7 +6,7 @@ import type { Ambiguity, Refusal, Resolved, Run } from "./resolve.ts";
 import type { Blocker, Entry, ItemWorkflow, Recommendation } from "./types.ts";
 import { clipText } from "../prose.ts";
 import { asksNobody } from "./asked.ts";
-import { heldWork, openRecommendation, RULE_STARTER } from "./types.ts";
+import { authorAsk, heldWork, openRecommendation, RULE_STARTER } from "./types.ts";
 import { COMMANDS, ENTRY_LABEL, weightWord } from "./vocab.ts";
 import type { RunnerRoom } from "../core/runner-room.ts";
 
@@ -135,12 +135,19 @@ export const ruleStopLine = (rec: Recommendation): string =>
  * follow-ups a merge filed (waits.ts legWait). `veiled`: a quiet pull request's reader, who sees no recommendation, so a rule row's line says only that it stopped.
  */
 export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcClock, wait: string | null = null, veiled = false): string {
-  if (wait && (wf.state === "running" || wf.state === "waiting" || wf.state === "closed" || wf.state === "done")) return wait;
+  if (wait && (wf.state === "running" || (wf.state === "waiting" && !authorAsk(wf)) || wf.state === "closed" || wf.state === "done")) return wait;
   const ruleRec = asksNobody(wf) ? openRecommendation(wf) : null;
   if (ruleRec) return veiled ? t("Stopped") : ruleStopLine(ruleRec);
   switch (wf.state) {
     case "running": return current ? t("Running: {step}", { step: stepLabel(current) }) : t("Running");
-    case "waiting": return current ? t("Waiting: {step}", { step: stepLabel(current) }) : t("Waiting");
+    case "waiting": {
+      const ask = authorAsk(wf);
+      if (ask) {
+        const who = ask.login ?? t("the author");
+        return ask.auto ? t("Waiting for {author}, asked after the review: {line}", { author: who, line: ask.line }) : t("Waiting for {author}: {line}", { author: who, line: ask.line });
+      }
+      return current ? t("Waiting: {step}", { step: stepLabel(current) }) : t("Waiting");
+    }
     case "blocked": return wf.blocker ? t("Stopped at a blocker: {blocker}", { blocker: blockerLabel(wf.blocker) }) : t("Stopped at a blocker");
     case "recommending": return t("Waiting for an answer");
     case "done": return t("Done");
@@ -158,8 +165,9 @@ function yesWhat(rec: Recommendation): string | null {
   const fix = rec.parts.fix;
   if (rec.close && !fix.length) return t("close it");
   if (rec.issue?.action === "implement") return t("implement it");
-  if (rec.issue?.action === "backlog") return t("put it in the backlog");
+  if ((rec.backlog || rec.issue?.action === "backlog") && !fix.length) return t("put it in the backlog");
   if (rec.issue?.action === "ask") return t("ask the reporter");
+  if (rec.author && !fix.length) return t("ask the author");
   if (rec.answer && !fix.length) return rec.answer.label ? t("go with “{option}”", { option: rec.answer.label }) : t("go on with the implementation");
   if (rec.waits && !rec.again) return t("approve the merge and wait");
   if (rec.goes === "look") return t("look again");
@@ -174,8 +182,9 @@ function yesWhat(rec: Recommendation): string | null {
 export function yesClause(rec: Recommendation): string | null {
   const fix = rec.parts.fix;
   if (rec.close && !fix.length) return t("Reply to go ahead and close it.");
-  if (rec.issue?.action === "backlog") return t("Reply to go ahead and put it in the backlog.");
+  if ((rec.backlog || rec.issue?.action === "backlog") && !fix.length) return t("Reply to go ahead and put it in the backlog.");
   if (rec.issue?.action === "ask") return t("Reply to go ahead and ask the reporter; the issue is reviewed again after their answer.");
+  if (rec.author && !fix.length) return rec.merges ? t("Reply to go ahead and ask the author; their new commits are reviewed, then it merges ({checks}).", { checks: AFTER_CHECKS() }) : t("Reply to go ahead and ask the author; their new commits are reviewed, and it comes back to you after.");
   if (rec.answer && !fix.length) {
     const what = yesWhat(rec)!;
     return rec.merges ? t("Reply to go ahead: {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply to go ahead: {what}; it comes back to you after.", { what });
@@ -191,7 +200,7 @@ export function yesClause(rec: Recommendation): string | null {
 /** What a yes to the recommendation runs, as the item header's next step ("fix 1, then merge"); null when it runs nothing. */
 export function yesNext(rec: Recommendation): string | null {
   const what = yesWhat(rec);
-  if ((rec.close && !rec.parts.fix.length) || (rec.waits && !rec.again) || rec.issue) return what;
+  if (((rec.close || rec.backlog || rec.author) && !rec.parts.fix.length) || (rec.waits && !rec.again) || rec.issue) return what;
   return what ? (rec.merges ? t("{what}, then merge", { what }) : what) : rec.merges ? t("merge") : null;
 }
 
@@ -265,6 +274,12 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
     return r.close.as === "completed" ? t("Closing as completed {by}.", { by: who }) : t("Closing as not planned {by}.", { by: who });
   }
   if (r.end === "backlog") return t("In the backlog: open, no work planned {by}. Any command starts it again.", { by: who });
+  if (r.asksAuthor !== null) {
+    const then = r.merges ? t("their new commits are reviewed, then it merges when CI is green") : t("their new commits are reviewed, then it comes back with a recommendation");
+    return r.asksAuthor.words
+      ? t("Asking the author: “{words}”, with the review's findings. Nothing runs until they push; {then} {by}. Reply hold to halt.", { words: clipText(r.asksAuthor.words, INSTRUCTION_SHOWN), then, by: who })
+      : t("Asking the author to address the review's findings. Nothing runs until they push; {then} {by}. Reply hold to halt.", { then, by: who });
+  }
   if (r.asks !== null) return t("Asking the reporter: “{question}” The issue is reviewed again after their answer {by}. Reply hold to halt.", { question: clipText(r.asks, INSTRUCTION_SHOWN), by: who });
   if (r.autorepin !== null) {
     return r.autorepin.toLowerCase() === "off"
@@ -410,6 +425,7 @@ function refusalText(r: Refusal, clock: Clock): string {
     case "issue-merge-queue": return t("An issue can't go in the merge queue. Use implement and merge.");
     case "issue-review-merge": return t("An issue's review merges nothing. Approve the merge with implement: implement and merge.");
     case "autorepin-not-pr": return t("autorepin is for pull requests.");
+    case "ask-author-not-pr": return t("ask author is for pull requests.");
     case "no-live-work": return r.word === "take" ? t("Nothing to take: no work runs on this item.") : t("Nothing to release: no work runs on this item.");
     case "already-held": return t("Already held by {login}, {time}. Reply resume to go on.", { login: r.by, time: clock(r.at) });
     case "not-held": return t("This item is not held.");

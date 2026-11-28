@@ -22,6 +22,8 @@ export type WorkflowFact = {
   droppedFindings?: { title: string; head: string | null }[];
   /** The lower-case titles of `droppedFindings` that still overrule the pre-merge review at the PR's head (the PR facts set it, src/core/facts.ts). */
   overruled?: string[];
+  /** The PR's workflow waits for its author (src/workflow/types.ts authorAsk): `auto` when the review asked, `person` when a person did. */
+  authorAsk?: "auto" | "person";
 };
 /** Live workflows of PRs, by the PR. */
 export type PrWorkflows = Map<RefKey, ItemWorkflow>;
@@ -94,7 +96,8 @@ export type RepinRow = Selectable<DB["autorepins"]>;
 export type RepinRequest = { repo: string; number: number; refRepo: string; refNumber: number; refBranch: string | null; login: string; githubId: number; off?: boolean; at?: string };
 export type RepinPatch = Partial<Pick<RepinRow, "state" | "sha" | "head" | "task_id" | "tries" | "tried_at" | "to_head" | "result" | "done_at" | "notice">>;
 
-export type ActionKind = "close" | "comment-close" | "merge";
+/** `ask-author`: the comment to a PR's author of a workflow that waits for them (src/workflow/effects.ts queueAuthorAsk). */
+export type ActionKind = "close" | "comment-close" | "merge" | "ask-author";
 export type ActionState = "pending" | "waiting-token" | "waiting-permission" | "done" | "failed" | "stopped" | "skipped";
 export type WorkflowAction = Omit<Selectable<DB["workflow_actions"]>, "kind" | "state"> & { kind: ActionKind; state: ActionState };
 /** How a close ends the item, as `workflow_actions.close_as` stores it. */

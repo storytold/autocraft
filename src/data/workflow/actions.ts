@@ -27,7 +27,9 @@ export async function queueActions(db: Db, rows: NewAction[]): Promise<Map<strin
         workflow_id: r.workflowId, repo: r.repo, number: r.number, kind: r.kind, by: r.by, head: r.head, state: r.state ?? "pending", attempts: 0, close_as: r.closeAs ?? null,
         created_at: r.at ?? now, updated_at: r.at ?? now,
       }))).onConflict((oc) => oc.columns(["workflow_id", "kind", "repo", "number"]).doUpdateSet((eb) => {
-        const reset = (col: string, value: any) => eb.case().when(eb(`${T}.state` as any, "in", RESETS)).then(value).else(eb.ref(`${T}.${col}` as any)).end();
+        // A new ask of the author takes the place of the one before, whatever became of it.
+        const resets = eb.or([eb(`${T}.state` as any, "in", RESETS), eb(`${T}.kind` as any, "=", "ask-author")]);
+        const reset = (col: string, value: any) => eb.case().when(resets).then(value).else(eb.ref(`${T}.${col}` as any)).end();
         return {
           by: reset("by", eb.ref("excluded.by")), head: reset("head", eb.ref("excluded.head")), state: reset("state", eb.ref("excluded.state")),
           attempts: reset("attempts", eb.lit(0)), reason: reset("reason", eb.lit(null)), comment_url: reset("comment_url", eb.lit(null)),

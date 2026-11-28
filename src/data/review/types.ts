@@ -12,7 +12,13 @@ export type HeadKey = { repo: string; number: number; head: string };
 
 /** One plan part of a review. */
 export type ReviewFinding = { file: string; change: string; title?: string; major?: boolean; /** Absent: blocking (premerge/types.ts). */ blocking?: Blocking };
-export type ReviewRecommendation = { text: string; fix: number[]; merge: boolean; close: boolean };
+/**
+ * What the review recommends: one sentence, and what a yes runs (the fixes it makes, by number from 1; whether it then merges or closes;
+ * `backlog`: it keeps the item open with no work planned, for a hold that waits for other items; `author`: the PR is incomplete or wrong
+ * and its author finishes it, asked at once; with `scope`, the hold is a question of scope a maintainer answers first, and their yes asks
+ * the author). Parsed in review/opus-parse.ts.
+ */
+export type ReviewRecommendation = { text: string; fix: number[]; merge: boolean; close: boolean; backlog?: true; author?: true; scope?: true };
 export type ReviewWorkflow = {
   /** `checked`: the note passed the reply checks at parse (review/opus-parse.ts); a note without it is never filed. */
   outside_purpose: { lines: number; note: string; checked?: true } | null; recommendation: ReviewRecommendation | null;

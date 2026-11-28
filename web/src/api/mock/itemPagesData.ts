@@ -52,6 +52,10 @@ const BARS: Record<string, ItemBar> = {
     headline: { tone: "running", text: "Fix-up running", next: "review of the new head, then merge", model: "Opus", startedAt: at(1.2), jobId: 4412 },
     steps: [step("classify", "Classify", "done", 5 * H, 0.01, 4301), step("review", "Review", "done", 3 * H, 0.92, 4377), step("fixup", "Fix-up", "current", null, 1.4, 4412, true), ...PR_NEXT],
   },
+  "pdfcraft#7286": {
+    headline: { tone: "waiting", text: "Waiting for octo-dev, asked after the review: The group editor and the pinned layout have no caller.", next: "review of the author's new commits", model: null, startedAt: null, jobId: null },
+    steps: [step("classify", "Classify", "done", 2 * D, 0.01, 4210), step("review", "Review", "done", 3 * H, 1.2, 4340), step("decide", "Recommendation", "current", null, null, null)],
+  },
   "lightcraft#540": {
     headline: { tone: "queued", text: "Queued for Opus review · #2 in line", next: "its verdict", model: null, startedAt: null, jobId: 4415 },
     steps: [step("classify", "Classify", "done", 40, 0.01, 4398), step("review", "Review", "current", null, null, 4415), ...PR_NEXT],

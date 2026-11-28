@@ -41,7 +41,8 @@ export const KINDS: Record<string, string> = {
   bug: "bugfix", perf: "performance", feature: "missing feature", extra: "small extra", plugin: "plugin candidate", infra: "infra",
 };
 export const KIND_NAMES: Record<string, string> = Object.fromEntries(Object.entries(KINDS).map(([k, v]) => [v, k]));
-export const AUTOCRAFT_STATES = ["running", "waiting", "stopped", "held", "backlog", "done", "none"] as const;
+/** `author`: the work waits for the item's author (a PR's push, an issue reporter's answer). */
+export const AUTOCRAFT_STATES = ["running", "waiting", "author", "stopped", "held", "backlog", "done", "none"] as const;
 /**
  * `step:` values: the step a live workflow is at, by a short name, and the step as the workflow stores it (src/workflow/status.ts
  * StepName). `recommend` is an item back with its recommendation.
@@ -281,6 +282,7 @@ export const PRESETS: readonly Preset[] = [
   { id: "ready", label: "Ready to merge", query: "is:pr is:open ci:green review:clean is:approved" },
   { id: "running", label: "AutoCraft working", query: "is:open autocraft:running" },
   { id: "waiting", label: "Waiting on a person", query: "is:open autocraft:waiting" },
+  { id: "author", label: "Waiting for the author", query: "is:open autocraft:author" },
   { id: "outside", label: "Outside contributors waiting", query: "is:open is:outside no:response sort:created-asc" },
   { id: "duplicates", label: "Duplicates", query: "is:open is:duplicate" },
   { id: "mine", label: "Mine", query: "is:mine" },

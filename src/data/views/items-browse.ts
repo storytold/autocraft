@@ -98,6 +98,7 @@ function facts(db: Db, scope: BrowseScope, inner: (eb: kx.AnyEb) => Expression<S
         // A row only the automatic merge rule started asks nobody (src/workflow/asked.ts): it is stopped, not waiting on a person.
         .when(eb.and([eb("w.state", "in", [...ASKING_STATES]), eb("w.started_by", "=", RULE_STARTER), eb("w.approved_by", "is", null), eb("w.taken_by", "is", null)])).then("stopped")
         .when("w.state", "in", [...ASKING_STATES]).then("waiting")
+        .when("w.state", "=", "waiting").then("author")
         .when("w.state", "in", LIVE_STATES).then("running")
         .when("lw.state", "=", "stopped").then("held")
         .when("lw.state", "=", "backlog").then("backlog")

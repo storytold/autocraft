@@ -293,7 +293,7 @@ export async function loadItemPass(db: Db, keys: KeySource, o: { now: number; ba
       loadInScope(db, keys),
       listQuietPrs(db, { repo: o.repo }), loadMainFixPrs(db, repos), loadOwnIntegration(db, repos),
       loadAssignments(db, o.repo ? { repo: o.repo } : {}), loadRepos(db, { all: true }), loadOpenPrLinks(db, repos ?? reposOf(keys)),
-      loadActionsDue(db, { kinds: ["close", "comment-close"], ...(repos && { repos }) }), loadIssueReviewFacts(db, keys),
+      loadActionsDue(db, { kinds: ["close", "comment-close", "ask-author"], ...(repos && { repos }) }), loadIssueReviewFacts(db, keys),
     ]);
   const data: ItemPassData = {
     now: o.now, run: o.base.run, control, items, triage, outsideHolds, stages, workflow, implement, inScope: scoped,

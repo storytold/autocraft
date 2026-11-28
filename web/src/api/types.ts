@@ -2889,7 +2889,7 @@ export interface MaintainItems {
 
 /** AutoCraft's part in an item, in one word: working on it, waiting for a person, held, in the Backlog, done, or never started. */
 /** `stopped`: only the automatic merge rule started it and it stopped; it asks nobody until a maintainer takes it over. */
-export type BrowseAutocraft = "running" | "waiting" | "stopped" | "held" | "backlog" | "done" | "none";
+export type BrowseAutocraft = "running" | "waiting" | "author" | "stopped" | "held" | "backlog" | "done" | "none";
 /**
  * How a live workflow stands at its step: `running`, `waiting` (on something that moves by itself, such as CI), `answer` (back with its
  * question or recommendation), `stopped` (at a blocker, or the automatic merge rule stopped it and asks nobody).

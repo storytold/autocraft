@@ -5,11 +5,13 @@
 // always agree. A blocker the review cannot speak for (author commits, a failing step, files beyond the plan, a merge
 // leg that stopped) gets a sentence built here from its facts.
 import { t } from "../i18n/index.ts";
-import { byHand, type ConflictPath } from "../core/decide.ts";
+import { byHand, conflictPath, mergeOwned, settlesConflict, type ConflictPath } from "../core/decide.ts";
+import type { PrFacts } from "../core/plan.ts";
 import { PREMERGE_DEFECT_REASON, PREMERGE_FAILED_REASON, PREMERGE_UNSURE_REASON, UNSURE_REASON } from "../core/rules.ts";
-import { notBlocking } from "../premerge/types.ts";
+import { notBlocking, type Blocking } from "../premerge/types.ts";
 import { asSentence, clipText } from "../prose.ts";
-import type { ReviewFix, ReviewRecommendation } from "../review/opus-parse.ts";
+import type { ReviewRecommendation } from "../data/review/types.ts";
+import type { ReviewFix } from "../review/opus-parse.ts";
 import type { Found } from "./blockers.ts";
 import { listText } from "./status.ts";
 import type { PlanPart, Recommendation } from "./types.ts";
@@ -32,8 +34,11 @@ export function planOf(fixes: readonly ReviewFix[], before: readonly PlanPart[])
   return [...parts, ...overruled.map((p, i) => ({ ...p, n: parts.length + i + 1 }))];
 }
 
-/** `finding`: what the review found, in the words it wrote for the PR (its public summary, which is posted anyway); null when it wrote none. */
-export type ReviewView = { verdict: string; sure: boolean; rec: ReviewRecommendation | null; finding?: string | null };
+/**
+ * `finding`: what the review found, in the words it wrote for the PR (its public summary, which is posted anyway); null when it wrote none.
+ * `blockedBy`: the open items a hold names as its reason (`repo#number`).
+ */
+export type ReviewView = { verdict: string; sure: boolean; rec: ReviewRecommendation | null; finding?: string | null; blockedBy?: readonly string[]; /** A hold's blocking class; null: it blocks nothing an approval merges. */ hold?: Blocking | null };
 
 /** Characters of a review's finding a recommendation quotes. */
 const FINDING_CHARS = 300;
@@ -46,12 +51,20 @@ const fixText = (fix: readonly number[], merges: boolean): string => (merges
   ? t("Fix {parts}, then merge.", { parts: listText(fix) })
   : t("Fix {parts}, then come back with the result.", { parts: listText(fix) }));
 
+/** A list with at least one entry. */
+export type Some<T> = readonly [T, ...T[]];
+export const some = <T>(a: readonly T[]): a is Some<T> => a.length > 0;
+
+/** What a yes runs, for its sentence: each shape runs something, so there is no sentence for a yes that runs nothing. */
+export type TextOf = { close: true } | { backlog: true } | { author: true } | { again: "review"; merges: boolean } | { fix: Some<number>; merges: boolean } | { fix: readonly number[]; merges: true };
+
 /** The sentence for what a yes runs, when the review's own sentence does not say it. */
-export function textFor(r: { fix: readonly number[]; merges: boolean; close?: boolean; again?: "review" | "fixup" }): string {
-  if (r.close) return t("Close it, as the review recommends.");
-  if (r.fix.length) return fixText(r.fix, r.merges);
-  if (r.again === "review") return r.merges ? t("Review it again, then merge.") : t("Review it again, then come back with the result.");
-  return r.merges ? t("Merge it.") : t("Review it again, then come back with the result.");
+export function textFor(r: TextOf): string {
+  if ("close" in r) return t("Close it, as the review recommends.");
+  if ("backlog" in r) return t("Put it in the backlog.");
+  if ("author" in r) return t("Ask the author to address the review's findings.");
+  if ("again" in r) return r.merges ? t("Review it again, then merge.") : t("Review it again, then come back with the result.");
+  return r.fix.length ? fixText(r.fix, r.merges) : t("Merge it.");
 }
 
 /** The planned parts of the review's fixes that nobody makes, dropped: the merge goes on without them. */
@@ -69,8 +82,19 @@ const STOPS = {
   ci: (text: string) => t("CI fails at its latest commit. {text}", { text }),
 };
 
-/** A conflict with the base branch, and who settles it once the merge is approved (src/core/decide.ts conflictPath). */
-export type Conflict = { path: ConflictPath | null };
+/**
+ * A conflict with the base branch, and who settles it once the merge is approved (src/core/decide.ts conflictPath). `held`: a review of the
+ * head holds the PR (so `path` is null), with who could settle the conflict were it wanted.
+ */
+export type Conflict = { path: ConflictPath | null; held?: ConflictPath };
+
+/** The conflict of a PR that conflicts with its base branch at its head; null when it does not. */
+export function conflictOf(f: PrFacts): Conflict | null {
+  if (f.mergeable !== "CONFLICTING") return null;
+  const r = f.review, settles = settlesConflict(f);
+  const held = !!r && r.verdict === "hold" && r.head === f.head && !r.stale;
+  return { path: conflictPath(f), ...(held ? { held: settles === "contributor" && mergeOwned(f) ? "person" as const : settles } : {}) };
+}
 
 const ON_CONFLICT: Record<Exclude<ConflictPath, "merge">, (text: string) => string> = {
   contributor: (text) => t("It conflicts with its base branch, which the contributor has to resolve first. {text}", { text }),
@@ -80,12 +104,19 @@ const ON_CONFLICT: Record<Exclude<ConflictPath, "merge">, (text: string) => stri
 /**
  * The recommendation on a PR that conflicts with its base branch, where no fix-up can be made before that merge. Where the pipeline merges the
  * base in, a yes approves the merge and the fixes follow that merge. Where a person has to resolve the conflict, a yes approves the
- * merge and waits for them: it runs nothing that could ask the same again. A PR with no review to go on from is reviewed again.
+ * merge and waits for them: it runs nothing that could ask the same again. A PR with no review to go on from is reviewed again. One whose
+ * review of the head holds it gets no merge of the base (decide.ts plans the conflict step only for a wanted PR), so its fixes cannot be
+ * made: it goes to the backlog, and a new review of the same head would only hold it again.
  */
 export function onConflict(rec: Recommendation, conflict: Conflict | null): Recommendation {
-  if (!conflict || rec.close || rec.answer) return rec;
+  if (!conflict || rec.close || rec.backlog || rec.author || rec.answer) return rec;
   const { path } = conflict, fixes = rec.parts.fix.length > 0 || rec.again === "fixup";
-  if (path === null) return fixes ? { text: textFor({ fix: [], merges: rec.merges, again: "review" }), parts: { fix: [], drop: rec.parts.drop }, merges: rec.merges, again: "review" } : rec;
+  if (path === null && fixes && conflict.held) {
+    // A person's fix of a held PR also lets AutoCraft merge the base branch in first (decide.ts); one that only its contributor or a person can settle goes to the author.
+    if (conflict.held === "merge") return { ...rec, text: t("It conflicts with its base branch, which AutoCraft merges in first. {text}", { text: rec.text }) };
+    return { text: ON_CONFLICT[conflict.held](t("Ask the author to resolve it and address the review's findings.")), parts: { fix: [], drop: rec.parts.drop }, merges: false, author: "scope" };
+  }
+  if (path === null) return fixes ? { text: textFor({ again: "review", merges: rec.merges }), parts: { fix: [], drop: rec.parts.drop }, merges: rec.merges, again: "review" } : rec;
   if (!fixes && !rec.merges) return rec;
   if (byHand(path)) {
     if (!fixes) return { ...rec, text: ON_CONFLICT[path](rec.text), waits: path };
@@ -98,34 +129,51 @@ export function onConflict(rec: Recommendation, conflict: Conflict | null): Reco
 /**
  * What the item comes back with when its steps are done and the merge is not approved: the review's recommendation when it gave
  * one (without the parts a person dropped; its sentence written again when the parts changed), else one built from its verdict: fix
- * the planned parts then merge, merge, close, or review again. A yes always runs something. `stop`: what the PR ran into besides the
+ * the planned parts then merge, merge, close, or, for a hold that plans no fix, the backlog. The review covers the head, so the item
+ * never comes back with a review of that head again. A yes always runs something. `stop`: what the PR ran into besides the
  * review (unapprovedStop), which the sentence names.
  */
 export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[], stop: keyof typeof STOPS | null = null, conflict: Conflict | null = null): Recommendation {
   const rec = onConflict(withFinding(recommended(review, plan), review?.finding ?? null), conflict);
   // Where the sentence is already about the conflict and who settles it, it is not said twice.
   const said = stop === "conflict" && !!conflict?.path && conflict.path !== "merge" && rec.merges;
-  return stop && !rec.close && !said ? { ...rec, text: STOPS[stop](rec.text) } : rec;
+  return stop && !rec.close && !rec.backlog && !rec.author && !said ? { ...rec, text: STOPS[stop](rec.text) } : rec;
 }
 
 function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Recommendation {
   const drop = droppedOf(plan);
   const rec = review?.rec;
   if (rec) {
-    if (rec.close) return { text: rec.text || textFor({ fix: [], merges: false, close: true }), parts: { fix: [], drop }, merges: false, close: true };
+    if (rec.close) return { text: rec.text || textFor({ close: true }), parts: { fix: [], drop }, merges: false, close: true };
+    if (rec.backlog) return { text: rec.text || textFor({ backlog: true }), parts: { fix: [], drop }, merges: false, backlog: true };
+    if (rec.author) return { text: rec.text || textFor({ author: true }), parts: { fix: [], drop }, merges: false, author: rec.scope ? "scope" : "ask" };
     const fix = rec.fix.filter((n) => !drop.includes(n));
+    const said = (text: string): Recommendation => ({ text: rec.text && fix.length === rec.fix.length ? rec.text : text, parts: { fix, drop }, merges: rec.merge });
     // A person dropped every part the review wanted fixed: the rule below decides what is left.
-    if (!rec.fix.length || fix.length) {
-      const out: Recommendation = { text: "", parts: { fix, drop }, merges: rec.merge, ...(fix.length || rec.merge ? {} : { again: "review" as const }) };
-      return { ...out, text: rec.text && fix.length === rec.fix.length ? rec.text : textFor({ fix, merges: rec.merge, ...(out.again ? { again: out.again } : {}) }) };
-    }
+    if (some(fix)) return said(textFor({ fix, merges: rec.merge }));
+    if (!rec.fix.length && rec.merge) return said(textFor({ fix, merges: true }));
   }
   const fix = planned(plan);
-  if (review?.verdict === "close") return { text: textFor({ fix: [], merges: false, close: true }), parts: { fix: [], drop }, merges: false, close: true };
-  if (review && (review.verdict === "hold" || !review.sure) && !fix.length) {
-    return { text: textFor({ fix: [], merges: false, again: "review" }), parts: { fix: [], drop }, merges: false, again: "review" };
-  }
+  if (review?.verdict === "close") return { text: textFor({ close: true }), parts: { fix: [], drop }, merges: false, close: true };
+  if (review?.verdict === "hold" && !fix.length) return held(review.finding ?? null, review.blockedBy ?? [], review.hold, drop);
+  // An unsure take with nothing to fix asks whether to merge it: the person's yes is the judgement the review could not make.
   return { text: textFor({ fix, merges: true }), parts: { fix, drop }, merges: true };
+}
+
+/**
+ * A hold that plans no fix, where the review gave no recommendation of its own. One that waits for the other items it names goes to the
+ * backlog: nothing of the PR's own can settle it. Otherwise its author finishes it: a hold the review classed as blocking the merge
+ * (`hold`: a regression, the PR not doing what it says, security, data loss) asks the author at once; one that blocks nothing an
+ * approval would merge may be a question of scope, and one with no class says neither, so a person answers first. A bare fix makes the fix-up build what the review found (withFinding).
+ */
+function held(finding: string | null, blockedBy: readonly string[], hold: Blocking | null | undefined, drop: number[]): Recommendation {
+  const said = finding?.trim() ? asSentence(clipText(finding.trim(), FINDING_CHARS)) : null;
+  const holds = (then: string) => (said ? t("The review holds it: {finding} {then}", { finding: said, then }) : t("The review holds it. {then}", { then }));
+  if (blockedBy.length) {
+    return { text: holds(t("It waits for {items}. Put it in the backlog.", { items: listText(blockedBy.map((r) => `\`${r}\``)) })), parts: { fix: [], drop }, merges: false, backlog: true };
+  }
+  // Only a hold the review classed as blocking asks at once; one stored before reviews classed holds (no class) asks a person first.
+  return { text: holds(textFor({ author: true })), parts: { fix: [], drop }, merges: false, author: hold != null && hold.class !== null ? "ask" : "scope" };
 }
 
 /** Characters of a review's finding a bare fix hands the fix-up (the instructions take at most INSTRUCTIONS_MAX). */
@@ -135,6 +183,16 @@ const FINDING_FIX_CHARS = 1200;
 function withFinding(rec: Recommendation, finding: string | null): Recommendation {
   const text = finding?.trim();
   return text && !rec.parts.fix.length && !rec.close ? { ...rec, finding: clipText(text, FINDING_FIX_CHARS) } : rec;
+}
+
+/**
+ * A recommendation to ask the author, where AutoCraft does not ask them (`why`, effects.ts authorUnaskable): a yes puts the item in the
+ * backlog, and the sentence keeps what the review found.
+ */
+export function withoutAuthor(rec: Recommendation, why: string, finding: string | null): Recommendation {
+  const said = finding?.trim() ? asSentence(clipText(finding.trim(), FINDING_CHARS)) : null;
+  const then = t("AutoCraft does not ask the author, since {why}. Put it in the backlog.", { why });
+  return { text: said ? t("The review found: {finding} {then}", { finding: said, then }) : then, parts: { fix: [], drop: rec.parts.drop }, merges: false, backlog: true };
 }
 
 /** A question that takes the place of one the author pushed past. */
