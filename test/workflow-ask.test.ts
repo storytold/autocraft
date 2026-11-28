@@ -306,7 +306,7 @@ test("a merge entry whose verification failed gets a fix-up after its pre-merge 
     await w.pr(1, { label: "feature" });
     await say(w, "merge");
     await pause();
-    await w.verified(1, "error");
+    await w.verified(1, "failed");
     await w.db.run(w.db.k.updateTable("main.verifications").set({ finished_at: new Date().toISOString() }));
     await settle(w);
     assert.deepEqual([await actions(w), (await wf(w)).state], [["premerge"], "running"]);
@@ -319,6 +319,19 @@ test("a merge entry whose verification failed gets a fix-up after its pre-merge 
     assert.ok(due.some((a) => a.kind === "fixup") && !due.some((a) => a.kind === "merge"), `${found} ${fixable}: ${JSON.stringify(due.map((a) => a.kind))}`);
     w.close();
   }
+  // An errored verification is no finding: no fix-up and no merge, and the plan waits for AutoCraft to run it again.
+  const w = current = await (await (await world()).repo(["merge", "push"])).acting(MAINT, ANN);
+  await w.pr(1, { label: "feature" });
+  await say(w, "merge");
+  await pause();
+  await w.verified(1, "error");
+  await w.db.run(w.db.k.updateTable("main.verifications").set({ finished_at: new Date().toISOString() }));
+  await w.premerge(1, "clean");
+  await settle(w);
+  const x = await wf(w), p = await w.prPlan(1);
+  assert.deepEqual([x.state, x.rec], ["running", null]);
+  assert.ok(!p.actions.some((a) => a.kind === "fixup" || a.kind === "merge"), JSON.stringify(p.actions.map((a) => a.kind)));
+  assert.equal(p.waitCode, "verification", String(p.wait));
 });
 
 test("the word merge past a pre-merge review that failed for good hands the approved PR over, which merges once verified on green CI", async () => {

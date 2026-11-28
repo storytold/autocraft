@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import { advancePreapprovals, preapprovalOf } from "../src/preapproval/index.ts";
 import { markReviewsStale } from "../src/review/discussion.ts";
-import { recordReviewFailure, reviewHold } from "../src/review/gate.ts";
+import { FAILURE_BACKOFF_MS, recordReviewFailure, reviewHold } from "../src/review/gate.ts";
 import { saveOpus } from "../src/review/opus.ts";
 import { OPERATOR, T0, untilQuiet, world, type World } from "./world-db.ts";
 
@@ -18,12 +18,14 @@ const startPushed = async (w: World, n: number, to: string) => {
   await w.synced(n, to);
 };
 const settle = (w: World) => untilQuiet(w.db, [() => advancePreapprovals(w.db)], 5);
+/** Model failures at one head that make its review fail for good: one past the last backoff. */
+const FOR_GOOD = FAILURE_BACKOFF_MS.length + 1;
 
 describe("a review that failed for good", () => {
   test("a request newer than the last failure grants exactly one more try", async () => {
     const w = await (await fresh()).pr(1);
     const t = Date.now() - 60_000;
-    for (let i = 0; i < 4; i++) await recordReviewFailure(w.db, "app", 1, "h", t);
+    for (let i = 0; i < FOR_GOOD; i++) await recordReviewFailure(w.db, "app", 1, "h", t);
     const held = await reviewHold(w.db, "app", 1, "h");
     assert.equal(held?.kind, "failed");
     assert.match(held!.wait, /Review again/);
@@ -49,7 +51,7 @@ describe("a fix-up's push and the review of it", () => {
     assert.equal(await reviewHold(w.db, "app", 1, "sha1b"), null);
 
     await startPushed(w, 3, "sha3b");
-    for (let i = 0; i < 4; i++) await recordReviewFailure(w.db, "app", 3, "sha3b");
+    for (let i = 0; i < FOR_GOOD; i++) await recordReviewFailure(w.db, "app", 3, "sha3b");
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 3))?.state, "failed");
   });
