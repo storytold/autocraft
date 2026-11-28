@@ -181,14 +181,18 @@ export async function askConflict(db: Db, x: ConflictRun, c: ConflictCandidate):
   }
 }
 
+/** Why a merge's conflicted files are refused by their number alone, before anything is read. */
+const countRefusal = (files: readonly string[]): string | null =>
+  !files.length ? "the merge is not clean but names no conflicted file" : files.length > MAX_CONFLICT_FILES ? `${files.length} files conflict, over the limit of ${MAX_CONFLICT_FILES}` : null;
+
 /**
  * The conflicted files of a merge tree as the resolver and the fix session get them: each file's sections (numbered across the
  * files) with their context, within the size caps. `hold`: refused for the same reason at every run for this head.
  */
 export async function conflictShown(git: Git, tree: string, head: string, baseSha: string, files: string[], scripts: BuildScripts): Promise<{ ok: true; shown: ConflictShown[] } | { ok: false; reason: string; hold: boolean }> {
   const hold = (reason: string) => ({ ok: false as const, reason, hold: true });
-  if (!files.length) return hold("the merge is not clean but names no conflicted file");
-  if (files.length > MAX_CONFLICT_FILES) return hold(`${files.length} files conflict, over the limit of ${MAX_CONFLICT_FILES}`);
+  const count = countRefusal(files);
+  if (count) return hold(count);
   let allSections = 0;
   const shown: ConflictShown[] = [];
   let nextId = 1;
@@ -256,7 +260,7 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
     if (!pr.headRepository || !pushable(pr.headRepository.nameWithOwner, x.repo, pr.maintainerCanModify, pr.headRefName, await longLivedOf(db, x.repo), !!pr.headRef?.branchProtectionRule, writes === "yes")) { x.log(`  ${ref}: skipped: the branch is no longer pushable`); return; }
     // In a fix session the item counts as handled once it is known not to wait (see the finally below).
     const sessions = await fixSessionsOn(db, "conflict", x.repo);
-    if (sessions) deferHandled = true;
+    if (sessions || c.lint?.sessionTurn != null) deferHandled = true;
     else x.onHandled?.(++x.handled.n);
     const git = x.git();
     const head = await git.fetchPr(ownerOf(x.repo), x.repo, c.number);
@@ -281,6 +285,8 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
     /** The fix session turn whose change the stored resolution is (null: the resolver's). */
     let sessionTurn: number | null = null;
     if (c.lint) {
+      // A resolution a fix session wrote: the step's hold on the pod ends with the item (a wait keeps it).
+      onSession = c.lint.sessionTurn !== null;
       // The stored resolution is rebuilt on the same two parents, then gated on its lint task.
       files = c.lint.files;
       if (merge.clean || [...merge.conflicted].sort().join("\n") !== [...files].sort().join("\n")) { await fail("failed", "the merge no longer conflicts in the files that were resolved"); return; }
@@ -297,7 +303,6 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       const resolutionDiff = await git.diffText(merge.tree, tree);
       const res = await readLint(db, c.lint.task ?? -1, { against: resolutionDiff });
       if (res.kind === "pending") { x.log(`  ${ref}: the lint task is still running`); return; }
-      onSession = c.lint.sessionTurn !== null;
       if (res.kind === "infra-failed") { await fail("failed", `lint: ${res.reason}`); return; }
       const verdict = lintVerdict(res.findings, c.lint.round);
       if (verdict.action === "fail") { await fail("rejected", `${findingsWord(res.findings)} remain after ${c.lint.round} rounds: ${oneLine(verdict.first.message)}`); return; }
@@ -325,6 +330,8 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
     } else if (merge.clean) await x.claim(c);
     else {
       files = merge.conflicted;
+      const count = countRefusal(files);
+      if (count) { await refuse(count); return; }
       const scripts = await scriptsOf();
       if (!scripts) { await fail("failed", "the build scripts of the branch or the base could not be read"); return; }
       const views = await conflictShown(git, merge.tree, head, baseSha, files, scripts);
@@ -333,9 +340,11 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       const prDiff = await cachedDiff(db, x.repo, c.number, head, x.d.fetchDiff);
       if (!prDiff.ok) { await fail("failed", `no diff: ${oneLine(prDiff.error)}`); return; }
       const quiet = (await loadQuiet(db, [`${x.repo}#${c.number}`])).size > 0;
-      // In a fix session the model resolves the sections in the PR's workspace, seeded from the merge with its markers.
-      const sessionDeps = sessions ? (x.d.fixSession ?? defaultSessionDeps)(db) : null;
-      if (sessions && !sessionDeps) { waited = true; x.log(`  ${ref}: waiting: this runner is not in the cluster, so it cannot reach the fix session's workspace`); return; }
+      // In a fix session the model resolves the sections in the PR's workspace, seeded from the merge with its markers. Lint
+      // findings on a stored resolution go to whoever wrote it, whatever the switch says now.
+      const inSession = again && c.lint ? c.lint.sessionTurn !== null : sessions;
+      const sessionDeps = inSession ? (x.d.fixSession ?? defaultSessionDeps)(db) : null;
+      if (inSession && !sessionDeps) { waited = true; x.log(`  ${ref}: waiting: this runner is not in the cluster, so it cannot reach the fix session's workspace`); return; }
       await x.claim(c);
       let sessionAnswers: Map<string, Map<number, string>> | null = null;
       if (sessionDeps) {

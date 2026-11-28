@@ -205,6 +205,11 @@ class Recorder {
     return await dropUnlistedPatches(this.db, "fixup", repo, new Set(listed));
   }
 
+  /** The stored conflict resolutions the Plan no longer lists (dropUnlistedPatches). */
+  async dropUnlistedConflicts(repo: string, listed: number[]): Promise<{ repo: string; number: number }[]> {
+    return await dropUnlistedPatches(this.db, "conflict", repo, new Set(listed));
+  }
+
   /** A fixups row and a stages row: `hold` for the two states that need a person, else the PR's `take` stage with a note. */
   async fixup(c: FixCandidate, state: "pushed" | "failed" | "refused" | "rejected" | "superseded" | "cannot-push" | "too-large" | "asked" | "comment-failed" | "comment-unsent" | "push-denied", reason: string | null, files: string[], toHead: string | null = null): Promise<void> {
     const at = this.at();
@@ -266,10 +271,12 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
     const deps = (d.fixSession ?? defaultSessionDeps)(db);
     if (deps) await endStepPod({ ...deps, db, log }, { repo, number }, (raw) => scrubReason(oneLine(raw), d.root));
   };
-  const dropped = await rec.dropUnlisted(repo, sel.listed);
+  const droppedFixups = await rec.dropUnlisted(repo, sel.listed);
+  const droppedConflicts = await rec.dropUnlistedConflicts(repo, sel.conflictListed);
+  const dropped = [...(droppedFixups.length && await fixSessionsOn(db, "fixup", repo) ? droppedFixups : []), ...(droppedConflicts.length && await fixSessionsOn(db, "conflict", repo) ? droppedConflicts : [])];
   // A stored change the plan no longer lists has no lint follow-up any more; another job working the PR parks it itself.
-  if (dropped.length && await fixSessionsOn(db, "fixup", repo)) {
-    for (const x of dropped) {
+  if (dropped.length) {
+    for (const x of new Map(dropped.map((d) => [d.number, d])).values()) {
       const release = await leaseItem(db, `pr:${repo}#${x.number}`, log);
       if (!release) continue;
       try { await endStep(x.number); } finally { await release(); }

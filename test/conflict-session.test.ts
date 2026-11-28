@@ -28,6 +28,16 @@ test("a file resolved in place gives back the answers it was spliced from; an ed
   assert.ok(!outside.ok && /outside the conflict sections/.test(outside.reason));
   const longer = answersFromFile(content, view, file.replace("let y = 2;\n", "let y = 2;\nlet p = 3;\nlet q = 4;\nlet r = 5;\nlet s = 6;\n"));
   assert.ok(!longer.ok && /neither side/.test(longer.reason));
+
+  // Hostile sizes: a long piece between the sections repeated through a 1 MiB file, and many short pieces inside a section.
+  const piece = "fn x() {}\n".repeat(200);
+  const wide = `fn a() {}\n<<<<<<< ours\nlet x = 1;\n=======\nlet x = 2;\n>>>>>>> theirs\n${piece}<<<<<<< ours\n/// One.\n=======\n/// Two.\n>>>>>>> theirs\nfn c() {}\n`;
+  const wideView = conflictView("src/lib.rs", wide, 1)!;
+  const huge = answersFromFile(wide, wideView, `fn a() {}\n${piece.repeat(Math.ceil((1 << 20) / piece.length))}/// Two.\nfn c() {}\n`);
+  assert.ok(!huge.ok && /size limit/.test(huge.reason));
+  const tight = `fn a() {}\n<<<<<<< ours\n}\n=======\n}\n>>>>>>> theirs\n}\n<<<<<<< ours\n}\n=======\n}\n>>>>>>> theirs\nfn c() {}\n`;
+  const many = answersFromFile(tight, conflictView("src/lib.rs", tight, 1)!, `fn a() {}\n${"}\n".repeat(50_000)}fn c() {}\n`);
+  assert.ok(!many.ok);
 });
 
 test("with fix sessions on for conflicts, the session's resolved file goes through the gates and the lint task to the merge commit", async () => {

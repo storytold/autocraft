@@ -5,16 +5,22 @@
 import { currentJob, isHalt } from "../agents/call.ts";
 import { loadStoredPatches } from "../data/changes/index.ts";
 import { loadFixTurnsById, loadLiveFixSession } from "../data/fixsession/index.ts";
+import { loadItems } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
 import { release, take } from "../runner/leases.ts";
 import type { FixSession } from "./store.ts";
 import { fixSessionLease } from "./turn.ts";
 import { parkSession, type FixWorkspaceEnv } from "./workspace.ts";
 
-/** A change a turn of the session wrote is stored and waits for its lint task, whose findings go back to the session. */
+/**
+ * A change a turn of the session wrote at the PR's current head is stored and waits for its lint task, whose findings go back to the
+ * session. A row at an older head has no follow-up: the plan no longer lists it.
+ */
 async function lintFollowUpPending(db: Db, s: FixSession): Promise<boolean> {
+  const head = (await loadItems(db, [{ repo: s.repo, number: s.number }], "pr")).get(`${s.repo}#${s.number}`)?.head_oid ?? null;
+  if (head === null) return false;
   const turns = (await loadStoredPatches(db, [{ repo: s.repo, number: s.number }], ["fixup", "cifix", "conflict"]))
-    .flatMap((p) => (p.lintTask !== null && p.sessionTurn !== null ? [p.sessionTurn] : []));
+    .flatMap((p) => (p.head === head && p.lintTask !== null && p.sessionTurn !== null ? [p.sessionTurn] : []));
   if (!turns.length) return false;
   return [...(await loadFixTurnsById(db, turns)).values()].some((t) => t.sessionId === s.id);
 }

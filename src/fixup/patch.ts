@@ -638,7 +638,7 @@ export function spliceSections(text: string, answers: string[], path = ""): stri
 
 /** Splits of an edited file into its sections' answers that answersFromFile checks, and the partial splits it walks, before it gives up. */
 const MAX_SPLITS = 64;
-const MAX_SPLIT_STEPS = 20_000;
+const MAX_SPLIT_STEPS = 2_000;
 
 /**
  * The answers of a conflicted file resolved in place (a fix session edits the merge tree's file in its workspace): `content` is the
@@ -658,6 +658,8 @@ export function answersFromFile(content: string, view: ConflictFile, edited: str
   const first = pieces[0]!, last = pieces[n]!;
   const outside: Resolution = { ok: false, reason: "lines outside the conflict sections changed; only the lines between the markers may change" };
   if (edited.length < first.length + last.length || !edited.startsWith(first) || !edited.endsWith(last)) return outside;
+  // The answers take what the pieces leave; over the resolver's size cap they are refused before any split is searched.
+  if (edited.length - pieces.reduce((sum, p) => sum + p.length, 0) > RESOLVE_MAX_TOTAL) return { ok: false, reason: "the resolved sections are over the size limit" };
   const end = edited.length - last.length;
   // The last piece follows a marker line, so the text before it ends a line.
   if (last !== "" && end > first.length && edited[end - 1] !== "\n") return outside;
@@ -675,14 +677,17 @@ export function answersFromFile(content: string, view: ConflictFile, edited: str
       return ++tried >= MAX_SPLITS;
     }
     const piece = pieces[i + 1]!;
-    for (let at = from; at <= end - piece.length;) {
-      const k = edited.indexOf(piece, at);
-      if (k < 0 || k > end - piece.length) break;
+    // A section's answer is at most RESOLVE_MAX_SECTION long, so its piece starts no further on; the search reads no more than that.
+    const span = edited.slice(from, Math.min(end, from + RESOLVE_MAX_SECTION + piece.length));
+    for (let at = 0; at <= span.length - piece.length;) {
+      const w = span.indexOf(piece, at);
+      if (w < 0) break;
+      const k = from + w;
       if (k === from || edited[k - 1] === "\n") {
         answers[i] = edited.slice(from, k);
         if (walk(i + 1, k + piece.length)) return true;
       }
-      at = k + 1;
+      at = w + 1;
     }
     return false;
   };

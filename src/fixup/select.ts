@@ -73,9 +73,9 @@ export function onlyPr(sel: FixSelection, number: number | undefined): FixSelect
 /** The work that may run for `by` (mayRun); `approved`: only the PRs approved for merge, or only the others (the step's two jobs). */
 export async function selectFixups(db: Db, repo: string, run?: string | null, plans?: PlanSet, by: By = CLI_BY, approved?: boolean): Promise<FixSelection> {
   const opts = { repo, by, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) };
-  const out: FixSelection = { fix: [], cannotPush: [], ask: [], lint: [], listed: [], conflictMerge: [], conflictAsk: [] };
+  const out: FixSelection = { fix: [], cannotPush: [], ask: [], lint: [], listed: [], conflictListed: [], conflictMerge: [], conflictAsk: [] };
   const conflicts = await planned(db, "conflict", opts), fixups = await planned(db, "fixup", opts);
-  const lintFixups = await planned(db, "lint", { ...opts, bucket: "fixup", refused: true }), lintConflicts = await planned(db, "lint", { ...opts, bucket: "conflict" });
+  const lintFixups = await planned(db, "lint", { ...opts, bucket: "fixup", refused: true }), lintConflicts = await planned(db, "lint", { ...opts, bucket: "conflict", refused: true });
   // Read once for the repo, or with a planner pass's Plans once for every repo of the pass.
   const reads = plans ? await passReads(db, plans, run) : await fixReads(db, conflicts, fixups, lintFixups, lintConflicts);
   const titleOf = (n: number) => (reads.titles.get(`${repo}#${n}`) ?? "").slice(0, 300);
@@ -135,8 +135,11 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
   // Stored conflict resolutions whose lint task ended: collected by the conflict step.
   for (const { facts: f, action } of lintConflicts) {
     const head = action.head!;
+    const may = mayRun({ facts: f, action }, by).ok;
     for (const w of reads.stored) {
       if (w.kind !== "conflict" || w.repo !== repo || w.number !== f.number || w.head !== head || !w.baseSha) continue;
+      out.conflictListed.push(w.id);
+      if (!may) continue;
       out.conflictMerge.unshift({
         repo, number: f.number, head, base: f.conflict!.base, title: titleOf(f.number),
         reason: wantedFor(f), attempt: w.attempt, pushable: f.pushable,
