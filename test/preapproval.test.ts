@@ -22,6 +22,8 @@ import { queueOriginOf, queuePage } from "../src/dash/api/queue-page.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { CachedEntry } from "../src/core/plan-read.ts";
 import { refreshPlanCache } from "../src/core/plan-cache.ts";
+import { runChecks } from "../src/review/index.ts";
+import { LANES, planCtx } from "../src/runner/autopilot.ts";
 
 let current: World | null = null;
 /** The repo with an operator who may act on it. */
@@ -455,6 +457,24 @@ describe("pre-approved merge", () => {
     await assert.rejects(cancelPreapproval(w.db, OPERATOR, "app", 19, failing));
     assert.equal((await w.db.get(w.db.k.selectFrom("merge_batches").select("state").where("id", "=", 6)))!.state, "open");
     assert.equal((await preapprovalOf(w.db, "app", 19))?.state, "queued");
+  });
+
+  test("a leg waiting in ci on stale pending checks gets them read, also while its repo has a batch open; green CI moves it on", async () => {
+    const w = await (await take(await (await fresh()).pr(2), 20)).review(20, { verdict: "take-fix" });
+    await inCi(w, 20);
+    await w.premerge(20, "clean");
+    // The stored checks are an old reading of the head before the fix-up, still pending; on GitHub CI at the new head has finished green.
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ head_oid: "sha20", overall: "pending", fetched_at: "2025-12-31T00:00:00Z" }).where("number", "=", 20));
+    await w.db.run(w.db.k.insertInto("merge_batches").values({ id: 7, repo: "app", branch: "integration-app-3", state: "open", base_sha: "b", commit_sha: "t", pr_number: 77, created_at: T0, updated_at: T0 }));
+    await w.db.run(w.db.k.insertInto("merge_batch_prs").values({ batch_id: 7, number: 2, head_oid: "sha2", position: 1 }));
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 20))?.state, "ci");
+    const checksJobs = async () => (await LANES.find((l) => l.name === "merge")!.detect(w.db, await planCtx(w.db))).filter((c) => c.step === "checks");
+    assert.deepEqual((await checksJobs()).map((c) => c.params.repo), ["app"]);
+    await runChecks(w.db, { repo: "app" }, () => {}, w.gh.querier);
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 20))?.state, "queued");
+    assert.equal((await checksJobs()).length, 0);
   });
 });
 

@@ -72,10 +72,19 @@ export async function batchStates(db: Db, repo?: string): Promise<Map<string, "b
   return (await loadMergeFacts(db, openItemKeys({ kind: "pr", ...(repo === undefined ? {} : { repos: [repo] }) }))).batchStates;
 }
 
-/** Repos with a batch that has something to do: a batch PR to watch, or a batch still to be pushed whose retry wait is over. */
-export async function batchesDue(db: Db, now = new Date()): Promise<string[]> {
+/**
+ * Repos with a batch that has something to do (a batch PR to watch, or a batch still to be pushed whose retry wait is over), each with the
+ * members (`repo#number`) of those batches: the merge job reads their checks with the batch's.
+ */
+export async function batchesDue(db: Db, now = new Date()): Promise<Map<string, Set<string>>> {
   // No repo approval is read: a batch may hold only PRs people approved one by one, and each member's approval is checked before the batch's writes.
-  return [...new Set((await loadBatchDue(db, now)).map((b) => b.repo))];
+  const out = new Map<string, Set<string>>();
+  for (const b of await loadBatchDue(db, now)) {
+    const members = out.get(b.repo) ?? new Set<string>();
+    for (const m of b.memberRefs) members.add(m);
+    out.set(b.repo, members);
+  }
+  return out;
 }
 
 /** Per repo whose last batches failed to publish, when its next batch may start (ms); it may be in the past. */
