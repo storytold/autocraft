@@ -12,6 +12,8 @@
 //   resuming   → parked    a resume that cannot start or seed goes back to parked with its kept volume and checkpoint, up to
 //                          RESUME_TRIES times; then it stays parked with the reason in its error.
 // A parked volume whose last checkpoint failed holds work no checkpoint has: it is kept past PARKED_VOLUME_MS.
+// A PR fix session's parked workspace ends FIX_SESSION_PARKED_END_MS after it parked, volume and all (its steps store their work).
+// A review's own workspace ends once parked, or once its job is gone and not resuming (reviewWorkspaceDone).
 //   any live   → failed    the pod could not start or seed, or passed its time limit; pod and volume deleted
 //   ended                  set by whoever is done with it; the pass deletes pod and volume
 // While ready, a checkpoint (`git diff --binary` against the base commit) is stored every CHECKPOINT_EVERY_MS. Seeding,
@@ -25,7 +27,8 @@ import { spawn } from "node:child_process";
 import type { Db } from "../db/index.ts";
 import { exec, fixupDir, GIT_ENV, gitDirEnv, Git, HARDENING } from "../fixup/git.ts";
 import { ownerOf } from "../owners.ts";
-import { failStuckCalls, loadEnvPass, loadWorkspaces, loadWorkspacePass, patchWorkspaces } from "../data/build/index.ts";
+import { loadJobs } from "../data/jobs/index.ts";
+import { failStuckCalls, isPrFixSessionWorkspace, loadEnvPass, loadWorkspaces, loadWorkspacePass, patchWorkspaces, reviewWorkspaceJob } from "../data/build/index.ts";
 import type { WorkspacePass } from "../data/build/index.ts";
 import { envSettings } from "./envs.ts";
 import { KubeError, type KPod, type KubeApi } from "./kube-api.ts";
@@ -51,6 +54,12 @@ export const CHECKPOINT_EVERY_MS = 10 * 60_000;
 export const PARKED_VOLUME_MS = 60 * 60_000;
 /** A parked workspace whose volume is gone ends this long after it parked; the checkpoint stays on the row. */
 export const PARKED_END_MS = 24 * 3600_000;
+/**
+ * A parked PR fix session workspace ends this long after it parked, volume and all, also when its last checkpoint failed: its steps
+ * store what they keep, so the volume is only a warm cache, and a later step starts a fresh workspace. A security fix session's
+ * keeps the rules above: its round waits hours for confidential builds.
+ */
+export const FIX_SESSION_PARKED_END_MS = 60 * 60_000;
 /** A resume onto a kept volume whose pod is still unscheduled after this long asks whether the volume's node is gone. */
 export const RESUME_PENDING_MS = 3 * 60_000;
 /** A node not ready for this long counts as gone, with the volumes it holds. */
@@ -426,13 +435,34 @@ function podFailure(pod: KPod): string {
   return `The workspace pod stopped${st?.reason ? ` (${st.reason}${st.message ? `: ${st.message}` : ""})` : ""}`.slice(0, 300);
 }
 
+/**
+ * A review's own workspace (src/fixsession/review.ts) that no review will use again: parked (it went idle), or its job ended
+ * without ending it (stopped, failed) and is not waiting to resume. A running or resuming job's workspace stays for that job.
+ */
+async function reviewWorkspaceDone(c: Ctx, w: WorkspaceRow): Promise<boolean> {
+  const job = reviewWorkspaceJob(w);
+  if (job === undefined) return false;
+  if (w.state === "parked") return true;
+  if (job === null) return false;
+  const j = (await loadJobs(c.d.db, [job])).get(job);
+  return !j || !(j.state === "running" || (j.state === "queued" && j.resumes > 0));
+}
+
 async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
   const now = c.now();
   const age = now - Date.parse(w.state_at);
+  if (await reviewWorkspaceDone(c, w)) {
+    if (await moveWorkspace(c.d.db, w.id, LIVE_STATES, "ended", {}, now)) c.d.log(`workspace launcher: review workspace ${w.id} ended (${w.state === "parked" ? "idle" : "its job is gone"})`);
+    return;
+  }
   if (w.state === "parked") {
     const bound = w.resume_tries < RESUME_TRIES ? boundCall(c, w) : null;
     if (bound) {
       if (await resumeWorkspace(c.d.db, w.id, now)) c.d.log(`workspace launcher: workspace ${w.id} resuming for call ${w.remote_call_id} (${bound})${w.pvc ? " on its volume" : "; rebuilding from base and checkpoint"}`);
+      return;
+    }
+    if (isPrFixSessionWorkspace(w)) {
+      if (age > FIX_SESSION_PARKED_END_MS && await moveWorkspace(c.d.db, w.id, ["parked"], "ended", {}, now)) c.d.log(`workspace launcher: PR fix session workspace ${w.id} ended after ${FIX_SESSION_PARKED_END_MS / 60_000} min parked`);
       return;
     }
     // TODO(AUTO-43): also delete parked volumes oldest first when the node's disk passes 70%, once there is a disk metric.

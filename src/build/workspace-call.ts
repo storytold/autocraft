@@ -11,6 +11,7 @@ import { bindWorkspaceCall, loadWorkspaces, loadWorkspaceCallSince, WorkspaceErr
 import type { TaskBundle, Tier } from "../remote/protocol.ts";
 import { MCP_PATH, mcpTools } from "../sandbox/agents.ts";
 import { BuildError } from "./envs.ts";
+import type { WorkspaceToolName } from "./workspace-tool-specs.ts";
 import { OWN_CALLS, WORKSPACE_SERVER } from "./workspace-tools.ts";
 import { diffStat, LIVE_STATES } from "./workspaces.ts";
 
@@ -42,11 +43,18 @@ export type WorkspaceCallRequest = {
   forLogin?: string;
   /** With forLogin: the call runs in one of that user's Task Runner slots, not their own lane (NewCall.boundSlot). */
   boundSlot?: boolean;
+  /**
+   * The workspace tools the session may call, with every tool of the other servers; absent: all of them. An empty list allows no
+   * tool at all (a turn that only corrects its reply); the tool list stays, so a resumed session's prompt cache still matches.
+   */
+  tools?: readonly WorkspaceToolName[];
 };
 
-/** The `claude` arguments of a workspace session: no built-in tools, only the listed MCP servers' tools, allowed without asking. */
-export function workspaceClaudeArgs(r: Pick<WorkspaceCallRequest, "model" | "effort" | "maxTurns" | "system" | "keepSession">, servers: string[]): string[] {
-  return ["-p", "--model", r.model, "--effort", r.effort, "--output-format", "stream-json", "--verbose", "--tools", "", "--allowedTools", mcpTools(servers).join(","),
+/** The `claude` arguments of a workspace session: no built-in tools, only the MCP servers' tools `r.tools` allows, allowed without asking. */
+export function workspaceClaudeArgs(r: Pick<WorkspaceCallRequest, "model" | "effort" | "maxTurns" | "system" | "keepSession" | "tools">, servers: string[]): string[] {
+  const allowed = r.tools === undefined ? mcpTools(servers)
+    : r.tools.length ? [...r.tools.map((t) => `mcp__${WORKSPACE_SERVER}__${t}`), ...mcpTools(servers.filter((s) => s !== WORKSPACE_SERVER))] : [];
+  return ["-p", "--model", r.model, "--effort", r.effort, "--output-format", "stream-json", "--verbose", "--tools", "", ...(allowed.length ? ["--allowedTools", allowed.join(",")] : []),
     "--permission-mode", "dontAsk", "--permission-prompts", "none", "--restricted", ...(r.system ? ["--system-prompt", r.system] : []),
     "--mcp-config", MCP_PATH, "--strict-mcp-config", "--disable-slash-commands", ...(r.keepSession ? [] : ["--no-session-persistence"]), "--max-turns", String(r.maxTurns)];
 }

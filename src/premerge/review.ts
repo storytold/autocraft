@@ -30,6 +30,7 @@ import { carriedPremerges } from "../review/carry.ts";
 import { opusCandidateOf, type OpusCandidate } from "../review/opus-candidates.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForPr } from "../sandbox/index.ts";
+import { inReviewWorkspace } from "../fixsession/review.ts";
 import { type PremergeReview } from "./parse.ts";
 import { notBlocking } from "./types.ts";
 import { loadItems } from "../data/mirror/index.ts";
@@ -53,12 +54,12 @@ export type PremergeParams = {
   /** Only PRs approved for merge (the step's approved job), or only the others; absent: every PR. */
   approved?: boolean;
 };
-export type PremergeDeps = Pick<OpusDeps, "fetchDiff" | "model" | "maxChars" | "checkout" | "semantic"> & { now?: () => number };
+export type PremergeDeps = Pick<OpusDeps, "fetchDiff" | "model" | "maxChars" | "checkout" | "semantic" | "workspace"> & { now?: () => number };
 export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; /** Rows stored with no model call (carriedPremerges). */ carried: number; findings: number; /** Defects that block, or carry no class (which blocks). */ defects: number; /** Defects classed as not blocking: on a PR approved for merge they are filed as follow-ups. */ notBlocking: number; failed: string[]; moved: string[]; /** PRs that left the path that asked for the review (their diff keeps them outside the merge rule, or the plan changed): no model call. */ off: string[] };
 
 export function defaultPremergeDeps(): PremergeDeps {
   const d = defaultOpusDeps();
-  return { fetchDiff: d.fetchDiff, model: PROMPT.models[0]!, maxChars: d.maxChars, checkout: (r, n, h) => checkoutForPr(r, n, h, console.log) };
+  return { fetchDiff: d.fetchDiff, model: PROMPT.models[0]!, maxChars: d.maxChars, checkout: (r, n, h) => checkoutForPr(r, n, h, console.log), workspace: d.workspace ?? null };
 }
 
 /** A PR due its pre-merge review: the head to review and the facts it was planned from. */
@@ -168,14 +169,16 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
     else if (p.kind === "no-threads") await fail(`retry: ${p.error}`);
     else {
       const { input } = p;
-      const checkout = (await deps.checkout?.(repo, e.number, head)) ?? undefined;
-      if (checkout) input.repo_dir = REPO_PATH;
       const dir = referenceDir(repo);
       const semantic: SemanticDeps | undefined = dir ? deps.semantic ?? defaultSemanticDeps(db, ref) : undefined;
-      const r = await runModelStep(db, PREMERGE_OPUS, input, {
-        model: deps.model, checkout, reference: checkout ? dir : undefined, ctx: { dir, semantic },
-        usage: { run: runId, agent: `premerge-${ref.replace("#", "-")}`, stage: "premerge", items: (ok) => (ok ? 1 : 0) },
-        onReply: (reply) => { if (reply.fixTurn) log(`  ${ref}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
+      const r = await inReviewWorkspace(db, deps.workspace, e, head, log, async (workspace) => {
+        const checkout = workspace ? undefined : (await deps.checkout?.(repo, e.number, head)) ?? undefined;
+        if (checkout) input.repo_dir = REPO_PATH;
+        return await runModelStep(db, PREMERGE_OPUS, input, {
+          model: deps.model, checkout, reference: checkout || workspace ? dir : undefined, ...(workspace && { workspace }), ctx: { dir, semantic },
+          usage: { run: runId, agent: `premerge-${ref.replace("#", "-")}`, stage: "premerge", items: (ok) => (ok ? 1 : 0) },
+          onReply: (reply) => { if (reply.fixTurn) log(`  ${ref}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
+        });
       });
       const got: PremergeReview | null = r.ok ? r.value : null;
       // The call takes minutes: a push or a merge meanwhile makes the review one of a head nobody will merge.

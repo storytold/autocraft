@@ -12,7 +12,7 @@ import { loadStageLimits } from "./limits.ts";
 import { loadTrackedRepos } from "./repos.ts";
 import { loadTrips } from "./trips.ts";
 import { DEFAULT_OPTIONAL_CHECKS } from "../../core/rules.ts";
-import { FIX_STEPS, type FixStep } from "../fixsession/types.ts";
+import { FIX_SESSION_SWITCHES, type FixSessionSwitch } from "../fixsession/types.ts";
 import type { Config, ControlSnapshot, LiveConfig, RepoConfig, SettingDef, SettingKey, SettingPatch, SettingRow, SettingType } from "./types.ts";
 
 // ---- the registry ------------------------------------------------------------------------------------------------------
@@ -37,7 +37,7 @@ const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is
 /** GitHub's login rules: letters, digits and single hyphens, not starting or ending with one, at most 39 characters. */
 const MENTION = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*$/;
 const REPO_LIST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
-export type FixSessionsSetting = { steps: FixStep[]; repos: string[] | null };
+export type FixSessionsSetting = { steps: FixSessionSwitch[]; repos: string[] | null };
 const stepParallelText = (raw: string | undefined): string => {
   if (raw === "none") return raw;
   const n = Number(raw);
@@ -99,11 +99,11 @@ export const SETTINGS = {
   planShadow: reg<"on" | "off">("plan_shadow", "text", "off", { owner: "planner" }, (r) => (r === "on" ? "on" : "off")),
   /** The tracked repo the hourly self-evaluation reads and files its issues on (src/eval); null: the evaluation is off. */
   evalRepo: reg<string | null>("eval_repo", "text", null, { owner: "eval" }, (r) => { const v = r?.trim(); return v && REPO_LIST_NAME.test(v) ? v : null; }),
-  /** The fix steps that work in fix sessions (src/fixsession), and the repos they do it in (null: every repo). */
+  /** The fix steps that work in fix sessions (src/fixsession), with `review` for the Opus reviews that run in workspaces of their own, and the repos they do it in (null: every repo). */
   fixSessions: reg<FixSessionsSetting>("fix_sessions", "json", { steps: [], repos: null }, { owner: "fixup" }, (r) => {
     const v = jsonOf(r) as { steps?: unknown; repos?: unknown } | undefined;
     if (!v || typeof v !== "object") return { steps: [], repos: null };
-    const steps = FIX_STEPS.filter((s) => strings(v.steps).includes(s));
+    const steps = FIX_SESSION_SWITCHES.filter((s) => strings(v.steps).includes(s));
     const repos = Array.isArray(v.repos) ? [...new Set(strings(v.repos).filter((n) => REPO_LIST_NAME.test(n)))].sort() : null;
     return { steps, repos };
   }),

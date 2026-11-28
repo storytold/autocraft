@@ -4,7 +4,7 @@
 // lint follow-up needs again is the commit plus the stored patch (restorePatch). A session's workspace is parked as soon as its step
 // has nothing pending (parkSession) and ended with the session (endSessionWorkspaces, sweepFixSessions).
 import type { Db } from "../db/index.ts";
-import { addWorkspaceCalls, loadEnvs, markCalls, patchWorkspaces, SECURITY_WORKSPACE_OWNER } from "../data/build/index.ts";
+import { addWorkspaceCalls, FIX_SESSION_WORKSPACE_OWNER, loadEnvs, markCalls, patchWorkspaces, SECURITY_WORKSPACE_OWNER } from "../data/build/index.ts";
 import type { WorkspaceRow } from "../data/build/index.ts";
 import { envSettings, getEnv, listEnvs } from "../build/envs.ts";
 import type { KubeApi } from "../build/kube-api.ts";
@@ -107,7 +107,7 @@ const envsChangedAt = (k: readonly { updatedAt: string | null; createdAt: string
   k.reduce<string | null>((m, e) => { const t = e.updatedAt ?? e.createdAt; return m === null || t > m ? t : m; }, null);
 
 /** The workspace owner of a fix session's workspaces; a security fix session's marks its workspaces as private (isSecurityWorkspace). */
-const ownerOf = (session: Pick<FixSession, "id" | "kind">): string => `${session.kind === "security" ? SECURITY_WORKSPACE_OWNER : "fix session"} ${session.id}`;
+const ownerOf = (session: Pick<FixSession, "id" | "kind">): string => `${session.kind === "security" ? SECURITY_WORKSPACE_OWNER : FIX_SESSION_WORKSPACE_OWNER} ${session.id}`;
 
 /** The session's workspaces at `at` that failed to start since a kubernetes environment last changed. */
 async function startFailures(db: Db, session: Pick<FixSession, "id" | "kind">, at: string): Promise<number> {
@@ -132,7 +132,7 @@ export async function fixSessionEnv(db: Db, kind: FixSessionKind): Promise<strin
  * ready, or when the session ended meanwhile. The FIX_START_FAILURES-th workspace at `at` that fails to start fails the step
  * (`failed`); after that none is made at `at` (a wait) until a kubernetes environment changes.
  */
-export async function ensureWorkspace(session: FixSession, at: string, env: FixWorkspaceEnv, o: { keepTree?: boolean } = {}): Promise<WorkspaceReady | WorkspaceWait | WorkspaceFailed> {
+export async function ensureWorkspace(session: FixSession, at: string, env: FixWorkspaceEnv, o: { keepTree?: boolean; keptSince?: string } = {}): Promise<WorkspaceReady | WorkspaceWait | WorkspaceFailed> {
   if (!SHA.test(at)) throw new Error(`not a commit: ${at}`);
   const db = env.db;
   const now = env.now ?? Date.now;
@@ -201,9 +201,11 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
     }
     row = ready;
     if (made) break;
-    // A tree rebuilt from the base (no volume to resume on) lacks the earlier turn's changes.
+    // A tree rebuilt from the base (no volume to resume on) lacks the earlier turn's changes, as does one reseeded or restored
+    // after `keptSince` (a review reseeded it under a turn a halted job left).
     const rebuilt = row.restored === "empty" || !!row.restored?.startsWith("checkpoint ");
-    if (o.keepTree && row.base_sha === at && !rebuilt) break;
+    const replaced = o.keptSince !== undefined && row.restored_at !== null && (row.restored === "reseed" || row.restored === "patch") && Date.parse(row.restored_at) > Date.parse(o.keptSince);
+    if (o.keepTree && row.base_sha === at && !rebuilt && !replaced) break;
     // Reseeded at `at`, also at the same commit: the new step starts from a clean tree.
     const src = await sourceArchive(session.repo, at);
     let r: Awaited<ReturnType<typeof reseedWorkspace>>;
@@ -214,9 +216,10 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
     }
     if (r.ok) {
       row = { ...row, base_sha: at, base_commit: r.baseCommit };
-      if (o.keepTree && rebuilt) {
+      // With keepTree a reseed always drops the tree the earlier turn left.
+      if (o.keepTree) {
         how = "remade";
-        why = `workspace ${id} was rebuilt without its changes`;
+        why = rebuilt ? `workspace ${id} was rebuilt without its changes` : replaced ? `workspace ${id} was reseeded after the turn was queued` : `workspace ${id} was at ${short(row.base_sha)}`;
         treeLost = true;
       } else how = "reseeded";
       if (!await updateSession(db, session.id, { workspaceId: id, head: at }, now())) throw gone();
@@ -234,14 +237,21 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
   return { kind: "ready", workspaceId: id!, baseCommit, how, why, moved, dependencies, ended, treeLost };
 }
 
+/** When a caller's wait for its workspace ends (ms): in all, and while the workspace still waits for a slot (state requested). */
+export type ReadyDeadline = { all: number; slot: number };
+
+/** The ready row of workspace `id` (resumed when parked), waited for until `until`: one deadline however often the caller asks. */
+export const waitReady = (env: FixWorkspaceEnv, id: number, until: ReadyDeadline): ReturnType<typeof readyRow> => readyRow(env, id, until);
+
 /**
  * The ready row of workspace `id`, resuming it when parked. `lost`: it will not be ready (gone, failed or ended, or parked and out of
- * resumes); `pending`: it is still waiting for a slot or starting after READY_LIMIT_MS (an external wait, Workspace start), or at
- * once with `pollReady` false.
+ * resumes); `pending`: it is still waiting for a slot or starting past the deadline (READY_LIMIT_MS from now for a step; an external
+ * wait, Workspace start), or at once with `pollReady` false.
  */
-async function readyRow(env: FixWorkspaceEnv, id: number): Promise<WorkspaceRow | { lost: string } | { pending: string }> {
+async function readyRow(env: FixWorkspaceEnv, id: number, until?: ReadyDeadline): Promise<WorkspaceRow | { lost: string } | { pending: string }> {
   const now = env.now ?? Date.now;
   const from = now();
+  const end = until ?? { all: from + READY_LIMIT_MS, slot: from + READY_LIMIT_MS };
   for (let last = "";;) {
     const w = await getWorkspace(env.db, id);
     if (!w) return { lost: `workspace ${id} is gone` };
@@ -249,7 +259,10 @@ async function readyRow(env: FixWorkspaceEnv, id: number): Promise<WorkspaceRow 
     if (w.state === "parked" && !await resumeWorkspace(env.db, id, now())) return { lost: `workspace ${id} is parked and could not be resumed${w.error ? `: ${w.error}` : ""}` };
     if (!LIVE_STATES.includes(w.state as WorkspaceStateName)) return { lost: `workspace ${id} is ${w.state}${w.error ? `: ${w.error}` : ""}` };
     if (env.pollReady === false) return { pending: `workspace ${id} is ${w.state === "parked" ? "resuming" : w.state}` };
-    if (now() - from > READY_LIMIT_MS) return { pending: `workspace ${id} is still ${w.state} after ${Math.round(READY_LIMIT_MS / 60_000)} min` };
+    const t = now(), waited = t - from;
+    if (t > end.all || (w.state === "requested" && t > end.slot)) {
+      return { pending: `workspace ${id} is still ${w.state === "requested" ? "waiting for a slot" : w.state} after ${Math.max(1, Math.round(waited / 60_000))} min` };
+    }
     if (await env.cancelled?.()) throw new WorkspaceUnavailable("cancelled while the workspace started", false);
     if (w.state !== last) {
       last = w.state;
@@ -265,7 +278,7 @@ async function readyRow(env: FixWorkspaceEnv, id: number): Promise<WorkspaceRow 
  * from (with no warm version, whenever it has any), through the environment's crate mirror. A fetch that fails does not fail the
  * step: the opening message says so (turn.ts dependencyNote), and the lint task, which can fetch, stays the gate.
  */
-async function fetchIfNeeded(env: FixWorkspaceEnv, w: WorkspaceRow, at: string): Promise<DependencyFetch> {
+export async function fetchIfNeeded(env: FixWorkspaceEnv, w: WorkspaceRow, at: string): Promise<DependencyFetch> {
   const db = env.db;
   const now = env.now ?? Date.now;
   if (!await cargoLocksDiffer(w.repo, w.warm_commit, at)) return { state: "unchanged" };
