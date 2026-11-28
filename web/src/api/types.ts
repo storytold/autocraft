@@ -3,6 +3,7 @@
 
 import type { UserSettings, UserSettingsReply } from "../../../src/remote/protocol.ts";
 import type { StepValue } from "../../../src/core/item-query.ts";
+import type { DiffLine } from "../../../src/prompts/diff.ts";
 export type RepoName = string;
 
 export interface ItemRef {
@@ -1042,6 +1043,87 @@ export interface PromptInfo {
   /** Exactly what would be sent on stdin for `exampleItems` (made-up items). */
   example: string;
   exampleItems: string[];
+  /** Who may edit it and which revision runs. */
+  edit?: PromptEditState;
+  /** The text form of a Claude prompt's active revision in order, locked blocks read-only; [] for Jev prompts. */
+  segments?: PromptSegment[];
+}
+
+/** One part of a prompt's text form (src/prompts/locks.ts): editable text, or a locked block the code relies on. */
+export interface PromptSegment {
+  locked: boolean;
+  name: string | null;
+  text: string;
+}
+
+export interface PromptRevisionInfo {
+  rev: number;
+  kind: "release" | "edit" | "rollback" | "use-release";
+  /** Hash of the text that runs, as recorded on each call. */
+  version: string;
+  author: string;
+  at: string;
+  note: string;
+  /** The revision a rollback copied. */
+  fromRev: number | null;
+  active: boolean;
+}
+
+export interface PromptEditState {
+  /** The active revision; null while the release default runs and nothing was ever saved. */
+  rev: number | null;
+  /** Who made the active revision; null with no revision. */
+  author: string | null;
+  /** The release default runs. */
+  following: boolean;
+  /** The active revision is an edit and the release since changed its default. */
+  newerDefault: boolean;
+  /** The release changed the locked blocks, so the edit cannot run and the release default runs instead. */
+  structureChanged: boolean;
+  mayEdit: boolean;
+  /** The prompt receives a repository's guidance. */
+  guidanceSlot: boolean;
+}
+
+/** A reason a save is refused (src/prompts/checks.ts Problem). */
+export interface PromptProblem {
+  where: string;
+  message: string;
+}
+
+export type { DiffLine };
+
+/** A dry run of a save: what would be refused, and the diff from the active text. */
+export interface PromptCheckReply {
+  ok: boolean;
+  problems: PromptProblem[];
+  diff: DiffLine[];
+  /** The version the text would run as. */
+  version: string;
+}
+
+export interface PromptSaveBody {
+  /** The text form with its lock markers; for guidance, markdown ("" removes it). */
+  body: string;
+  note: string;
+  /** The active revision the edit was made against; a save on any other answers 409. */
+  baseRev: number | null;
+}
+
+/** A repository's guidance for the prompts that judge or write its changes. */
+export interface RepoGuidance {
+  repo: string;
+  /** Markdown; "" when there is none. */
+  text: string;
+  rev: number | null;
+  author: string | null;
+  at: string | null;
+  note: string | null;
+  /** The ids of the prompts it is added to. */
+  prompts: string[];
+  mayEdit: boolean;
+  /** Newest first. */
+  history: PromptRevisionInfo[];
 }
 
 export interface PromptsReport {

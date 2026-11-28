@@ -311,6 +311,22 @@ export function createHttpApi(): Api {
     },
     rates: (window) => get(`/api/rates${qs({ window })}`),
     prompts: () => get("/api/prompts"),
+    prompt: {
+      get: (id) => get(`/api/prompts/${encodeURIComponent(id)}`),
+      history: (id) => get(`/api/prompts/${encodeURIComponent(id)}/history`),
+      diff: (id, from, to) => get(`/api/prompts/${encodeURIComponent(id)}/diff${qs({ from: String(from), to: String(to) })}`),
+      check: (id, body) => post(`/api/prompts/${encodeURIComponent(id)}/check`, body),
+      save: (id, body) => post(`/api/prompts/${encodeURIComponent(id)}`, body),
+      rollback: (id, body) => post(`/api/prompts/${encodeURIComponent(id)}/rollback`, body),
+      useRelease: (id, body) => post(`/api/prompts/${encodeURIComponent(id)}/use-release`, body),
+    },
+    guidance: {
+      list: () => get("/api/prompt-guidance"),
+      get: (repo) => get(`/api/repos/${encodeURIComponent(repo)}/guidance`),
+      check: (repo, body) => post(`/api/repos/${encodeURIComponent(repo)}/guidance/check`, body),
+      save: (repo, body) => post(`/api/repos/${encodeURIComponent(repo)}/guidance`, body),
+      rollback: (repo, body) => post(`/api/repos/${encodeURIComponent(repo)}/guidance/rollback`, body),
+    },
     batch: (id) => get(`/api/batches/${id}`),
     async signOut() {
       await call("POST", "/api/signout");

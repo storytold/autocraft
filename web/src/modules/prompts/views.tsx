@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { CheckIcon, CaretRightIcon, CopyIcon } from "@phosphor-icons/react";
+import { CheckIcon, CaretRightIcon, CopyIcon, PencilSimpleIcon } from "@phosphor-icons/react";
+import { t } from "../../../../src/i18n/index.ts";
 import { useQuery } from "../../api/client";
 import { Pending } from "../../ui/atoms/Pending";
 import type { CommentTemplate, PromptInfo } from "../../api/types";
@@ -7,6 +8,9 @@ import type { ViewProps } from "../../registry/types";
 import { Badge } from "../../ui/atoms/Badge";
 import { Button } from "../../ui/atoms/Button";
 import { cn } from "../../ui/cn";
+import { Tabs } from "../../ui/molecules/Tabs";
+import { PromptEditor } from "./editor";
+import { PromptHistory, ReleaseNotice } from "./history";
 
 function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) {
   const [done, setDone] = useState(false);
@@ -115,11 +119,28 @@ function useHashTarget(id: string, open: () => void) {
   }, [id]);
 }
 
-/** The folded detail sections of a prompt. */
+/** The Base tab: the release notice, the facts, the template (or its editor) and the folded detail sections. */
 function PromptBody({ p }: { p: PromptInfo }) {
   const jev = p.runner === "jev";
+  const [editing, setEditing] = useState(false);
+  const mayEdit = p.edit?.mayEdit === true;
   return (
-    <div className="border-t border-line px-4 py-3">
+    <div className="px-4 py-3">
+      <ReleaseNotice p={p} />
+      {mayEdit && !editing && (
+        <div className="mb-3 flex items-center justify-end">
+          {jev ? (
+            <span className="text-xs text-ink/60">{t("Edited with the Jev form")}</span>
+          ) : (
+            <Button icon={PencilSimpleIcon} onClick={() => setEditing(true)} className="max-md:h-11">{t("Edit")}</Button>
+          )}
+        </div>
+      )}
+      {editing && (
+        <section aria-label={t("Edit {id}", { id: p.id })} className="mb-3">
+          <PromptEditor p={p} onClose={() => setEditing(false)} />
+        </section>
+      )}
       <Facts
         rows={[
           { label: "Expected output", value: <span className="font-mono text-xs leading-relaxed">{p.output}</span> },
@@ -127,10 +148,10 @@ function PromptBody({ p }: { p: PromptInfo }) {
         ]}
       />
       <div className="mt-3">
-        <Fold title={jev ? "Request template" : "Prompt template"} hint={`${p.placeholders.length} placeholder${p.placeholders.length === 1 ? "" : "s"}`}>
+        {!editing && <Fold title={jev ? "Request template" : "Prompt template"} hint={`${p.placeholders.length} placeholder${p.placeholders.length === 1 ? "" : "s"}`}>
           <Code text={p.template} title={jev ? "JSON, sent as one line" : "Text"} marks />
           <Placeholders items={p.placeholders} />
-        </Fold>
+        </Fold>}
         {p.questions.length > 0 && (
           <Fold title="Questions" hint={`${p.questions.length}`}>
             <ul className="space-y-3">
@@ -188,18 +209,33 @@ function PromptHeader({ p }: { p: PromptInfo }) {
       </span>
       <span className="mt-1 block text-sm text-ink/75">{p.purpose}</span>
       <span className="mt-1.5 flex flex-wrap gap-x-3 text-xs text-ink/55">
-        {limitText(p.limits).map((t) => (
-          <span key={t}>{t}</span>
+        {limitText(p.limits).map((l) => (
+          <span key={l}>{l}</span>
         ))}
       </span>
+      {p.edit && <EditLine e={p.edit} />}
     </>
   );
 }
 
+function EditLine({ e }: { e: NonNullable<PromptInfo["edit"]> }) {
+  return (
+    <span className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-ink/70">
+      <span>{e.following || e.rev === null ? t("Release default") : e.author ? t("Edited r{rev} by {author}", { rev: e.rev, author: e.author }) : t("Edited r{rev}", { rev: e.rev })}</span>
+      {e.guidanceSlot && <Badge>{t("Receives repo guidance")}</Badge>}
+      {e.structureChanged ? <Badge tone="warn">{t("Edit not in use")}</Badge> : e.newerDefault && <Badge tone="warn">{t("Newer release default")}</Badge>}
+    </span>
+  );
+}
+
+type CardTab = "base" | "history";
+
 /** A prompt in full (used by the pipeline panel). With `fold`, the header toggles the details. */
 export function PromptCard({ p, fold }: { p: PromptInfo; fold?: boolean }) {
   const [open, setOpen] = useState(!fold);
+  const [tab, setTab] = useState<CardTab>("base");
   useHashTarget(p.id, () => setOpen(true));
+  const idBase = `prompt-${p.id.replace(/[^\w-]/g, "-")}`;
   return (
     <section id={p.id} className="min-w-0 scroll-mt-4 overflow-hidden rounded-md border border-line bg-raised/30 target:border-accent-ink/60">
       {fold ? (
@@ -214,7 +250,15 @@ export function PromptCard({ p, fold }: { p: PromptInfo; fold?: boolean }) {
           <PromptHeader p={p} />
         </div>
       )}
-      {open && <PromptBody p={p} />}
+      {open && (
+        <div className="border-t border-line">
+          <Tabs<CardTab> value={tab} onChange={setTab} label={t("{id} views", { id: p.id })} idBase={idBase} className="px-2"
+            options={[{ value: "base", label: t("Base") }, { value: "history", label: t("History") }]} />
+          <div role="tabpanel" id={`${idBase}-panel-${tab}`} aria-labelledby={`${idBase}-tab-${tab}`}>
+            {tab === "base" ? <PromptBody p={p} /> : <div className="px-4 py-2"><PromptHistory p={p} /></div>}
+          </div>
+        </div>
+      )}
     </section>
   );
 }

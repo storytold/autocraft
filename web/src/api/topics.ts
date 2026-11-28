@@ -7,7 +7,7 @@
  */
 export type Topic =
   | "repos" | "sync" | "items" | "ranks" | "stages" | "checks" | "classify" | "dupes" | "reviews" | "queue" | "workflows" | "workflow-events" | "jobs" | "usage" | "agents"
-  | "envs" | "tasks" | "workspaces" | "actions" | "fixes" | "verify" | "postmerge" | "access" | "settings" | "trace" | "github" | "outside" | "plans" | "conversations" | "steps" | "mainci" | "limits" | "preapprovals" | "security" | "discord" | "discord-links" | "downloads" | "build-features" | "pr-builds" | "nightly" | "remote-helpers" | "remote-queue" | "chat";
+  | "envs" | "tasks" | "workspaces" | "actions" | "fixes" | "verify" | "postmerge" | "access" | "settings" | "trace" | "github" | "outside" | "plans" | "conversations" | "steps" | "mainci" | "limits" | "preapprovals" | "security" | "discord" | "discord-links" | "downloads" | "build-features" | "pr-builds" | "nightly" | "remote-helpers" | "remote-queue" | "chat" | "prompts";
 
 /** What moves an item's queue position (src/rank/position.ts), for every query that carries the badge. */
 const withSlot = (...topics: Topic[]): Topic[] => [...new Set<Topic>([...topics, "steps", "repos"])];
@@ -71,7 +71,9 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["runner-pending:", ["access"]],
   ["model-queue", ["remote-queue"]],
   ["audit:", ["access"]],
-  ["prompts", []],
+  // Prompts, their revisions and the repos' guidance; the list also says who may edit, which follows access.
+  ["prompt", ["prompts", "access"]],
+  ["guidance:", ["prompts", "access"]],
   ["pipeline-state", ["settings", "jobs", "limits", "outside"]],
   ["outside-held", ["outside", "items", "repos"]],
   ["pipeline-jobs:", ["jobs", "usage"]],
