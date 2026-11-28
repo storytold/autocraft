@@ -13,6 +13,7 @@ import type { Db } from "../db/index.ts";
 import { loadLiveConfig, loadTrackedRepos } from "../data/control/index.ts";
 import { keepEarlierUsage, loadUnsure, pruneUnsure, saveUnsure } from "../data/inference/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
+import { ensurePrompts } from "../data/prompts/index.ts";
 import { createHash } from "node:crypto";
 
 /** What a parser knows about the reply it reads. */
@@ -191,8 +192,10 @@ async function call<I, V, C>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C
     const model = m ?? step.model ?? CLAUDE_PROMPTS[step.id].models[0]!;
     return ask ? ask(input, lint) : askClaude(step.id, model, (step.toPrompt ? step.toPrompt(input) : input) as never, db, { ...ask_, ...(lint && { lint }) });
   }
+  // The request is rendered after the prompt cache is up to date, so its text and recorded version are the same revision.
+  await ensurePrompts(db);
   const { item, body } = step.request(input, opts.ctx as C);
-  const p = await askJev(step.id, item as never, db, body ?? renderJev(step.id, item as Item | DupeAsk), opts.usage === undefined);
+  const p = await askJev(step.id, item as never, db, { body: body ?? renderJev(step.id, item as Item | DupeAsk), version: promptVersion(step.id) }, opts.usage === undefined);
   opts.onJevProc?.(p);
   type Json = { answers?: unknown; usage?: { input_tokens?: number; output_tokens?: number } };
   let parsed: unknown = null;
@@ -301,6 +304,7 @@ type Kept<It, JV> = { rows: Map<string, { hash: string; answer: JV | null }>; ha
 
 /** The unsure Jev answers kept for `items` (jev_unsure), and the hash of each item's Jev request they are valid for. */
 async function keptUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], ctx: C): Promise<Kept<It, JV>> {
+  await ensurePrompts(db);
   const hashes = new Map<It, string>();
   const hashOf = (x: It): string => {
     let h = hashes.get(x);

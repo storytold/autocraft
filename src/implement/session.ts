@@ -11,7 +11,8 @@ import type { Db } from "../db/index.ts";
 import { addSession, loadEnvs, loadSessions, patchSessions } from "../data/build/index.ts";
 import { loadImplementationView } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
-import { loadCalls } from "../data/runners/index.ts";
+import { loadCallPrompt, loadCalls } from "../data/runners/index.ts";
+import { ensurePrompts } from "../data/prompts/index.ts";
 import { artifactDir } from "../build/artifacts.ts";
 import { settingsOf } from "../build/pods.ts";
 import { queueWorkspaceCall, resumePrompt, type WorkspaceCallRequest } from "../build/workspace-call.ts";
@@ -20,7 +21,7 @@ import { WORKSPACE_SERVER } from "../build/workspace-tools.ts";
 import { WORK_ROOT } from "../build/workspace-tool-specs.ts";
 import { cleanOutput, getWorkspace } from "../build/workspaces.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
-import { CLAUDE_PROMPTS, claudeParts } from "../prompts/index.ts";
+import { CLAUDE_PROMPTS, claudeParts, resolvedTemplate } from "../prompts/index.ts";
 import { promptTier } from "../remote/bundle.ts";
 import { awaitCall, type Outcome } from "../remote/calls.ts";
 import { referenceDir } from "../reference.ts";
@@ -37,7 +38,6 @@ const SERVER: typeof WORKSPACE_SERVER = SESSION_SERVER;
 
 export const SESSION_PROMPT_ID = "implement.session";
 const PROMPT = CLAUDE_PROMPTS[SESSION_PROMPT_ID];
-const PROMPT_VERSION = createHash("sha256").update(PROMPT.template).update(SERVER).digest("hex").slice(0, 10);
 /** The model of every turn. */
 export const SESSION_MODEL = PROMPT.models[0]!;
 /** A lease lost with its Task Runner goes back to the queue once, onto the same workspace (D8). */
@@ -102,6 +102,8 @@ export type TurnRequest = {
   /** A lint fix turn: the report its reply's fields go into, and the problems it was sent. */
   base?: SessionReport;
   problems?: LintProblem[];
+  /** A new session's system prompts and version, rendered with its stdin (sessionTask), so all three are one revision. */
+  prompt?: SessionPrompt;
 };
 
 // ---- the input ---------------------------------------------------------------------------------------------------
@@ -122,13 +124,24 @@ export async function sessionInput(db: Db, impl: Implementation, sha: string, ea
   };
 }
 
-/** The fixed system prompt (the same for every turn, so it caches) and the task on stdin. */
-export const renderSession = (input: SessionInput): { system: string; stdin: string } => {
-  const p = claudeParts(SESSION_PROMPT_ID, [input], false);
-  return { system: p.system ?? "", stdin: p.stdin };
+/** The fixed system prompt (the same for every turn, so it caches), the task on stdin, and the version the turn records. */
+export const renderSession = (input: SessionInput): { system: string; stdin: string; version: string } => {
+  const p = claudeParts(SESSION_PROMPT_ID, [input], false), r = resolvedTemplate(SESSION_PROMPT_ID);
+  // The code default's version also hashes the tool server's name, which the prompt names; a stored edit records its revision's version.
+  return { system: p.system ?? "", stdin: p.stdin, version: r.edited ? r.version : createHash("sha256").update(r.text).update(SERVER).digest("hex").slice(0, 10) };
 };
-/** The two system prompts: with fetch_dependencies (the workspace's environment has a crate mirror) and without. */
-const SYSTEM = { mirror: renderSession({ ...SAMPLE_SESSION[0]!, fetch_dependencies: true }).system, none: renderSession(SAMPLE_SESSION[0]!).system };
+/** The system prompt as it runs now, with fetch_dependencies (the workspace's environment has a crate mirror) or without, and its version. */
+const systemOf = (mirror: boolean): { system: string; version: string } => renderSession({ ...SAMPLE_SESSION[0]!, ...(mirror && { fetch_dependencies: true }) });
+
+/** The two system prompts of a new session (queueTurn picks one by the workspace's environment) and the version both record. */
+export type SessionPrompt = { version: string; mirror: string; none: string };
+
+/** A new session's task on stdin and its system prompts, from the prompt revisions as they are now. */
+export async function sessionTask(db: Db, input: SessionInput): Promise<{ stdin: string; prompt: SessionPrompt }> {
+  await ensurePrompts(db);
+  const task = renderSession(input), mirror = systemOf(true), none = systemOf(false);
+  return { stdin: task.stdin, prompt: { version: task.version, mirror: mirror.system, none: none.system } };
+}
 
 /** Whether environment `envId` has a crate mirror, so its session may fetch dependencies. */
 async function hasCrateMirror(db: Db, envId: string | undefined): Promise<boolean> {
@@ -244,11 +257,16 @@ export async function copyShots(pod: Pod, implementationId: number, report: Sess
 export async function queueTurn(db: Db, calls: CallDeps, t: TurnRequest): Promise<ImplementationRound> {
   const follow = t.parentId !== undefined;
   const limits = follow ? FOLLOW_UP_CALL : SESSION_CALL;
+  // A follow-up keeps its session's system prompt and version, so a prompt saved meanwhile reaches only new sessions.
+  const pinned = follow ? await loadCallPrompt(db, t.parentId!) : null;
+  if (!t.prompt && pinned?.system == null) await ensurePrompts(db);
   return await db.write(async () => {
     const w = await getWorkspace(db, t.workspaceId);
-    const system = await hasCrateMirror(db, w?.env_id) ? SYSTEM.mirror : SYSTEM.none;
+    const mirror = await hasCrateMirror(db, w?.env_id);
+    const { system, version } = pinned?.system != null ? { system: pinned.system, version: pinned.promptVersion }
+      : t.prompt ? { system: mirror ? t.prompt.mirror : t.prompt.none, version: t.prompt.version } : systemOf(mirror);
     const callId = await calls.queue(db, {
-      workspaceId: t.workspaceId, promptId: SESSION_PROMPT_ID, promptVersion: PROMPT_VERSION, model: SESSION_MODEL, tier: promptTier(SESSION_PROMPT_ID), effort: PROMPT.effort,
+      workspaceId: t.workspaceId, promptId: SESSION_PROMPT_ID, promptVersion: version, model: SESSION_MODEL, tier: promptTier(SESSION_PROMPT_ID), effort: PROMPT.effort,
       stdin: t.stdin, system, timeoutSeconds: limits.timeoutSeconds, maxTurns: limits.maxTurns, items: [{ repo: t.impl.repo, number: t.impl.number }],
       maxAttempts: CALL_ATTEMPTS, keepSession: true, ...(follow && { parentId: t.parentId }), forLogin: t.impl.queuedBy, boundSlot: true,
     });

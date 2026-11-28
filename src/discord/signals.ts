@@ -9,7 +9,7 @@ import { loadStepSpend, removeRunTexts } from "../data/inference/index.ts";
 import { loadShown } from "../data/mirror/index.ts";
 import { jevAvailable } from "../agents/jev.ts";
 import { runModelStep, type ClaudeStep, type JevStep } from "../agents/step.ts";
-import { JEV_PROMPTS } from "../prompts/index.ts";
+import { jevRequestOf } from "../prompts/index.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { jevSignal, parseSignal, signalBand, signalState, type SignalAsk } from "./signal-ask.ts";
 import { isWatched, mentionLinks, trackedRepos, type DiscordLink } from "./store.ts";
@@ -33,7 +33,7 @@ export type Judge = { jev: (db: Db, ask: SignalAsk) => Promise<number | null>; h
 
 const JEV_STEP: JevStep<SignalAsk, number> = {
   provider: "jev", id: "discord.signal.jev",
-  request: (a) => ({ item: { ref: a.ref }, body: JSON.stringify({ ...JEV_PROMPTS["discord.signal.jev"].request, state: signalState(a) }) }),
+  request: (a) => ({ item: { ref: a.ref }, body: JSON.stringify({ ...jevRequestOf("discord.signal.jev"), state: signalState(a) }) }),
   parse: (answers, _a, ctx) => {
     const p = ctx.code === 0 ? jevSignal(answers) : null;
     return p === null ? null : { value: p };

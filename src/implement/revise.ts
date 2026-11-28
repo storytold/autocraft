@@ -40,8 +40,8 @@ import { roundDir, runChecks, workspacePod, type CheckRound, type Pod } from "./
 import { workspaceDiff } from "./diff.ts";
 import { commitDiff, forkOnce, lastPush } from "./pr.ts";
 import {
-  awaitTurn, findingsMessage, LOST_REPLY_MESSAGE, needsDependency, queueTurn, realCalls, renderSession, REPORT_MESSAGE, sessionInput, settleOrphan,
-  type CallDeps, type TurnPurpose, type TurnRound,
+  awaitTurn, findingsMessage, LOST_REPLY_MESSAGE, needsDependency, queueTurn, realCalls, REPORT_MESSAGE, sessionInput, sessionTask, settleOrphan,
+  type CallDeps, type SessionPrompt, type TurnPurpose, type TurnRound,
 } from "./session.ts";
 import { markStuck, stuckLine, type StuckCause } from "./stuck.ts";
 import { addRounds, attemptNow, currentAttempt, roundOf, setRound, writeStep, type Attempt, type NewRound } from "./attempt.ts";
@@ -395,7 +395,7 @@ const liveRound = (rounds: ImplementationRound[]): ImplementationRound | null =>
 // ---- turns, checks and the push ----------------------------------------------------------------------------------------
 
 type Next =
-  | { turn: { purpose: TurnPurpose; stdin: string; parentId?: number } }
+  | { turn: { purpose: TurnPurpose; stdin: string; parentId?: number; prompt?: SessionPrompt } }
   | { checks: true }
   | { push: CheckRound };
 
@@ -407,8 +407,8 @@ async function nextStep(db: Db, impl: Implementation, base: string, req: ReviseR
   const checks = checksOf(live);
   const fresh = async (): Promise<Next> => {
     const c = checks.at(-1)?.result as CheckRound | undefined;
-    const task = renderSession(await sessionInput(db, impl, base, { diff_stat: c?.diffStat ?? impl.diffStat ?? "", findings: c?.findings ?? [] })).stdin;
-    return { turn: { purpose: "fresh", stdin: `${task}\n\n${req.message}` } };
+    const task = await sessionTask(db, await sessionInput(db, impl, base, { diff_stat: c?.diffStat ?? impl.diffStat ?? "", findings: c?.findings ?? [] }));
+    return { turn: { purpose: "fresh", stdin: `${task.stdin}\n\n${req.message}`, prompt: task.prompt } };
   };
   if (!last) {
     // A workspace made again has no harness session to go on; the session of the PR's last push does, when its Task Runner still has it.

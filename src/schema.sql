@@ -1892,6 +1892,29 @@ CREATE TABLE IF NOT EXISTS area_lists (
   PRIMARY KEY (repo, version)
 );
 
+-- Revisions of the model prompts (src/data/prompts). scope 'base' is the instance-wide prompt; a repo name with prompt_id
+-- 'repo.guidance' is that repo's guidance. A prompt without rows runs its code default (its implicit revision 1); the first
+-- save writes revision 1 (kind release, follows 1) and revision 2 together. One row per prompt and scope is active.
+CREATE TABLE IF NOT EXISTS prompt_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  prompt_id TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  rev INTEGER NOT NULL,
+  kind TEXT NOT NULL,                 -- release | edit | rollback | use-release
+  body TEXT NOT NULL,                 -- Claude: the template text with lock markers; Jev: JSON {questions: {key: {instructions, criteria?}}}; guidance: markdown ('' = none)
+  version TEXT NOT NULL,              -- hash of the text that runs (markers stripped): what prompt_version records
+  default_hash TEXT,                  -- version of the code default the revision was made against
+  follows INTEGER NOT NULL DEFAULT 0, -- 1: the release default; the running code's own text runs
+  from_rev INTEGER,                   -- a rollback: the revision it copies
+  active INTEGER NOT NULL DEFAULT 0,
+  author TEXT NOT NULL,
+  at TEXT NOT NULL,
+  note TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS prompt_revisions_rev ON prompt_revisions(prompt_id, scope, rev);
+CREATE UNIQUE INDEX IF NOT EXISTS prompt_revisions_active ON prompt_revisions(prompt_id, scope) WHERE active = 1;
+CREATE INDEX IF NOT EXISTS prompt_revisions_version ON prompt_revisions(prompt_id, version);
+
 -- The area of each item. area NULL with a list_version means "none of these" was the answer for that version.
 -- A row whose area survived a list change moves to the new version; a NULL row stays on the version it was asked against.
 CREATE TABLE IF NOT EXISTS item_areas (

@@ -21,6 +21,7 @@ import "./data/issuereview/triggers.ts";
 import "./data/discord/triggers.ts";
 import "./data/security/triggers.ts";
 import "./data/runners/triggers.ts";
+import "./data/prompts/triggers.ts";
 import { registerPlanInputs } from "./db/plan-triggers.ts";
 import { planInputsWith } from "./db/plan-inputs.ts";
 import { PERM_READ_TTL } from "./data/access/index.ts";

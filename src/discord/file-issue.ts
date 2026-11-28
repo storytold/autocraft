@@ -14,7 +14,7 @@ import { guardBotFiling } from "../core/guard.ts";
 import { botRepo } from "./filing-repos.ts";
 import { appChildEnv } from "../github/install-token.ts";
 import { openAppKeys } from "../github/app-keys.ts";
-import { JEV_PROMPTS } from "../prompts/index.ts";
+import { jevRequestOf } from "../prompts/index.ts";
 import { isPublicRepo } from "../public/status.ts";
 import { jevJunk, junkBand, junkState, parseJunk, type JunkAsk } from "./junk-ask.ts";
 import { failReporter, forgetReporterRow, newReporterState, reporterToken } from "./reporter.ts";
@@ -74,7 +74,7 @@ export type FileHooks = {
 
 const JEV_STEP: JevStep<JunkAsk, number> = {
   provider: "jev", id: "discord.junk.jev",
-  request: (a) => ({ item: { ref: "discord" }, body: JSON.stringify({ ...JEV_PROMPTS["discord.junk.jev"].request, state: junkState(a) }) }),
+  request: (a) => ({ item: { ref: "discord" }, body: JSON.stringify({ ...jevRequestOf("discord.junk.jev"), state: junkState(a) }) }),
   parse: (answers, _a, ctx) => {
     const p = ctx.code === 0 ? jevJunk(answers) : null;
     return p === null ? null : { value: p };

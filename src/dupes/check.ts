@@ -11,6 +11,7 @@ import { canonInfoAll, compareCanonical } from "./canonical.ts";
 import { groupPairs, pairRef, settlePair, type DupeAsk, type DupePair, type PairVerdict } from "./pair.ts";
 import { loadUnsure, saveUnsure } from "../data/inference/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
+import { ensurePrompts } from "../data/prompts/index.ts";
 import { savePairVerdicts, type PairKey, type PairVerdictPut } from "../data/triage/index.ts";
 import type { Db } from "../db/index.ts";
 
@@ -99,6 +100,7 @@ async function store(db: Db, rows: Verdicted[], at: string, unsure: { keep: { re
 
 /** Jev's kept answers (jev_unsure) to the pairs' current requests, by pair ref, and the hash of the request each pair is in. */
 async function keptAnswers(db: Db, pairs: readonly DupePair[], asks: readonly DupeAsk[]): Promise<{ answers: Map<string, number>; hashOf: Map<string, string> }> {
+  await ensurePrompts(db);
   const hashOf = new Map<string, string>();
   for (const ask of asks) {
     const h = jevRequestHash(DUPES_JEV, ask, undefined);
