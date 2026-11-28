@@ -221,11 +221,17 @@ export async function setPayloadFields(db: Db, id: number, fields: Record<string
   });
 }
 
-/** The question messages from Discord written after `since` (linked to a turn), with their items and payloads, oldest first. */
-export async function loadDiscordQuestions(db: Db, since: string): Promise<{ id: number; repo: string; number: number; payload: unknown }[]> {
+/**
+ * The question messages from Discord written after `since` (linked to a turn), with their items, payloads and the state of their Opus
+ * turn (null: the turn is gone), oldest first.
+ */
+export async function loadDiscordQuestions(db: Db, since: string): Promise<{ id: number; repo: string; number: number; payload: unknown; turnStatus: string | null; turnError: string | null }[]> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.chat_messages as m").innerJoin("main.chat_conversations as c", "c.id", "m.conversation_id")
-    .select(["m.id as id", "c.repo as repo", "c.number as number", "m.payload as payload"])
+    .leftJoin("main.conversation_turns as t", "t.id", "m.turn_id")
+    .select(["m.id as id", "c.repo as repo", "c.number as number", "m.payload as payload", "t.status as status", "t.error as error"])
     .where("m.via", "=", "discord").where("m.kind", "=", "said").where("m.turn_id", "is not", null).where("m.at", ">=", since).orderBy("m.id"));
-  return rows.flatMap((r) => (r.repo === null || r.number === null ? [] : [{ id: Number(r.id), repo: String(r.repo), number: Number(r.number), payload: parse(r.payload as string | null) }]));
+  return rows.flatMap((r) => (r.repo === null || r.number === null ? [] : [{
+    id: Number(r.id), repo: String(r.repo), number: Number(r.number), payload: parse(r.payload as string | null), turnStatus: r.status ?? null, turnError: r.error ?? null,
+  }]));
 }

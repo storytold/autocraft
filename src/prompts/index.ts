@@ -1671,7 +1671,7 @@ export const JEV_USD_PER_INPUT_TOKEN = 0.042 / 1e6;
 export const JEV_PROMPTS = { "classify.jev": JEV, "priority.jev": PRIORITY_JEV, "dupes.jev": DUPES_JEV, "areas.jev": AREAS_JEV, "lint.reference.jev": REFERENCE_JEV, "discord.signal.jev": DISCORD_SIGNAL_JEV, "discord.junk.jev": DISCORD_JUNK_JEV, "command.read.jev": COMMAND_READ_JEV } as const;
 export type ClaudePromptId = keyof typeof CLAUDE_PROMPTS;
 export type JevPromptId = keyof typeof JEV_PROMPTS;
-export const PROMPTS: (ClaudePrompt | JevPrompt)[] = [JEV, HAIKU, REFEREE, FIXUP, VERIFY_PLAN, VERIFY_SCREENSHOT, VERIFY_COMPARE, VERIFY_SUMMARY, PRIORITY_JEV, PRIORITY_HAIKU, DUPES_JEV, DUPES_HAIKU, FIXUP_CHECK, OPUS_REVIEW, PREMERGE, POSTMERGE, DUPES_COMPARE_PRS, DUPES_COMPARE_ISSUES, CONVERSATION, AREAS_JEV, AREAS_HAIKU, AREAS_PROPOSE, AREAS_SUGGEST, DISCORD_ISSUE_QUESTIONS, DISCORD_ISSUE_DRAFT, DISCORD_SIGNAL_JEV, DISCORD_SIGNAL_HAIKU, DISCORD_JUNK_JEV, DISCORD_JUNK_HAIKU, DISCORD_RESULT_HAIKU, COMMAND_READ, COMMAND_READ_INTERACTIVE, COMMAND_READ_JEV, FIXUP_CONFLICT, REFERENCE_JEV, REFERENCE_HAIKU, CIFIX, MAINFIX_CLASSIFY, SECURITY_MODEL, SECURITY_AREA, SECURITY_VERIFY, SECURITY_FIX, SECURITY_FIXCHECK, IMPLEMENT_PLAN, IMPLEMENT_SESSION, EVAL_INVESTIGATE, ISSUE_REVIEW];
+export const PROMPTS: (ClaudePrompt | JevPrompt)[] = [JEV, HAIKU, REFEREE, FIXUP, VERIFY_PLAN, VERIFY_SCREENSHOT, VERIFY_COMPARE, VERIFY_SUMMARY, PRIORITY_JEV, PRIORITY_HAIKU, DUPES_JEV, DUPES_HAIKU, FIXUP_CHECK, OPUS_REVIEW, PREMERGE, POSTMERGE, DUPES_COMPARE_PRS, DUPES_COMPARE_ISSUES, CONVERSATION, CONVERSATION_INTERACTIVE, AREAS_JEV, AREAS_HAIKU, AREAS_PROPOSE, AREAS_SUGGEST, DISCORD_ISSUE_QUESTIONS, DISCORD_ISSUE_DRAFT, DISCORD_SIGNAL_JEV, DISCORD_SIGNAL_HAIKU, DISCORD_JUNK_JEV, DISCORD_JUNK_HAIKU, DISCORD_RESULT_HAIKU, COMMAND_READ, COMMAND_READ_INTERACTIVE, COMMAND_READ_JEV, FIXUP_CONFLICT, REFERENCE_JEV, REFERENCE_HAIKU, CIFIX, MAINFIX_CLASSIFY, SECURITY_MODEL, SECURITY_AREA, SECURITY_VERIFY, SECURITY_FIX, SECURITY_FIXCHECK, IMPLEMENT_PLAN, IMPLEMENT_SESSION, EVAL_INVESTIGATE, ISSUE_REVIEW];
 
 /** What each Claude prompt is rendered from. */
 export type ClaudeInput = { "classify.haiku": Item[]; "referee.sonnet": Item[]; "fixup.patch": FixupPr[]; "verify.plan": VerifyPlanInput[]; "verify.screenshot": ScreenshotPlanInput[]; "verify.compare": ScreenshotCompareInput[]; "verify.summary": VerifySummaryInput[]; "priority.haiku": Item[]; "dupes.haiku": DupePair[]; "fixup.check": FixupCheckInput[]; "review.opus": OpusPr[]; "premerge.opus": OpusPr[]; "postmerge.opus": PostmergePr[]; "dupes.compare-prs.opus": ComparePrs[]; "dupes.compare-issues.sonnet": CompareIssues[]; "conversation.turn": ConversationInput[]; "interactive.conversation-turn": ConversationInput[]; "areas.haiku": AreaAsk[]; "areas.propose": AreaProposeInput[]; "areas.suggest": AreaSuggestInput[]; "discord.issue-questions": IssueQuestionsInput[]; "discord.issue-draft": IssueDraftInput[]; "discord.signal.haiku": SignalAsk[]; "discord.junk.haiku": JunkAsk[]; "discord.result.haiku": ResultAsk[]; "command.read": ReadAsk[]; "interactive.command-read": ReadAsk[]; "fixup.conflict": ConflictPr[]; "lint.reference.haiku": ReferenceLintInput[]; "cifix.patch": CifixPr[]; "mainfix.classify": MainFixInput[]; "security.model": SecurityModelInput[]; "security.area": SecurityAreaInput[]; "security.verify": SecurityVerifyInput[]; "security.fix": SecurityFixInput[]; "security.scantest": SecurityScanTestInput[]; "security.fixcheck": SecurityFixCheckInput[]; "implement.plan": PlanInput[]; "implement.session": SessionInput[]; "eval.investigate": EvalInput[]; "review.issue": IssueReviewInput[] };
@@ -1776,12 +1776,15 @@ export type ResolvedTemplate = { text: string; version: string; rev: number | nu
 /**
  * A Claude prompt as it runs now: the code's template when no revision is stored or the active one follows the release; else
  * the stored edit with the code's locked blocks, or the code's template with `fallback` when the edit no longer fits the
- * code's structure. interactive.command-read is command.read on other slots and resolves through it. The version is a hash of
+ * code's structure. An interactive id is its prompt on other slots and resolves through it (SAME_TEMPLATE). The version is a hash of
  * the text without the guidance slot, so an unedited prompt keeps the version its template has always had.
  */
+/** Interactive ids: the same prompt run in Interactive slots, whose stored revision is the one of the prompt they repeat. */
+const SAME_TEMPLATE: Partial<Record<ClaudePromptId, ClaudePromptId>> = { "interactive.command-read": "command.read", "interactive.conversation-turn": "conversation.turn" };
+
 export function resolvedTemplate(id: ClaudePromptId): ResolvedTemplate {
   const code = claudePromptOf(id).template;
-  const row = source.base(id === "interactive.command-read" ? "command.read" : id);
+  const row = source.base(SAME_TEMPLATE[id] ?? id);
   let text = stripLocks(code), fallback: "structure" | undefined, edited = false;
   if (row && !row.follows) {
     const merged = mergeEdit(code, row.body);

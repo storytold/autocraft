@@ -2,7 +2,8 @@
 // (the item's repository and the workspace, read-only) and stores the reply with its action cards. An operator's message is a
 // call of the shared model queue; a maintainer's runs only on the maintainer's own Task Runners (a call bound to their login).
 // A message put as a question from GitHub or Discord (src/conversations/ask.ts) gets its answer, or why there is none, sent back there;
-// one from Discord runs as interactive.conversation-turn, in Interactive slots.
+// one from Discord runs as interactive.conversation-turn, in Interactive slots. Such a question's prompt holds the item and the question
+// only: the chat's earlier messages and replies never reach an answer posted in public.
 import { jobItem } from "../runner/job-items.ts";
 import { referenceDir } from "../reference.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
@@ -18,7 +19,7 @@ import { PROGRESS_KEEP, coalesce } from "../classify/progress.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { defaultSemanticDeps, referenceProblems, type SemanticDeps } from "../reference-lint.ts";
 import { needsFixTurn } from "../replylint.ts";
-import { answerAsked, conversationPromptId, NO_INTERACTIVE_SLOTS } from "./ask.ts";
+import { answerAsked, conversationPromptId, NO_INTERACTIVE_SLOTS, publicQuestion } from "./ask.ts";
 import { loadTurnMessage } from "../data/chat/index.ts";
 import { userInteractiveSlots } from "../remote/interactive-slots.ts";
 import { sweepRunningCards } from "./act.ts";
@@ -92,13 +93,14 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     if (forLogin === undefined) p.onHandled?.(++handled);
     try {
       // A question asked on Discord takes Interactive slots only.
-      const promptId = conversationPromptId((await loadTurnMessage(db, wait.id))?.via);
+      const asked = await loadTurnMessage(db, wait.id);
+      const promptId = conversationPromptId(asked?.via);
       if (forLogin !== undefined) {
         const why = promptId !== CONVERSATION_PROMPT.id && await userInteractiveSlots(db, forLogin, "maintainer") < 1 ? NO_INTERACTIVE_SLOTS
           : !await ownTaker(db, forLogin, { prompt_id: promptId, repos: [repo], tier }) ? ownRunnerGone(forLogin) : null;
         if (why) { await fail(why); return; }
       }
-      const parts = await promptParts(db, repo, n, wait);
+      const parts = await promptParts(db, repo, n, wait, { alone: publicQuestion(asked) });
       if (!parts) { await fail("the conversation has no item block; send the message again"); return; }
       if (!checkouts.has(repo)) checkouts.set(repo, p.checkout(repo).catch(() => null));
       const checkout = await checkouts.get(repo)!;
@@ -135,7 +137,7 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
           await jobItem(db, repo, n, "answered a message", p.log);
           // The answer goes public only when reply lint finds nothing in it; otherwise the reply points to the item's chat.
           const clean = async () => !needsFixTurn(await referenceProblems([{ field: "text", text: parsed.text }], dir ?? undefined, semantic, { stage: "fix" }));
-          await answerAsked(db, { repo, n, turnId: wait.id, text: parsed.text, clean }).catch((e: Error) => p.log(`conversation: ${repo}#${n}: answer not sent: ${e.message}`));
+          await answerAsked(db, { repo, n, turnId: wait.id, text: parsed.text, model: (r.ok && r.model) || model, clean }).catch((e: Error) => p.log(`conversation: ${repo}#${n}: answer not sent: ${e.message}`));
         }
       } else {
         await fail("Opus gave no usable reply; send the message again");

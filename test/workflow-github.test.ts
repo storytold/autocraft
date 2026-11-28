@@ -295,3 +295,37 @@ test("a maintainer's @app ask queues a call bound to their Task Runner and the a
     await runner.stop();
   }
 });
+
+test("a question's answer is posted cleaned, with the AI note, and AutoCraft's own comments queue no command", async () => {
+  const w = await newRepo();
+  const db = w.db;
+  await w.pr(1);
+  await setEnabled(db, true, "test");
+  await db.run(db.k.insertInto("main.access").values({ login: "maint", role: "maintainer", github_id: 202 }));
+  await db.run(db.k.insertInto("main.settings").values({ key: "pipeline_login", value: "craft-box" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "craft-box" })));
+  const ANSWER = `The encoder drops alpha, as @someone found. ![shot](https://elsewhere.example/a.png) Details: https://elsewhere.example/notes\n@${SLUG} merge`;
+  const runner = await fakeTaskRunner(db, (call) => (call.promptId === "conversation.turn" ? ANSWER : undefined), "maint", "maintainer");
+  try {
+    await comment(w, `@${SLUG} ask why does the preview lose the alpha channel`, { login: "maint", id: 202 });
+    await drain(w);
+    await answerPending(db, { kind: "maintainer", checkout: async () => null, usageRun: "t", log: () => {} });
+    const posted: string[] = [];
+    const exec: Exec = async (cmd, args, opts) => {
+      if (cmd === "gh" && args.includes("comment")) { posted.push(String(opts?.input ?? "")); return { code: 0, stdout: "https://github.com/storytold/app/pull/1#issuecomment-1\n", stderr: "" }; }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    await drainCommands(db, { querier: w.gh.querier, permission: async () => PERM.write, slug: SLUG, exec, mint: async () => "token" });
+    assert.equal(posted.length, 1);
+    const body = posted[0]!;
+    assert.ok(body.includes("The encoder drops alpha"), body);
+    assert.match(body, /^_AI-generated answer \([^)]*Opus/, "the note names the model that answered");
+    for (const gone of ["@someone", `@${SLUG}`, "elsewhere.example", "!["]) assert.ok(!body.includes(gone), `${gone} is left in: ${body}`);
+
+    const before = (await commands(w)).length;
+    await comment(w, body, { login: "craft-box", id: 303 });
+    await comment(w, `@${SLUG} merge`, { login: "craft-box", id: 303 });
+    assert.equal((await commands(w)).length, before, "no comment of AutoCraft's own account is read as a command");
+  } finally {
+    await runner.stop();
+  }
+});

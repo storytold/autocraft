@@ -481,6 +481,8 @@ const STATE_COLUMNS: [table: string, column: string, type: string][] = [
   // A workflow alert's workflow and recommendation time (decision_id `wf:<workflow_id>:<rec_at>`).
   ["discord_alert_msgs", "workflow_id", "INTEGER"],
   ["discord_alert_msgs", "rec_at", "TEXT"],
+  // The model that wrote a question's answer, named in the answer's note line.
+  ["github_commands", "model", "TEXT"],
 ];
 
 const STATE_INDEXES = [

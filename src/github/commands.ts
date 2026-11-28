@@ -29,7 +29,7 @@ import { LOGIN } from "../access.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { appPermission, type AppPermission } from "../remote/permission.ts";
 import { AppError, call, GITHUB_API } from "./app.ts";
-import { actRefusal, appSlug } from "./identity.ts";
+import { actRefusal, appSlug, isOwnLogin, ownLogins } from "./identity.ts";
 import { commentNames } from "./slugs.ts";
 import { installationToken } from "./install-token.ts";
 import { ghComment, WritePacedError, type Writer } from "./write.ts";
@@ -40,7 +40,7 @@ import { namesOption, READ_BACKGROUND_WAIT_MS, runText, type ReadDeps } from "..
 import { commentLines } from "./comment-lines.ts";
 import { commentCondition, commentQuestion, parseComment, withoutMention } from "../workflow/parse.ts";
 import { linkAskTurn, linkingComment, recordSaid } from "../workflow/said.ts";
-import { askQuestion } from "../conversations/ask.ts";
+import { askQuestion, sweepAskedCommands } from "../conversations/ask.ts";
 import type { ItemRef, Parsed } from "../workflow/types.ts";
 import type { Db } from "../db/index.ts";
 
@@ -62,7 +62,8 @@ const posInt = (v: unknown): number | null => (typeof v === "number" && Number.i
 /**
  * Queues the command of a new `issue_comment` in a tracked repo (`repo`, as webhooks.ts resolved it). A redelivery of the same
  * comment adds nothing, and a comment written more than STALE_MS before the delivery queues nothing. Comments by bots and apps are
- * left alone. Returns true when a command was queued.
+ * left alone, and so are AutoCraft's own accounts' (the box account, the app's bot), so no answer it posts is ever read as a command.
+ * Returns true when a command was queued.
  */
 export async function queueCommand(db: Db, repo: string, event: string, payload: unknown, slug: string | null | undefined, now: Date = new Date()): Promise<boolean> {
   if (event !== "issue_comment" || !slug) return false;
@@ -71,6 +72,7 @@ export async function queueCommand(db: Db, repo: string, event: string, payload:
   const comment = obj(p.comment), user = obj(comment.user), issue = obj(p.issue);
   if (user.type !== "User" || comment.performed_via_github_app) return false;
   const login = typeof user.login === "string" && LOGIN.test(user.login) ? user.login : null;
+  if (login && isOwnLogin(await ownLogins(db, repo, slug), login)) return false;
   const githubId = posInt(user.id), commentId = posInt(comment.id), number = posInt(issue.number);
   const created = typeof comment.created_at === "string" ? Date.parse(comment.created_at) : NaN;
   if (!login || !githubId || !commentId || !number || !Number.isFinite(created)) return false;
@@ -223,9 +225,9 @@ const ASK_NOT_ALLOWED = t("Only operators, and maintainers with write access to 
 
 /** Puts the comment's question to Opus as the commenter's message on its item, and links the comment's stored message to that turn. */
 async function putQuestion(db: Db, r: Row, operator: boolean, question: string): Promise<{ turnId: number } | { refusal: string }> {
-  const a = await askQuestion(db, { login: r.login, operator }, r.repo, r.number, question, { limit: true });
-  if ("turnId" in a) await linkAskTurn(db, { repo: r.repo, number: r.number, login: r.login, via: "github", turnId: a.turnId, commentId: Number(r.comment_id) });
-  return a;
+  return await askQuestion(db, { login: r.login, operator }, r.repo, r.number, question, {
+    limit: true, linked: async (turnId) => await linkAskTurn(db, { repo: r.repo, number: r.number, login: r.login, via: "github", turnId, commentId: Number(r.comment_id) }),
+  });
 }
 
 /** `reading`: a model reads the comment in the background (readInBackground), which settles and answers it. */
@@ -413,6 +415,8 @@ function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { acto
   const ask = async (question: string): Promise<CommandResult> => {
     // The model read the addressed text, which starts with the mention.
     const own = withoutMention(question, o.names).trim();
+    // The comment is read again first, as before any command the reading runs: changed or deleted meanwhile, nothing is asked.
+    if (o.reply) await pin(o.again);
     const a = o.reply ? await putQuestion(db, r, o.operator, own || question) : { refusal: t("Nothing is said on a quiet pull request.") };
     if ("turnId" in a) asked = true;
     const line = "turnId" in a ? "" : a.refusal;
@@ -444,7 +448,7 @@ function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { acto
     await settle(db, d, r, state, line, clock(), { reply: o.reply, allowed: o.allowed });
     const row = d.settled.get(id)!;
     // A paced answer is left to the next drain, which posts settled rows.
-    if (row.reply === null && (await answer(db, row, deps)) === "paced") reading.delete(id);
+    if (row.reply === null && (await answer(db, d, row, deps)) === "paced") reading.delete(id);
   })().catch((e) => {
     deps.log?.(`github command ${refOf(r)}: ${oneLine(String((e as Error)?.message ?? e))}`);
     reading.delete(id);
@@ -474,9 +478,14 @@ export function answerText(r: { login: string; state: string; result: string | n
 
 /**
  * Posts the answer. An answer to someone who may queue on the repo needs no comment approval there; any other needs it. A paced write
- * leaves it for the next drain; any other failure is recorded (write.ts audits it) and not retried.
+ * leaves it for the next drain; any other failure is recorded (write.ts audits it) and not retried. Nothing is posted on an item that
+ * became quiet since the command was settled. Text a model wrote (a question's answer, `model` set) carries the AI note naming the model.
  */
-async function answer(db: Db, r: Row, deps: CommandDeps): Promise<"posted" | "failed" | "paced"> {
+async function answer(db: Db, d: Drain, r: Row, deps: CommandDeps): Promise<"posted" | "failed" | "paced" | "none"> {
+  if (await quietFor(db, d, r)) {
+    await saveCommandProgress(db, [{ commentId: Number(r.comment_id), reply: "none" }]);
+    return "none";
+  }
   // An ignored command with an answer is the "link your account" answer to someone AutoCraft does not know: written as the app, not as them.
   const stranger = r.state === "ignored";
   const g = stranger
@@ -488,7 +497,7 @@ async function answer(db: Db, r: Row, deps: CommandDeps): Promise<"posted" | "fa
     reply = "failed";
   } else {
     try {
-      const out = await ghComment({ db, login: stranger ? AUDIT_LOGIN : r.login, mint: deps.mint }, g, deps.exec ?? defaultExec, "github-command-reply", { repo: r.repo, number: r.number, pr: r.pr === 1 }, { by: "fixed-operator" }, answerText(r), { comment: Number(r.comment_id), command: r.command });
+      const out = await ghComment({ db, login: stranger ? AUDIT_LOGIN : r.login, mint: deps.mint }, g, deps.exec ?? defaultExec, "github-command-reply", { repo: r.repo, number: r.number, pr: r.pr === 1 }, r.model ? { by: "model", kind: "answer", model: r.model } : { by: "fixed-operator" }, answerText(r), { comment: Number(r.comment_id), command: r.command });
       reply = out.code === 0 ? "posted" : "failed";
       if (out.code !== 0) deps.log?.(`github command ${refOf(r)}: the answer failed: ${oneLine(out.stderr || out.stdout)}`);
     } catch (e) {
@@ -511,6 +520,8 @@ export async function drainCommands(db: Db, deps: CommandDeps): Promise<number> 
   // Rows that wait for a re-read or a retry are passed over without a GitHub call, so they never keep a newer command out. `limit`
   // bounds the rows that call GitHub in one drain. Rows never tried come first, oldest first, then retries by their last try, so due
   // retries cannot fill the limit drain after drain either.
+  // Questions whose answer never came back are settled first, so this drain posts them.
+  await sweepAskedCommands(db, t0.getTime()).catch((e: Error) => deps.log?.(`github command: asked sweep failed: ${oneLine(e.message)}`));
   const rows = await loadCommandWork(db, { limit: DRAIN_ROWS, retryBefore: new Date(t0.getTime() - RETRY_MS).toISOString() });
   const { openPrsClosing } = await import("../dash/api/queue-page.ts");
   const d: Drain = { settled: new Map(), closing: openPrsClosing };
@@ -538,7 +549,7 @@ export async function drainCommands(db: Db, deps: CommandDeps): Promise<number> 
       r = d.settled.get(Number(r.comment_id)) ?? r;
       if (r.state === "queued" || r.reply !== null) continue;
     } else calls++;
-    if ((await answer(db, r, deps)) === "paced") break;
+    if ((await answer(db, d, r, deps)) === "paced") break;
   }
   return settled;
 }

@@ -30,6 +30,8 @@ export type NewTurn = { ref: RefKey; kind: TurnKind; login: string; body: string
 export type PostMessage = {
   ref: RefKey; by: { login: string; kind: "operator" | "maintainer" }; turn: NewTurn; ask: boolean; newConversation?: NewConversation;
   refresh?: { expectSig: string; sig: string; turn: NewTurn };
+  /** Runs in the same transaction once the message's turn exists (a question links its message there), so no run sees the turn without it. */
+  linked?: (turnId: number) => Promise<void>;
 };
 export type CardPatch = Partial<Pick<CardRow, "state" | "result" | "result_url" | "error" | "acted_by" | "acted_at" | "edited_by" | "edited_at" | "text" | "params" | "queued_at" | "queue_args">>;
 export type QueuedCard = CardRow & { place: number };

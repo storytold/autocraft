@@ -341,8 +341,8 @@ const TEXT_MAX = 4000;
 
 /**
  * POST /api/items/:repo/:n/chat { conversation, text }: what a person writes in the item's chat, run as the command box runs it
- * (runItemText): stored as their message, then `ask <question>` (or text a model reads as only a question) goes to Opus and anything
- * else is a command through the command core. Only the main conversation takes messages. Nothing is posted to GitHub beyond what a
+ * (runItemText): stored as their message, then `ask <question>`, text the parser reads as nothing that holds a question mark, or text
+ * a model reads as only a question, goes to Opus, and anything else is a command through the command core. Only the main conversation takes messages. Nothing is posted to GitHub beyond what a
  * command writes. Returns the chat and the lines the command answered with.
  */
 export async function postChat(db: Db, req: Req): Promise<{ chat: ItemChat; lines: string[] }> {
@@ -358,7 +358,10 @@ export async function postChat(db: Db, req: Req): Promise<{ chat: ItemChat; line
   if (!(await loadItems(db, [{ repo, number: n }], "ref")).has(`${repo}#${n}`)) throw new HttpError(404, `${repo}#${n} is not an item AutoCraft has read`);
   const mainId = await ensureMainConversation(db, repo, n, req.user.login);
   if (b.conversation !== MAIN && String(b.conversation) !== String(mainId)) throw new HttpError(404, "only the main conversation takes messages");
-  const { lines } = await runItemText(db, req, repo, n, text, parse(text, { repo }), null);
+  const parsed = parse(text, { repo });
+  // Text the parser reads as nothing that holds a question mark is a question: it goes to Opus at once, with no command reading.
+  const question = parsed.kind === "ambiguous" && parsed.understood === "" && text.includes("?");
+  const { lines } = await runItemText(db, req, repo, n, text, parsed, null, { question });
   return { chat: await readChat(db, req), lines };
 }
 

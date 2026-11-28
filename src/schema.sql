@@ -647,7 +647,8 @@ CREATE TABLE IF NOT EXISTS github_commands (
   ref_repo TEXT,                      -- autorepin: the repository of the pull request it names, as written (`owner/name` or `name`); null with ref_number: autorepin off
   ref_number INTEGER,
   ref_branch TEXT,                    -- autorepin `via <branch>`: the dependency's branch to pin from; null: its default branch
-  parsed TEXT                         -- answer (maintainer workflow repos): JSON Parsed (src/workflow/types.ts); null for the other commands
+  parsed TEXT,                        -- answer (maintainer workflow repos): JSON Parsed (src/workflow/types.ts); null for the other commands
+  model TEXT                          -- an answered question: the model that wrote the answer, named in the post's note line; null for template text
 );
 CREATE INDEX IF NOT EXISTS github_commands_state ON github_commands(state, reply);
 -- Autorepin (src/repin): once the pull request `ref_repo#ref_number` is merged, the pull request `repo#number` gets a commit that

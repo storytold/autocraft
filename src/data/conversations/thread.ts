@@ -247,7 +247,9 @@ export async function postMessage(db: Db, p: PostMessage): Promise<number> {
       if (p.refresh && await casSig(db, p.ref, p.refresh.expectSig, p.refresh.sig)) turns.push(p.refresh.turn);
       turns.push({ ...p.turn, ...(p.ask && { status: "pending" }) });
       const ids = await addTurns(db, turns);
-      return ids[ids.length - 1]!;
+      const id = ids[ids.length - 1]!;
+      if (p.linked) await p.linked(id);
+      return id;
     });
   } catch (e) {
     if (isUnique(e)) throw new ConversationError(409, BUSY);

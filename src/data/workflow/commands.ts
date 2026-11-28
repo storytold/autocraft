@@ -117,15 +117,27 @@ export async function recordNudges(db: Db, rows: { login: string; at: string }[]
 
 /**
  * Settles a command that waits for the answer to its question (state `asked`) with the answer to post: `done` with the answer, `refused`
- * with why there is none. `reply` false: nothing is posted (a question withdrawn in the item's chat). False when the command does not
- * wait (it was settled already, or pruned).
+ * with why there is none. `reply` false: nothing is posted (a question withdrawn in the item's chat). `model`: the model that wrote the
+ * answer, which the post's note line names; absent for template text. False when the command does not wait (it was settled already, or pruned).
  */
-export async function settleAsked(db: Db, commentId: number, o: { state: "done" | "refused"; result: string; at: string; reply?: boolean }): Promise<boolean> {
+export async function settleAsked(db: Db, commentId: number, o: { state: "done" | "refused"; result: string; at: string; reply?: boolean; model?: string }): Promise<boolean> {
   const q = queryDb(db);
   return await db.write(async () => {
     const row = await q.get(q.k.selectFrom(T).select("state").where("comment_id", "=", commentId));
     if (row?.state !== "asked") return false;
     await settleCommands(db, [{ commentId, state: o.state, result: o.result, reply: o.reply ?? true, allowed: true, at: o.at }]);
+    if (o.model) await q.run(q.k.updateTable(T).set({ model: o.model }).where("comment_id", "=", commentId));
     return true;
   });
+}
+
+/** The commands that wait for the answer to their question, with the state of the Opus turn their comment's message was put as (null: no such turn). */
+export async function loadAskedCommands(db: Db): Promise<{ commentId: number; repo: string; number: number; turnStatus: string | null; turnError: string | null }[]> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom(`${T} as g`)
+    .leftJoin("main.chat_messages as m", (j) => j.onRef("m.github_comment_id", "=", "g.comment_id").on("m.turn_id", "is not", null))
+    .leftJoin("main.conversation_turns as t", "t.id", "m.turn_id")
+    .select(["g.comment_id as comment_id", "g.repo as repo", "g.number as number", "t.status as status", "t.error as error"])
+    .where("g.state", "=", "asked").orderBy("g.comment_id"));
+  return rows.map((r) => ({ commentId: Number(r.comment_id), repo: r.repo, number: Number(r.number), turnStatus: r.status ?? null, turnError: r.error ?? null }));
 }

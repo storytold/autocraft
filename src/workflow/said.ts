@@ -165,13 +165,13 @@ export async function linkingComment<T>(db: Db, commentId: number, login: string
   }
 }
 
-/** Links the message a question came in to the Opus turn it was put as (src/conversations/ask.ts), so the chat shows the answer under it. Never throws. */
-export async function linkAskTurn(db: Db, o: { repo: string; number: number; login: string; via: ChatVia; turnId: number; commentId?: number }): Promise<void> {
-  try {
-    const m = o.commentId === undefined ? null : await loadCommentMessage(db, o.commentId);
-    if (m) await linkMessage(db, m.id, { turnId: o.turnId });
-    else await linkNewestSaid(db, { repo: o.repo, number: o.number, author: o.login, via: o.via, turnId: o.turnId });
-  } catch (e) {
-    console.error(`chat: question not linked: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-  }
+/**
+ * Links the message a question came in to the Opus turn it was put as (src/conversations/ask.ts), so the chat shows the answer under it
+ * and the Conversation step knows where the question came from. Runs in the transaction that stores the turn (askQuestion `linked`):
+ * a failure throws, and nothing is asked. False when no message was found to link.
+ */
+export async function linkAskTurn(db: Db, o: { repo: string; number: number; login: string; via: ChatVia; turnId: number; commentId?: number }): Promise<boolean> {
+  const m = o.commentId === undefined ? null : await loadCommentMessage(db, o.commentId);
+  if (m) { await linkMessage(db, m.id, { turnId: o.turnId }); return true; }
+  return await linkNewestSaid(db, { repo: o.repo, number: o.number, author: o.login, via: o.via, turnId: o.turnId }) !== null;
 }

@@ -1045,6 +1045,7 @@ export interface GithubCommands {
   ref_number: number | null;
   ref_branch: string | null;
   parsed: string | null;
+  model: string | null;
 }
 
 export interface GithubLinkNudges {
@@ -3310,7 +3311,7 @@ export const COLUMNS = {
   flow_summary: ["repo", "counts", "counted_at", "stale", "decisions_sig"],
   github_app: ["id", "app_id", "slug", "keys_enc", "updated_at"],
   github_app_states: ["state", "login", "session_hash", "created_at"],
-  github_commands: ["comment_id", "repo", "number", "pr", "command", "weight", "login", "github_id", "created_at", "requested_at", "state", "result", "done_at", "tried_at", "retries", "allowed", "reply", "ref_repo", "ref_number", "ref_branch", "parsed"],
+  github_commands: ["comment_id", "repo", "number", "pr", "command", "weight", "login", "github_id", "created_at", "requested_at", "state", "result", "done_at", "tried_at", "retries", "allowed", "reply", "ref_repo", "ref_number", "ref_branch", "parsed", "model"],
   github_link_nudges: ["login", "at"],
   github_setup_links: ["id", "org", "created_by", "hash", "created_at", "expires_at", "revoked_at", "used_at", "used_by", "installation_id"],
   held_followups: ["id", "card_id", "choice_id", "decision_id", "answer_seq", "preapproval_id", "repo", "number", "issue_repo", "title", "body", "by", "at", "state", "issue_number", "url", "reason", "attempts", "updated_at", "workflow_id", "approved_at"],

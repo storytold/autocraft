@@ -7,6 +7,7 @@ import { loadPermissionDenials } from "../access/index.ts";
 import { loadStepApprovals, loadTrackedRepos } from "../control/index.ts";
 import { loadStartedWork } from "../workflow/index.ts";
 import { loadQueue } from "./calls-read.ts";
+import { INTERACTIVE_PROMPTS } from "./calls-shared.ts";
 import { withdrawCalls } from "./calls-queue.ts";
 import { DROP_REASON } from "./cooloffs.ts";
 import { runnerCredentials, runnerRowOf, STATUS_FRESH_MS } from "./helpers.ts";
@@ -14,8 +15,8 @@ import { cachedSnapshot, dropSnapshotCache, keepSnapshot } from "./snapshot-cach
 import { settingsByLogin, USER_SETTING_KEYS } from "./user-settings.ts";
 import type { LowerLogin, RunnerSnapshot, StartedWork, SweepState, TakerSweepPlan } from "./types.ts";
 
-/** Calls whose prompt starts with one of these run in a login's Interactive slots; keep in step with the claim's rule. */
-const INTERACTIVE_LIKE = "discord.%";
+/** Calls whose prompt starts with one of these run in a login's Interactive slots; keep in step with the claim's rule (INTERACTIVE_PROMPTS). */
+const INTERACTIVE_LIKE = INTERACTIVE_PROMPTS.map((p) => `${p}%`);
 
 /** The reads of other modules the snapshot embeds; tests may pass fixed answers in their place. */
 export type SnapshotDeps = {
@@ -57,7 +58,7 @@ async function readSnapshot(db: Db, now: number, deps: SnapshotDeps): Promise<Ru
     q.all(q.k.selectFrom("main.remote_cooloffs").select(["login", "until", "reason"]).where("until", ">", now)),
     q.all(q.k.selectFrom(kx.indexedBy(db, "main.remote_calls", "remote_calls_leased", "c"))
       .select((eb) => ["c.token_id", "c.user_login", "c.own_lane", eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("c.heartbeat_at").as("beat"),
-        eb.fn.coalesce(eb.fn.sum<number>(eb.case().when("c.prompt_id", "like", INTERACTIVE_LIKE).then(1).else(0).end()), eb.lit(0)).as("interactive")])
+        eb.fn.coalesce(eb.fn.sum<number>(eb.case().when(eb.or(INTERACTIVE_LIKE.map((p) => eb("c.prompt_id", "like", p)))).then(1).else(0).end()), eb.lit(0)).as("interactive")])
       .where("c.state", "=", kx.literal("leased")).groupBy(["c.token_id", "c.user_login", "c.own_lane"])),
     deps.started(db, now),
     deps.denials(db, { runners: true }, now),

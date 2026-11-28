@@ -256,9 +256,10 @@ export async function refreshItem(db: Db, repo: string, n: number, deps?: StoreD
 /**
  * A person's message (`by.kind`: an operator's or a maintainer's): creates the conversation when the item has none and queues
  * the message for the Conversation step, which answers a maintainer's on the maintainer's own Task Runner. With `ask` false the
- * message is only stored (no pending state, no model call); Opus sees it among the turns at the next ask.
+ * message is only stored (no pending state, no model call); Opus sees it among the turns at the next ask. `linked` runs in the same
+ * transaction once the turn exists (see PostMessage).
  */
-export async function addMessage(db: Db, repo: string, n: number, by: { login: string; kind: PersonKind }, text: string, deps?: StoreDeps, ask = true): Promise<number> {
+export async function addMessage(db: Db, repo: string, n: number, by: { login: string; kind: PersonKind }, text: string, deps?: StoreDeps, ask = true, linked?: (turnId: number) => Promise<void>): Promise<number> {
   const body = text.trim();
   if (!body) throw new ConversationError(400, "the message is empty");
   if (body.length > MESSAGE_MAX) throw new ConversationError(400, `the message is longer than ${MESSAGE_MAX} characters`);
@@ -273,6 +274,7 @@ export async function addMessage(db: Db, repo: string, n: number, by: { login: s
     ref: refOf(repo, n), by, ask, turn: storedTurn(repo, n, { kind: by.kind, login: by.login, body, block: personBlock(by.kind, by.login, body, steps) }),
     ...(fresh && { newConversation: { repo, number: n, item_block: fresh.block, item_sig: fresh.sig, created_by: by.login, created_at: nowOf(deps).toISOString() } }),
     ...(refresh && { refresh }),
+    ...(linked && { linked }),
   });
 }
 
@@ -290,11 +292,14 @@ export const claimPending = async (db: Db, repo: string, n: number, deps?: Store
 export const setTurnProgress = async (db: Db, repo: string, n: number, claim: string, lines: string[]): Promise<void> =>
   await store.setProgress(db, refOf(repo, n), claim, lines);
 
-/** The pieces of the next prompt: the stored item block and the turns in prompt order, the claimed message last. */
-export async function promptParts(db: Db, repo: string, n: number, wait: TurnRow): Promise<{ item: string; turns: string; earlier: string; message: string; seen: string | null } | null> {
+/**
+ * The pieces of the next prompt: the stored item block and the turns in prompt order, the claimed message last. `alone`: a question whose
+ * answer is posted in public (GitHub, Discord) gets none of the chat's earlier messages and replies, only the item's update turns.
+ */
+export async function promptParts(db: Db, repo: string, n: number, wait: TurnRow, o: { alone?: boolean } = {}): Promise<{ item: string; turns: string; earlier: string; message: string; seen: string | null } | null> {
   const t: Thread | undefined = (await loadThreads(db, [refOf(repo, n)], { blocks: true })).get(refOf(repo, n));
   if (!t) return null;
-  const earlier = t.turns.filter((x: ThreadTurn) => x.seq !== null).map((x) => x.block ?? "").join("");
+  const earlier = t.turns.filter((x: ThreadTurn) => x.seq !== null && (!o.alone || x.kind === "system")).map((x) => x.block ?? "").join("");
   return { item: t.conversation.item_block, turns: earlier + wait.block, earlier, message: wait.block, seen: seenOf(t.conversation) };
 }
 

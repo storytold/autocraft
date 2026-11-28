@@ -18,9 +18,9 @@
 // it please"), the other words in vocab.ts (land, park, carry on, skip ...), "it's a dupe of #12" after a close, conditions AutoCraft
 // applies anyway beside a merge ("once CI is green", "when ready"), exceptions to a yes ("yes except 3", "all but the export change"),
 // number words, ordinals and ranges for parts ("drop the second one", "fix 1 to 3", "fix both"), and a typo of one letter in a
-// command word of five letters or more. Negation, hedges and questions (not, don't, never, maybe, perhaps, unless, ?) leave a
-// message unread, except the hold phrases "not yet", "not now" and "don't merge yet"; inside a fix's words too. Quoted lines and
-// code are not read; inline code in a fix's words stays part of them.
+// command word of five letters or more. Negation, hedges and questions (not, don't, never, maybe, perhaps, unless, should, could we,
+// can we, ?) leave a message unread, except the hold phrases "not yet", "not now" and "don't merge yet"; inside a fix's words too.
+// Quoted lines and code are not read; inline code in a fix's words stays part of them.
 import { commentLines } from "../github/comment-lines.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CloseReason, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
@@ -135,10 +135,10 @@ const CODE = "\u0002";
 const CODE_RE = /\u0002(\d+)\u0002/g;
 
 /**
- * Words that turn or soften what they stand beside. A message holding one is never read as a command, whatever else it says; the
- * hold phrases that hold one ("not yet", "don't merge yet") are read before this.
+ * Words that turn, soften or ask about what they stand beside ("should we merge this" asks, without a question mark). A message holding
+ * one is never read as a command, whatever else it says; the hold phrases that hold one ("not yet", "don't merge yet") are read before this.
  */
-export const GUARD = /(?<![\w-])(?:not|never|maybe|perhaps|unless|dont|do not|cannot|cant|wont|shouldnt)(?![\w-])|n't(?![\w-])|\?/i;
+export const GUARD = /(?<![\w-])(?:not|never|maybe|perhaps|unless|dont|do not|cannot|cant|wont|shouldnt|should|could we|can we)(?![\w-])|n't(?![\w-])|\?/i;
 
 /**
  * The command in a GitHub comment, or null when no line of it is addressed to the app. A command starts on a line of its own with

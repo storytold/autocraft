@@ -75,10 +75,10 @@ function discordAsk(db: Db, keys: DiscordKeys, o: { login: string; own: readonly
     if (!(await loadTrackedRepos(db)).has(item.repo)) return one(item, "refused", t("AutoCraft does not track {repo}.", { repo: item.repo }));
     const operator = (await access.loadAccess(db, [o.login])).get(o.login.toLowerCase())?.role === "operator";
     if (!operator && !await o.canWrite(item.repo).catch(() => false)) return one(item, "refused", t("Only operators, and maintainers with write access to the repository, ask Opus."));
-    const a = await askQuestion(db, { login: o.login, operator }, item.repo, item.number, question, { limit: true, via: "discord" });
+    // The message is linked and the place kept with the turn, in one transaction: an answer always knows where to go.
+    const linked = async (turnId: number): Promise<boolean> => await linkAskTurn(db, { ...item, login: o.login, via: "discord", turnId }) && await keepAskedAt(db, keys, turnId, o.at);
+    const a = await askQuestion(db, { login: o.login, operator }, item.repo, item.number, question, { limit: true, via: "discord", linked });
     if ("refusal" in a) return one(item, "refused", a.refusal);
-    await linkAskTurn(db, { ...item, login: o.login, via: "discord", turnId: a.turnId });
-    await keepAskedAt(db, keys, a.turnId, o.at);
     o.asked();
     return one(item, "run", t("Asked Opus. The answer comes as a reply here, and in the item's chat."));
   };
