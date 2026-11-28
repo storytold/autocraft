@@ -24,7 +24,7 @@ test("an unread failure log is read again after the main CI poll, then hourly, c
     classify: async (_db, input) => { w.classified++; if (!w.usable) return null; return input.checks.map((c) => ({ check: c.check, verdict: "code" as const, reason: "a test fails" })); },
     gh: async (args) => {
       if (args[1]?.includes("check-runs")) return JSON.stringify({ check_runs: [{ name: "gate / test", status: "completed", conclusion: "failure", details_url: "https://github.com/storytold/app/actions/runs/11/job/1" }] });
-      if (args[0] === "run") { if (w.gone) throw new Error("HTTP 410: Gone"); if (!w.readable) throw new Error("HTTP 502: Bad Gateway"); return "test\tcargo test\tassertion failed\n"; }
+      if (args[0] === "run") { if (w.gone) throw new Error("HTTP 410: Gone"); if (!w.readable) throw new Error("HTTP 404: Not Found"); return "test\tcargo test\tassertion failed\n"; }
       throw new Error(`unexpected call: ${args.join(" ")}`);
     },
     exec: async () => ({ code: 1, stdout: "", stderr: "unexpected" }),

@@ -462,7 +462,7 @@ test("a failure log that stays unreadable is read again hourly after the backoff
     const w = world();
     const gh = w.deps.gh;
     let gone = false;
-    w.deps.gh = async (args) => { if (args[0] === "run") throw new Error(gone ? "HTTP 410: Gone" : "HTTP 502: Bad Gateway"); return await gh(args); };
+    w.deps.gh = async (args) => { if (args[0] === "run") throw new Error(gone ? "HTTP 410: Gone" : "HTTP 404: Not Found"); return await gh(args); };
     w.deps.now = () => new Date();
     const db = await fresh(w.head);
     const states = async () => (await db.all(db.k.selectFrom("ci_fixes").select("state").orderBy(rowid("ci_fixes")))).map((r) => r.state);

@@ -164,13 +164,16 @@ export function parseJobLog(job: string, text: string, steps: readonly JobStep[]
 const IN_PROGRESS = /is still in progress/i;
 const firstLine = (e: unknown): string => String((e as Error).message ?? e).split("\n")[0]!.slice(0, 200);
 
-/** GitHub answers that it has no such log (expired, deleted): reading it again finds nothing either. */
-const GONE = /\bHTTP (?:404|410)\b/;
+/**
+ * GitHub answers that the log is gone (expired, deleted): reading it again finds nothing either. A 404 is not: GitHub gives it for a
+ * failed job's log while its run still goes on, and a log that really is gone ends after a day of reads.
+ */
+const GONE = /\bHTTP 410\b/;
 
 /**
  * `unread`: a failed check's log could not be read, so no CI fix try is made; `failure` holds every failed check, those without a
- * readable log with no steps. `permanent`: no later read can find it (GitHub no longer has the log, or the run's log holds no job of
- * the check), so the caller ends the head instead of reading it again.
+ * readable log with no steps. `permanent`: no later read can find it (GitHub answers that the log is gone, or the run's log holds no
+ * job of the check), so the caller ends the head instead of reading it again.
  */
 export type Reading = { kind: "failure"; failure: CiFailure } | { kind: "skip"; why: string } | { kind: "unread"; why: string; failure: CiFailure; permanent: boolean };
 
