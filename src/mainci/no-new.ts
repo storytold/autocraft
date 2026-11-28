@@ -224,15 +224,16 @@ export async function judgeHead(db: Db, gh: Gh, o: { repo: string; number: numbe
     if (reading.kind === "unread") return await unread(reading.why, reading.permanent);
     if (reading.kind === "skip") return await save({ ...base, state: "unparsed", checks: [], reason: oneLine(reading.why) });
     const pr = headFailures(reading.failure);
-    // A run whose attempt and creation time decide whether it ran on a merge commit made after main turned red; read once per run.
+    // A run whose event, attempt and creation time decide whether it ran on a merge commit made after main turned red; read once per run.
     if (o.red.redAt) {
       const runs = new Map<number, { attempt: number; createdAt: string } | null>();
       for (const c of o.failing) {
         const f = pr[c];
         if (!f || f.runId === null) continue;
         if (!runs.has(f.runId)) {
-          const r = JSON.parse(await gh(["api", `repos/${slugOf(o.repo)}/actions/runs/${f.runId}`])) as { run_attempt?: number; created_at?: string };
-          runs.set(f.runId, typeof r.run_attempt === "number" && typeof r.created_at === "string" ? { attempt: r.run_attempt, createdAt: r.created_at } : null);
+          const r = JSON.parse(await gh(["api", `repos/${slugOf(o.repo)}/actions/runs/${f.runId}`])) as { run_attempt?: number; created_at?: string; event?: string };
+          // Only a pull_request run tests the PR merged with main; a push or dispatch run tests the branch head alone, so it counts as early.
+          runs.set(f.runId, r.event === "pull_request" && typeof r.run_attempt === "number" && typeof r.created_at === "string" ? { attempt: r.run_attempt, createdAt: r.created_at } : null);
         }
         f.run = runs.get(f.runId)!;
       }

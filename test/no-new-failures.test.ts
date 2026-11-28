@@ -25,7 +25,7 @@ test("while main is red, a PR failing only where main fails is planned to merge 
   const gh = async (args: string[]): Promise<string> => {
     const sha = /commits\/([^/]+)\/check-runs/.exec(args[1] ?? "")?.[1];
     if (sha) return JSON.stringify({ check_runs: [{ id: 1, name: CHECK, status: "completed", conclusion: "failure", started_at: "2026-01-03T00:00:00Z", details_url: `https://github.com/o/app/actions/runs/${runs[sha]}/job/1` }] });
-    if (/actions\/runs\/\d+$/.test(args[1] ?? "")) return JSON.stringify({ run_attempt: 1, created_at: "2026-01-03T00:00:00Z" });
+    if (/actions\/runs\/\d+$/.test(args[1] ?? "")) return JSON.stringify({ run_attempt: 1, created_at: "2026-01-03T00:00:00Z", event: "pull_request" });
     if (args[0] === "run") return log(logs[Object.keys(runs).find((k) => runs[k] === args[2])!]!);
     throw new Error(`unexpected gh ${args.join(" ")}`);
   };
