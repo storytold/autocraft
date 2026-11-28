@@ -6,7 +6,7 @@
 import type { Db } from "../db/index.ts";
 import { addWorkspaceCalls, loadEnvs, markCalls, patchWorkspaces, SECURITY_WORKSPACE_OWNER } from "../data/build/index.ts";
 import type { WorkspaceRow } from "../data/build/index.ts";
-import { envSettings, listEnvs } from "../build/envs.ts";
+import { envSettings, getEnv, listEnvs } from "../build/envs.ts";
 import type { KubeApi } from "../build/kube-api.ts";
 import { FETCH_CALL_MS, fetchDependencies } from "../build/workspace-fetch.ts";
 import { cargoLocksDiffer, READY_LIMIT_MS, SEED_LIMIT_MS, sourceArchive } from "../build/workspace-launch.ts";
@@ -178,8 +178,10 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
   const pending = (reason: string): WorkspaceWait => ({ kind: "wait", wait: FIX_WORKSPACE_WAIT, reason });
 
   const w = id !== null ? await getWorkspace(db, id) : undefined;
-  if (!w || !LIVE_STATES.includes(w.state as WorkspaceStateName) || w.repo !== session.repo || (w.state === "parked" && w.resume_tries >= RESUME_TRIES)) {
-    const wait = await make(w ? `workspace ${w.id} was ${w.state === "parked" ? "parked and out of resumes" : w.state}` : null);
+  // A requested workspace starts only on an enabled environment; on a disabled one it would wait for ever.
+  const stranded = !!w && w.state === "requested" && !(await getEnv(db, w.env_id))?.enabled;
+  if (!w || stranded || !LIVE_STATES.includes(w.state as WorkspaceStateName) || w.repo !== session.repo || (w.state === "parked" && w.resume_tries >= RESUME_TRIES)) {
+    const wait = await make(w ? `workspace ${w.id} was ${stranded ? "requested on an environment that is no longer enabled" : w.state === "parked" ? "parked and out of resumes" : w.state}` : null);
     if (wait) return wait;
   } else how = w.state === "parked" ? "resumed" : "kept";
 

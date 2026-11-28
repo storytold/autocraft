@@ -137,8 +137,8 @@ export async function loadFixesToAdvance(db: Db): Promise<FixAdvanceRow[]> {
     .select(["f.repo", "f.number", "f.decided_by as by"])
     .select((eb) => [eb.lit(null).as("round_at"), eb.lit(null).as("head"), eb.lit(null).as("base"), kx.literal(1).as("src")])
     .select("f.env_wait_at as env_at")
-    // The state of the workspace of the finding's live security fix session, if any.
-    .select((eb) => eb.selectFrom("main.fix_sessions as fs").innerJoin("main.workspaces as w", "w.id", "fs.workspace_id").select("w.state")
+    // The state of the workspace of the finding's live security fix session, if any; null for a workspace whose environment is disabled (it cannot start there).
+    .select((eb) => eb.selectFrom("main.fix_sessions as fs").innerJoin("main.workspaces as w", "w.id", "fs.workspace_id").innerJoin("main.build_envs as e", (j) => j.onRef("e.id", "=", "w.env_id").on("e.enabled", "=", 1)).select("w.state")
       .where("fs.kind", "=", "security").whereRef("fs.repo", "=", "f.repo").whereRef("fs.number", "=", "f.number").where("fs.state", "=", "live").limit(1).as("ws_state"))
     .where("f.state", "=", "fixing").where("f.env_wait_at", "is not", null).where(noJob);
   const rows = (await q.all((building as any).unionAll(waiting as any).orderBy("src").orderBy("repo").orderBy("number"))) as {
