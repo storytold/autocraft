@@ -5,7 +5,8 @@ import type { Querier } from "../mirror.ts";
 import { contextState, type CheckState } from "../review/checks.ts";
 import { trackedNames } from "../repos.ts";
 import { optionalChecks, optionalChecksOf } from "../optional-checks.ts";
-import { loadTrips, resumeTrips, tripMergeBreakers } from "../data/control/index.ts";
+import { loadTrips, resumeTrips, TRIP_REASON_SEPARATOR, tripMergeBreakers } from "../data/control/index.ts";
+import type { TripRow } from "../data/control/types.ts";
 import { tripKey } from "../core/push-outcome.ts";
 import { loadMergedInfo } from "../data/merge/index.ts";
 import { autocraftTexts } from "../mainfix/status.ts";
@@ -123,7 +124,7 @@ export async function pollMainCi(db: Db, client: Querier, only?: string, log: (l
     const merged = await loadMergedInfo(db, red.map((r) => ({ repo: r.repo, number: r.number })));
     await tripMergeBreakers(db, red.flatMap((r) => {
       const m = merged.get(`${r.repo}#${r.number}`);
-      return m?.lastAt ? [{ repo: r.repo, number: r.number, mergedAt: m.lastAt, reason: `main CI of ${r.repo} is red after our merge of #${r.number}`, evidence: [`${r.repo}#${r.number}`, mainCiEvidence(r.repo, r.sha)] }] : [];
+      return m?.lastAt ? [{ repo: r.repo, number: r.number, mergedAt: m.lastAt, reason: `main CI of ${r.repo} is red after our merge of #${r.number}`, evidence: [mainCiEvidence(r.repo, r.number, r.sha)] }] : [];
     }));
   }
   await resumeMainCiTrips(db, rows, log);
@@ -134,19 +135,33 @@ export async function pollMainCi(db: Db, client: Querier, only?: string, log: (l
   return { repos: repos.length, heads };
 }
 
-/** The evidence entry naming the red head of main a merge breaker was tripped for: only a main-CI trip has one. */
-const mainCiEvidence = (repo: string, sha: string): string => `${repo}@${sha.slice(0, 8)}`;
+/** The evidence a red main trips a merge breaker with: our merged PR and the red head of main. Only a main-CI trip has this form. */
+const mainCiEvidence = (repo: string, number: number, sha: string): string => `${repo}#${number}@${sha.slice(0, 8)}`;
+
+const escaped = (repo: string): string => repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Whether every cause on a merge breaker is a red main: each evidence entry has the main-CI form. A trip from before that form
+ * holds the pair `repo#N`, `repo@sha` and one reason; a cause added to it (a post-merge defect) adds a reason, so it no longer counts.
+ */
+export function redMainOnly(t: Pick<TripRow, "reason" | "evidence">, repo: string): boolean {
+  const r = escaped(repo);
+  const now = new RegExp(`^${r}#\\d+@[0-9a-f]+$`), sha = new RegExp(`^${r}@[0-9a-f]+$`), ref = new RegExp(`^${r}#\\d+$`);
+  if (!t.evidence.length) return false;
+  if (t.evidence.every((e) => now.test(e))) return true;
+  return !t.reason.includes(TRIP_REASON_SEPARATOR) && t.evidence.length === 2 && t.evidence.some((e) => sha.test(e)) && t.evidence.some((e) => ref.test(e));
+}
 
 /**
  * Resumes, as the pipeline, each merge breaker that a red main tripped once that main counts as green (or failing only optional
  * checks) again: the state comes from the newest head, so from the red head the trip names rerun green or from a later head that
- * holds it. A merge breaker tripped for another reason (a post-merge review's defects) has no such evidence and stays for a person.
+ * holds it. A merge breaker with any other cause (a post-merge review's defects, also one added while main was red) stays for a person.
  */
 async function resumeMainCiTrips(db: Db, rows: MainCiRepoRow[], log: (line: string) => void): Promise<void> {
   const passing = rows.filter((r) => r.state === "green" || r.state === "optional");
   if (!passing.length) return;
   const trips = await loadTrips(db, { keys: passing.map((r) => tripKey("merge", r.repo)) });
-  const due = passing.filter((r) => trips.get(tripKey("merge", r.repo))?.evidence.some((e) => e.startsWith(`${r.repo}@`)));
+  const due = passing.filter((r) => { const t = trips.get(tripKey("merge", r.repo)); return !!t && redMainOnly(t, r.repo); });
   if (!due.length) return;
   const resumed = await resumeTrips(db, due.map((r) => tripKey("merge", r.repo)), "pipeline");
   for (const t of resumed) log(`main-ci: resumed ${t.key}: main CI passes again (${t.reason})`);

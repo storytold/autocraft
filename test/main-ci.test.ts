@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { classify, derive, prNumberOf, type HeadRow, type MainCheck } from "../src/mainci/classify.ts";
 import { mainCiRepos, pollMainCi, redMainHolds, redMainRepos } from "../src/mainci/index.ts";
-import { loadTrip, loadTrips, tripStage } from "../src/data/control/index.ts";
+import { loadTrip, loadTrips, tripMergeBreakers, tripStage } from "../src/data/control/index.ts";
 import type { Querier } from "../src/mirror.ts";
 import { saveMainHeads } from "../src/data/mirror/mainci.ts";
 import { decidePr } from "../src/core/decide.ts";
@@ -100,15 +100,15 @@ test("a red branch stays red while a head's checks run, also a rerun of the red 
   assert.equal((await row(ms(75))).culprit, null);
 });
 
-test("a merge breaker a red main tripped resumes once main passes again; one tripped by a post-merge defect stays", async () => {
+test("a merge breaker a red main tripped resumes once main passes again; one with a post-merge defect, also one added while main was red, stays", async () => {
   mkdirSync(SCRATCH, { recursive: true });
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "main-ci-")), "t.db"));
   const t = (min: number) => new Date(Date.now() - 60 * 60_000 + min * 60_000).toISOString();
-  for (const name of ["app", "lib"]) {
+  for (const name of ["app", "lib", "svc"]) {
     await db.run(db.k.insertInto("tracked_repos").values({ name, added_by: "op", added_at: t(0), pipeline: 1 }));
     await db.run(db.k.insertInto("repos").values({ name, visibility: "public", synced_at: t(0) }));
   }
-  await db.run(db.k.insertInto("merges").values({ repo: "app", number: 7, head_oid: "h7", at: t(1), run_id: "r", path: "rule", outcome: "merged" }));
+  for (const repo of ["app", "svc"]) await db.run(db.k.insertInto("merges").values({ repo, number: 7, head_oid: "h7", at: t(1), run_id: "r", path: "rule", outcome: "merged" }));
   // What GitHub answers for each repo's default branch: its head, the PR its headline names, and its gate check.
   let heads: Record<string, { sha: string; pr: number; gate: "SUCCESS" | "FAILURE" }> = {};
   const client: Querier = {
@@ -121,18 +121,21 @@ test("a merge breaker a red main tripped resumes once main passes again; one tri
   };
   const active = async () => [...(await loadTrips(db)).keys()].sort();
 
-  heads = { app: { sha: "a1", pr: 7, gate: "FAILURE" }, lib: { sha: "l1", pr: 3, gate: "SUCCESS" } };
+  heads = { app: { sha: "a1", pr: 7, gate: "FAILURE" }, lib: { sha: "l1", pr: 3, gate: "SUCCESS" }, svc: { sha: "s1", pr: 7, gate: "FAILURE" } };
   await pollMainCi(db, client);
   await tripStage(db, [{ key: "merge:lib", reason: "the post-merge review of lib#3 found 1 defect", evidence: ["lib#3"], at: t(2) }]);
-  assert.deepEqual(await active(), ["merge:app", "merge:lib"]);
+  // The post-merge review of the PR that broke svc's main finds a defect while the red main holds the breaker.
+  await tripMergeBreakers(db, [{ repo: "svc", number: 7, mergedAt: t(1), reason: "the post-merge review of svc#7 found 1 defect", evidence: ["svc#7"] }]);
+  assert.deepEqual(await active(), ["merge:app", "merge:lib", "merge:svc"]);
+  assert.match((await loadTrip(db, "merge:svc"))!.reason, /post-merge review/);
 
   // Still red on a later head: nothing resumes.
-  heads = { app: { sha: "a2", pr: 8, gate: "FAILURE" }, lib: { sha: "l2", pr: 4, gate: "SUCCESS" } };
+  heads = { app: { sha: "a2", pr: 8, gate: "FAILURE" }, lib: { sha: "l2", pr: 4, gate: "SUCCESS" }, svc: { sha: "s2", pr: 8, gate: "FAILURE" } };
   await pollMainCi(db, client);
-  assert.deepEqual(await active(), ["merge:app", "merge:lib"]);
+  assert.deepEqual(await active(), ["merge:app", "merge:lib", "merge:svc"]);
 
-  heads = { app: { sha: "a3", pr: 9, gate: "SUCCESS" }, lib: { sha: "l3", pr: 5, gate: "SUCCESS" } };
+  heads = { app: { sha: "a3", pr: 9, gate: "SUCCESS" }, lib: { sha: "l3", pr: 5, gate: "SUCCESS" }, svc: { sha: "s3", pr: 9, gate: "SUCCESS" } };
   await pollMainCi(db, client);
-  assert.deepEqual(await active(), ["merge:lib"]);
+  assert.deepEqual(await active(), ["merge:lib", "merge:svc"]);
   assert.equal((await loadTrip(db, "merge:app"))?.clearedBy, "pipeline");
 });

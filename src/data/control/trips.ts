@@ -48,11 +48,16 @@ export async function loadBreakerSince(db: Db, keys: string[]): Promise<Map<stri
   return new Map(keys.map((k) => [k, found.get(k)?.clearedAt ?? ""]));
 }
 
+/** Joins the reasons of one trip: a trip that gained a cause while active lists every cause. */
+export const TRIP_REASON_SEPARATOR = "; ";
+
 /**
  * Compare-and-set (`ON CONFLICT ... WHERE active = 0 RETURNING`): trips each key that is not active already and returns those
  * keys, with one `stage-trip` audit row each. A repeated key takes its first row. Joins the caller's transaction.
+ * `append`: a key that is active already gains a reason it does not list yet, with that reason's evidence (one `stage-trip`
+ * audit row each), so a later cause is kept and a resume sees it; such a key is not returned.
  */
-export async function tripStage(db: Db, rowsIn: { key: string; reason: string; evidence: string[]; at: string }[]): Promise<string[]> {
+export async function tripStage(db: Db, rowsIn: { key: string; reason: string; evidence: string[]; at: string }[], o: { append?: boolean } = {}): Promise<string[]> {
   const first = new Map<string, (typeof rowsIn)[number]>();
   for (const r of rowsIn) if (!first.has(r.key)) first.set(r.key, r);
   const unique = [...first.values()];
@@ -64,7 +69,20 @@ export async function tripStage(db: Db, rowsIn: { key: string; reason: string; e
       .onConflict((oc) => oc.column("stage").doUpdateSet(kx.excluded(["active", "reason", "evidence", "tripped_at"])).where((eb) => eb(eb.ref("stage_trips.active" as never), "=", 0 as never)))
       .returning("stage"));
     const tripped = new Set(won.map((r) => r.stage));
-    await addAudit(db, unique.filter((r) => tripped.has(r.key)).map((r) => ({ login: "pipeline", action: "stage-trip", target: r.key, details: { reason: r.reason, evidence: r.evidence } })));
+    const added: typeof unique = [];
+    if (o.append) {
+      // Rows of one call name distinct keys (first-wins above), so each active row gains at most one reason here.
+      const active = await rows(db, { active: true, keys: unique.filter((r) => !tripped.has(r.key)).map((r) => r.key) });
+      for (const r of unique) {
+        const t = active.get(r.key);
+        if (!t || t.reason.split(TRIP_REASON_SEPARATOR).includes(r.reason)) continue;
+        const evidence = [...t.evidence, ...r.evidence.filter((e) => !t.evidence.includes(e))];
+        await q.run(q.k.updateTable("main.stage_trips").set({ reason: `${t.reason}${TRIP_REASON_SEPARATOR}${r.reason}`, evidence: JSON.stringify(evidence) })
+          .where("stage", "=", r.key).where("active", "=", 1));
+        added.push(r);
+      }
+    }
+    await addAudit(db, [...unique.filter((r) => tripped.has(r.key)), ...added].map((r) => ({ login: "pipeline", action: "stage-trip", target: r.key, details: { reason: r.reason, evidence: r.evidence } })));
     return unique.filter((r) => tripped.has(r.key)).map((r) => r.key);
   });
 }
@@ -101,12 +119,13 @@ export async function mayResumeTrip(_db: Db, user: { role?: string; canWrite(rep
 }
 
 /**
- * Trips `merge:<repo>` for rows merged after the key's `cleared_at`: one read of the cleared times, one `tripStage` call. The
+ * Trips `merge:<repo>` for rows merged after the key's `cleared_at`: one read of the cleared times, one `tripStage` call. A
+ * breaker that is active already keeps each new cause with its evidence (a post-merge defect while a red main holds it). The
  * caller loads `mergedAt` with `merge.loadMergedInfo`.
  */
 export async function tripMergeBreakers(db: Db, rowsIn: { repo: string; number: number; mergedAt: string; reason: string; evidence: string[] }[], at: string = new Date().toISOString()): Promise<string[]> {
   if (!rowsIn.length) return [];
   const since = await loadBreakerSince(db, [...new Set(rowsIn.map((r) => tripKey("merge", r.repo)))]);
   const due = rowsIn.filter((r) => r.mergedAt > since.get(tripKey("merge", r.repo))!);
-  return await tripStage(db, due.map((r) => ({ key: tripKey("merge", r.repo), reason: r.reason, evidence: r.evidence, at })));
+  return await tripStage(db, due.map((r) => ({ key: tripKey("merge", r.repo), reason: r.reason, evidence: r.evidence, at })), { append: true });
 }
