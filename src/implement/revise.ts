@@ -36,11 +36,12 @@ import { ghExec, type Gh } from "../merge/safe-merge.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { FOLLOW_UP_ROUNDS, type BuildRun } from "./build.ts";
 import { roundDir, runChecks, workspacePod, type CheckRound, type Pod } from "./checks.ts";
+import { awaitTurn, queueTurn, realCalls, settleOrphan, type CallDeps } from "../build/session-turns.ts";
 import { workspaceDiff } from "./diff.ts";
 import { commitDiff, forkOnce, lastPush } from "./pr.ts";
 import {
-  awaitTurn, findingsMessage, LOST_REPLY_MESSAGE, needsDependency, queueTurn, realCalls, REPORT_MESSAGE, sessionInput, sessionTask, settleOrphan,
-  type CallDeps, type SessionPrompt, type TurnPurpose, type TurnRound,
+  findingsMessage, implementRounds, LOST_REPLY_MESSAGE, needsDependency, REPORT_MESSAGE, sessionInput, sessionTask,
+  type SessionPrompt, type TurnPurpose, type TurnRound,
 } from "./session.ts";
 import { markStuck, stuckLine, type StuckCause } from "./stuck.ts";
 import { addRounds, attemptNow, currentAttempt, roundOf, setRound, writeStep, type Attempt, type NewRound } from "./attempt.ts";
@@ -465,9 +466,9 @@ async function revise(run: BuildRun, deps: ReviseDeps, impl: Implementation): Pr
     const last = turnsOf(liveOf(epoch)).at(-1);
     if (last && turnResult(last).outcome === "queued") {
       // A turn queued by a job that ended before it read the reply.
-      if (await settleOrphan(db, last, run.log)) continue;
+      if (await settleOrphan(db, implementRounds, last, run.log)) continue;
       run.log(`${ref(impl)}: waiting for turn ${last.callId} (${turnResult(last).purpose}) of the run before`);
-      await awaitTurn(db, deps.calls, pod, { impl, workspaceId: ws.wsId, round: last, log: run.log });
+      await awaitTurn(db, deps.calls, implementRounds, pod, { workspaceId: ws.wsId, round: last, log: run.log });
       n++;
       continue;
     }
@@ -477,13 +478,13 @@ async function revise(run: BuildRun, deps: ReviseDeps, impl: Implementation): Pr
       if (n > 0 && await run.stopping()) return "stopping; the next job goes on";
       const t = next.turn;
       const round = await db.write(async () => {
-        const q = await queueTurn(db, deps.calls, { impl, workspaceId: ws.wsId, ...t });
+        const q = await queueTurn(db, deps.calls, implementRounds, { impl, workspaceId: ws.wsId, ...t });
         impl = (await writeStep(db, impl, { patch: { sessionCallId: q.callId } }))!.impl;
         return q;
       });
       run.log(`${ref(impl)}: turn ${round.callId} (${t.purpose}) queued for ${impl.queuedBy}'s Task Runner${t.parentId !== undefined ? `, on the session of call ${t.parentId}` : ""}`);
       await run.progress(`${ref(impl)}: revision turn ${round.callId} (${t.purpose})`);
-      await awaitTurn(db, deps.calls, pod, { impl, workspaceId: ws.wsId, round, log: run.log });
+      await awaitTurn(db, deps.calls, implementRounds, pod, { workspaceId: ws.wsId, round, log: run.log });
       n++;
       continue;
     }

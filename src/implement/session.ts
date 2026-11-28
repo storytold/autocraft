@@ -8,22 +8,21 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { crc32 } from "node:zlib";
 import type { Db } from "../db/index.ts";
-import { addSession, loadEnvs, loadSessions, patchSessions } from "../data/build/index.ts";
+import { loadEnvs } from "../data/build/index.ts";
 import { loadImplementationView } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
-import { loadCallPrompt, loadCalls } from "../data/runners/index.ts";
+import { loadCallPrompt } from "../data/runners/index.ts";
 import { ensurePrompts } from "../data/prompts/index.ts";
 import { artifactDir } from "../build/artifacts.ts";
 import { settingsOf } from "../build/pods.ts";
-import { queueWorkspaceCall, resumePrompt, type WorkspaceCallRequest } from "../build/workspace-call.ts";
-import { sessionStats } from "../build/workspace-session.ts";
+import { resumePrompt, type WorkspaceCallRequest } from "../build/workspace-call.ts";
+import type { RoundStore } from "../build/session-turns.ts";
 import { WORKSPACE_SERVER } from "../build/workspace-tools.ts";
 import { WORK_ROOT } from "../build/workspace-tool-specs.ts";
-import { cleanOutput, getWorkspace } from "../build/workspaces.ts";
+import { cleanOutput } from "../build/workspaces.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { CLAUDE_PROMPTS, claudeParts, resolvedTemplate } from "../prompts/index.ts";
 import { promptTier } from "../remote/bundle.ts";
-import { awaitCall, type Outcome } from "../remote/calls.ts";
 import { referenceDir } from "../reference.ts";
 import { defaultSemanticDeps, referenceProblems } from "../reference-lint.ts";
 import { fixTurnMessage, mergeFixFields, needsFixTurn, type LintProblem } from "../replylint.ts";
@@ -42,20 +41,11 @@ const PROMPT = CLAUDE_PROMPTS[SESSION_PROMPT_ID];
 export const SESSION_MODEL = PROMPT.models[0]!;
 /** A lease lost with its Task Runner goes back to the queue once, onto the same workspace (D8). */
 const CALL_ATTEMPTS = 2;
-/** The most a turn may wait in the queue for the queuer's Task Runner; past it the call is withdrawn and the job ends. */
-export const QUEUE_WAIT_MS = 30 * 60_000;
 /** Bytes of a screenshot copied out at most. */
 const SHOT_MAX_BYTES = 10 * 1024 * 1024;
 const SHOT_EDGE_MAX = 16384;
 /** Characters of the issue body the task carries; the plan already read the whole issue. */
 const ISSUE_BODY_MAX = 20_000;
-
-/** The model calls a build makes. Tests replace them. */
-export type CallDeps = {
-  queue(db: Db, r: WorkspaceCallRequest): Promise<number>;
-  await(db: Db, id: number, o: { log: (line: string) => void; maxWaitMs: number }): Promise<Outcome>;
-};
-export const realCalls: CallDeps = { queue: queueWorkspaceCall, await: async (db, id, o) => await awaitCall(db, id, o) };
 
 /** Why a turn was made: the first session, a session that starts over (after a failed call, or with its harness session lost), the checks' findings, a reply that was not the report (or was lost), the summary's lint, or a revision of our open PR (the review's fixes or red CI). */
 export type TurnPurpose = "start" | "retry" | "fresh" | "findings" | "report" | "lint" | "revise";
@@ -249,117 +239,58 @@ export async function copyShots(pod: Pod, implementationId: number, report: Sess
 
 // ---- one turn ------------------------------------------------------------------------------------------------------
 
-/**
- * Queues a turn: a call bound to the queuer, in one of their Task Runner's normal slots, with the harness session kept for
- * follow-ups. The call, its workspace_sessions row and its round (outcome `queued`, with the turn's purpose) are one write,
- * so a restart at any point finds either no call or the round that says what the call is for.
- */
-export async function queueTurn(db: Db, calls: CallDeps, t: TurnRequest): Promise<ImplementationRound> {
-  const follow = t.parentId !== undefined;
-  const limits = follow ? FOLLOW_UP_CALL : SESSION_CALL;
-  // A follow-up keeps its session's system prompt and version, so a prompt saved meanwhile reaches only new sessions.
-  const pinned = follow ? await loadCallPrompt(db, t.parentId!) : null;
-  if (!t.prompt && pinned?.system == null) await ensurePrompts(db);
-  return await db.write(async () => {
-    const w = await getWorkspace(db, t.workspaceId);
-    const mirror = await hasCrateMirror(db, w?.env_id);
-    const { system, version } = pinned?.system != null ? { system: pinned.system, version: pinned.promptVersion }
-      : t.prompt ? { system: mirror ? t.prompt.mirror : t.prompt.none, version: t.prompt.version } : systemOf(mirror);
-    const callId = await calls.queue(db, {
-      workspaceId: t.workspaceId, promptId: SESSION_PROMPT_ID, promptVersion: version, model: SESSION_MODEL, tier: promptTier(SESSION_PROMPT_ID), effort: PROMPT.effort,
-      stdin: t.stdin, system, timeoutSeconds: limits.timeoutSeconds, maxTurns: limits.maxTurns, items: [{ repo: t.impl.repo, number: t.impl.number }],
-      maxAttempts: CALL_ATTEMPTS, keepSession: true, ...(follow && { parentId: t.parentId }), forLogin: t.impl.queuedBy, boundSlot: true,
-    });
-    // A workspace_sessions row per turn, kept with the workspace: the attempt's workspace outlives each job.
-    const at = new Date().toISOString();
-    const session = await addSession(db, {
-      kind: "implement", repo: t.impl.repo, base_sha: w?.base_sha ?? t.impl.baseSha ?? "", item: t.impl.number, prompt: null, env_id: w?.env_id ?? "", keep: 1,
-      deadline_sec: limits.timeoutSeconds, state: "running", workspace_id: t.workspaceId, remote_call_id: callId, requested_by: t.impl.queuedBy, created_at: at, updated_at: at,
-    });
-    const result: TurnRound = {
-      purpose: t.purpose, outcome: "queued", report: null, turns: null, costUsd: null, calls: 0, shellMs: 0, shots: [], shotErrors: [],
-      ...(follow && { parentId: t.parentId }), ...(t.base && { base: t.base, problems: t.problems ?? [] }), session,
-    };
-    const kind = follow ? "follow-up" : "session";
-    const [id] = await addRounds(db, t.impl.id, [{ kind, callId, result }], at);
-    return { id: id!, implementationId: t.impl.id, kind, callId, result, at };
-  });
-}
-
 /** The stdin of a session that goes again after its call failed: the task with AutoCraft's note on what the workspace kept. */
 export const retryStdin = async (db: Db, failedCallId: number, stdin: string): Promise<string> => await resumePrompt(db, failedCallId, stdin);
 
-const endSession = async (db: Db, callId: number, r: TurnRound): Promise<void> => {
-  const at = new Date().toISOString();
-  // Turns queued before the round named its session row find it by the call.
-  const ids = r.session !== undefined ? [r.session] : [...(await loadSessions(db, { remoteCallId: callId })).values()].flat().filter((x) => x.kind === "implement").map((x) => Number(x.id));
-  await patchSessions(db, ids.map((id) => ({ id, set: { state: r.outcome === "done" ? "done" : "failed", outcome: `${r.purpose}: ${r.outcome}${r.report ? ` (${r.report.status})` : ""}`.slice(0, 300), ended_at: at } })));
-};
-
-/**
- * Settles a queued turn round whose job ended before it read the call (a restart): a call still open, or answered and not
- * yet read, is waited for (awaitTurn); a reply read and lost before its round was written is `done` with `lost` set, so a
- * report turn asks for it again; a call withdrawn or failed meanwhile is `withdrawn`, and the turn is made again.
- * Null: the round needs awaitTurn.
- */
-export async function settleOrphan(db: Db, round: ImplementationRound, log: (line: string) => void): Promise<TurnRound | null> {
-  const queued = round.result as TurnRound;
-  const c = round.callId === null ? undefined : (await loadCalls(db, [round.callId])).get(round.callId);
-  if (c && (c.state === "queued" || c.state === "leased" || (c.state === "done" && c.consumedAt === null))) return null;
-  const r: TurnRound = c?.state === "done"
-    ? { ...queued, outcome: "done", lost: true, parseError: "the reply was read before a restart and not stored" }
-    : { ...queued, outcome: "withdrawn", error: c ? "the call ended without a reader" : "the call is gone" };
-  await setRound(db, round.implementationId, round.id, r);
-  if (round.callId !== null) await endSession(db, round.callId, r);
-  log(`turn ${round.callId} (${r.purpose}): ${r.lost ? "its reply was lost in a restart" : "withdrawn while no job read it"}`);
-  return r;
-}
-
-/**
- * Waits for a queued turn and settles its round. The parsed reply is written to the round as soon as the call returns
- * (the reply is gone from the call once read); tool-call counts and the screenshots are added after. NoTakerError,
- * WaitLimitError and halts pass through, with the round `withdrawn` when the call was.
- */
-export async function awaitTurn(db: Db, calls: CallDeps, pod: Pod | null, o: { impl: Implementation; workspaceId: number; round: ImplementationRound; log: (line: string) => void }): Promise<TurnRound> {
-  const callId = o.round.callId!;
-  const queued = o.round.result as TurnRound;
-  let out: Outcome;
-  try {
-    out = await calls.await(db, callId, { log: o.log, maxWaitMs: QUEUE_WAIT_MS });
-  } catch (e) {
-    const c = (await loadCalls(db, [callId])).get(callId);
-    if (c?.state === "failed") {
-      const r: TurnRound = { ...queued, outcome: "withdrawn", error: cleanOutput(Buffer.from((e as Error).message)).slice(0, 300) };
-      await setRound(db, o.round.implementationId, o.round.id, r);
-      await endSession(db, callId, r);
+/** The implementation rounds the turn mechanics (src/build/session-turns.ts) read and write. */
+export const implementRounds: RoundStore<TurnRound, ImplementationRound, TurnRequest, { pinned: Awaited<ReturnType<typeof loadCallPrompt>> }, Pod> = {
+  sessionKind: "implement",
+  async prepare(db, t) {
+    const follow = t.parentId !== undefined;
+    // A follow-up keeps its session's system prompt and version, so a prompt saved meanwhile reaches only new sessions.
+    const pinned = follow ? await loadCallPrompt(db, t.parentId!) : null;
+    if (!t.prompt && pinned?.system == null) await ensurePrompts(db);
+    return { pinned };
+  },
+  async plan(db, t, { pinned }, w) {
+    const follow = t.parentId !== undefined;
+    const limits = follow ? FOLLOW_UP_CALL : SESSION_CALL;
+    const mirror = await hasCrateMirror(db, w?.env_id ?? undefined);
+    const { system, version } = pinned?.system != null ? { system: pinned.system, version: pinned.promptVersion }
+      : t.prompt ? { system: mirror ? t.prompt.mirror : t.prompt.none, version: t.prompt.version } : systemOf(mirror);
+    const call: WorkspaceCallRequest = {
+      workspaceId: t.workspaceId, promptId: SESSION_PROMPT_ID, promptVersion: version, model: SESSION_MODEL, tier: promptTier(SESSION_PROMPT_ID), effort: PROMPT.effort,
+      stdin: t.stdin, system, timeoutSeconds: limits.timeoutSeconds, maxTurns: limits.maxTurns, items: [{ repo: t.impl.repo, number: t.impl.number }],
+      maxAttempts: CALL_ATTEMPTS, keepSession: true, ...(follow && { parentId: t.parentId }), forLogin: t.impl.queuedBy, boundSlot: true,
+    };
+    const result: TurnRound = {
+      purpose: t.purpose, outcome: "queued", report: null, turns: null, costUsd: null, calls: 0, shellMs: 0, shots: [], shotErrors: [],
+      ...(follow && { parentId: t.parentId }), ...(t.base && { base: t.base, problems: t.problems ?? [] }),
+    };
+    return {
+      call, owner: t.impl.id, kind: follow ? "follow-up" : "session", result,
+      session: { repo: t.impl.repo, item: t.impl.number, baseSha: t.impl.baseSha ?? "", requestedBy: t.impl.queuedBy, deadlineSec: limits.timeoutSeconds },
+    };
+  },
+  async add(db, owner, round, at) {
+    const kind = round.kind as ImplementationRound["kind"];
+    const [id] = await addRounds(db, owner, [{ kind, callId: round.callId, result: round.result }], at);
+    return { id: id!, implementationId: owner, kind, callId: round.callId, result: round.result, at };
+  },
+  async set(db, round, result) { await setRound(db, round.implementationId, round.id, result); },
+  parse(queued, text) {
+    const merged = queued.base ? mergeFixFields(JSON.stringify(queued.base), text, queued.problems ?? []) : text;
+    return merged === null ? { error: "the fix reply is not a JSON object with the asked fields" } : parseReport(merged);
+  },
+  async afterReply(_db, pod, round, r) {
+    // A lint turn's report carries the main turn's screenshots, which that turn copied.
+    if (pod && r.report?.shots.length && r.purpose !== "lint") {
+      const c = await copyShots(pod, round.implementationId, r.report);
+      r.shots = c.shots;
+      r.shotErrors = c.errors;
     }
-    throw e;
-  }
-  const r: TurnRound = { ...queued, outcome: out.state };
-  if (out.state === "failed") r.error = cleanOutput(Buffer.from(out.error)).replace(/\s+/g, " ").slice(0, 300);
-  if (out.state === "done") {
-    r.turns = out.turns;
-    r.costUsd = out.costUsd;
-    const merged = queued.base ? mergeFixFields(JSON.stringify(queued.base), out.text, queued.problems ?? []) : out.text;
-    const p = merged === null ? { error: "the fix reply is not a JSON object with the asked fields" } : parseReport(merged);
-    if ("error" in p) r.parseError = p.error;
-    else r.report = p.report;
-  }
-  await setRound(db, o.round.implementationId, o.round.id, r);
-  const stats = await sessionStats(db, o.workspaceId, callId);
-  r.calls = stats.calls;
-  r.shellMs = stats.shellMs;
-  // A lint turn's report carries the main turn's screenshots, which that turn copied.
-  if (pod && r.report?.shots.length && queued.purpose !== "lint") {
-    const c = await copyShots(pod, o.impl.id, r.report);
-    r.shots = c.shots;
-    r.shotErrors = c.errors;
-  }
-  await setRound(db, o.round.implementationId, o.round.id, r);
-  await endSession(db, callId, r);
-  o.log(`turn ${callId} (${r.purpose}): ${r.outcome}${r.error ? `: ${r.error}` : ""}${r.parseError ? `; not the report: ${r.parseError}` : ""}${r.report ? `; ${r.report.status}` : ""}; ${r.calls} tool calls`);
-  return r;
-}
+  },
+};
 
 // ---- the summary's reply lint ----------------------------------------------------------------------------------------
 

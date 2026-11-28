@@ -17,12 +17,13 @@ import type { By } from "../core/gates.ts";
 import { assertFence } from "../db/fence.ts";
 import { fixupDir, Git, exec as realExec } from "../fixup/git.ts";
 import { buildScriptsAt } from "../fixup/patch.ts";
+import { awaitTurn, queueTurn, realCalls, settleOrphan, type CallDeps } from "../build/session-turns.ts";
 import { validateImplementation, workspaceDiff } from "./diff.ts";
 import { defaultPrDeps, openImplementationPr } from "./pr.ts";
 import { checkLines, roundDir, runChecks, workspacePod, type CheckRound, type Pod } from "./checks.ts";
 import {
-  awaitTurn, findingsMessage, lintedReport, LOST_REPLY_MESSAGE, needsDependency, queueTurn, realCalls, REPORT_MESSAGE, retryStdin, SESSION_MODEL, sessionInput, sessionTask,
-  settleOrphan, summaryFixTurn, type CallDeps, type TurnRequest, type TurnRound,
+  findingsMessage, implementRounds, lintedReport, LOST_REPLY_MESSAGE, needsDependency, REPORT_MESSAGE, retryStdin, SESSION_MODEL, sessionInput, sessionTask,
+  summaryFixTurn, type TurnRequest, type TurnRound,
 } from "./session.ts";
 import { applyStuckAnswer, markStuck, opensAsDraft, stuckLine, type DiffCheck, type StuckCause } from "./stuck.ts";
 import { attemptNow, currentAttempt, roundOf, writeStep, type Attempt, type NewRound } from "./attempt.ts";
@@ -248,7 +249,7 @@ async function turnPhase(run: BuildRun, deps: BuildDeps, impl: Implementation, w
     let round: ImplementationRound;
     if (last && turnResult(last).outcome === "queued") {
       // A turn queued by a job that ended before it read the reply.
-      if (await settleOrphan(db, last, run.log)) continue;
+      if (await settleOrphan(db, implementRounds, last, run.log)) continue;
       round = last;
       run.log(`${ref(impl)}: waiting for turn ${round.callId} (${turnResult(round).purpose}) of the run before`);
     } else {
@@ -268,7 +269,7 @@ async function turnPhase(run: BuildRun, deps: BuildDeps, impl: Implementation, w
       if (n > 0 && await run.stopping()) return impl;
       const t = next.turn;
       round = await db.write(async () => {
-        const q = await queueTurn(db, deps.calls, { impl, workspaceId: ws.wsId, ...t });
+        const q = await queueTurn(db, deps.calls, implementRounds, { impl, workspaceId: ws.wsId, ...t });
         impl = (await step(db, impl, { to: impl.state === "fixing" ? "fixing" : "implementing", patch: { sessionCallId: q.callId } })).impl;
         return q;
       });
@@ -276,7 +277,7 @@ async function turnPhase(run: BuildRun, deps: BuildDeps, impl: Implementation, w
     }
     n++;
     await run.progress(`${ref(impl)}: session turn ${round.callId} (${turnResult(round).purpose})`);
-    await awaitTurn(db, deps.calls, pod, { impl, workspaceId: ws.wsId, round, log: run.log });
+    await awaitTurn(db, deps.calls, implementRounds, pod, { workspaceId: ws.wsId, round, log: run.log });
   }
 }
 
