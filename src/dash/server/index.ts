@@ -46,6 +46,7 @@ import { loadToken, pruneTokens, type McpCaller } from "../mcp/tokens.ts";
 import { sha256hex } from "./crypto.ts";
 import * as remote from "../../remote/calls.ts";
 import { sweepTakers } from "../../remote/takers.ts";
+import { sweepFixSessions } from "../../fixsession/workspace.ts";
 import { stallNotices } from "../../core/runner-room.ts";
 import { withdrawGoneCalls } from "../../data/runners/index.ts";
 import { ClaimWaits, heldMsOf } from "../../remote/claim-wait.ts";
@@ -330,6 +331,12 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       await refreshReadIdentity(rdb);
     } catch (e) {
       if (!isBusy(e)) console.log(`remote maintenance failed: ${(e as Error).message}`);
+    }
+    // Fix sessions whose PR closed, whose workflow a person ended, or that are idle or over their turns end with their workspaces.
+    try {
+      await sweepFixSessions(rdb, (line) => console.log(line));
+    } catch (e) {
+      if (!isBusy(e)) console.log(`fix session sweep failed: ${(e as Error).message}`);
     }
   });
   const maintenance = setInterval(() => void maintain.skip(), scaled(60_000));
