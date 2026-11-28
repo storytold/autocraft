@@ -150,7 +150,7 @@ test("a revision runs for whoever last answered, approved or started the issue's
     assert.equal(o.outcome, "run", o.line);
   };
   await say("implement", 9);
-  assert.deepEqual(await implementJobs(w), [[7, "revise"]]);
+  assert.deepEqual(await implementJobs(w), [[7, "revise"], [9, "plan"]], "each issue of the repo has a job of its own");
 
   await w.db.run(w.db.k.updateTable("main.repo_permissions").set({ permission: "read", checked_at: new Date().toISOString() }).where("login", "=", MAINT));
   assert.deepEqual(await steps(w, 8), []);
@@ -172,7 +172,7 @@ test("a revision runs for whoever last answered, approved or started the issue's
   await say("yes", 7);
   assert.equal((await liveWorkflow(w.db, "app", 7))!.approvedBy, "ann");
   assert.deepEqual(await steps(w, 8), ["implement:revise"]);
-  assert.deepEqual(await implementJobs(w), [[7, "revise"]]);
+  assert.deepEqual(await implementJobs(w), [[7, "revise"], [9, "plan"]]);
   assert.equal(await implementRefusal(w.db, "app", 7), null);
   assert.deepEqual(await implementMay(w.db, "app", 7), { ok: true, as: "person", by: "ann" });
   await moveTurns(w.db, "app", 7);

@@ -38,7 +38,8 @@ export type PostCandidate = {
   opusAt: string;
 };
 export type PostSummary = { repo: string; dryRun: boolean; candidates: number; posted: string[]; edited: string[]; skipped: { ref: string; reason: string }[]; failed: { ref: string; reason: string }[]; note: string | null };
-export type PostParams = { repo: string; limit?: number; dryRun?: boolean; onHandled?: (n: number) => void; by?: By };
+/** `approved`: only PRs a person started or approved for merge (the step's approved lane), or only the others; absent: every PR. `number`: only this PR. */
+export type PostParams = { repo: string; limit?: number; approved?: boolean; number?: number; dryRun?: boolean; onHandled?: (n: number) => void; by?: By };
 export type PostDeps = { querier: Querier; now: () => Date };
 
 export const defaultPostDeps = (): PostDeps => ({ querier: new Client(1000), now: () => new Date() });
@@ -50,13 +51,14 @@ export const defaultPostDeps = (): PostDeps => ({ querier: new Client(1000), now
  */
 export const postCandidates = async (db: Db, repo: string, by: By = CLI_BY): Promise<PostCandidate[]> => (await postsDue(db, repo, by)).due;
 
-/** postCandidates, and why the other reviews to post are held back (null: none is). */
-async function postsDue(db: Db, repo: string, by: By): Promise<{ due: PostCandidate[]; held: string | null }> {
+/** postCandidates (of one lane and PR, as PostParams says), and why the other reviews to post are held back (null: none is). */
+async function postsDue(db: Db, repo: string, by: By, only: Pick<PostParams, "approved" | "number"> = {}): Promise<{ due: PostCandidate[]; held: string | null }> {
   // A review is edited only by the lane that posted it: a NULL `posted_as` is a row from before it was recorded, written by the box account.
   const lane = (as: string | null | undefined): "legacy" | "app" => (as && as !== "legacy" ? "app" : "legacy");
   const nowLane = await githubIdentity(db) === "app" ? "app" : "legacy";
   const out: PostCandidate[] = [];
-  const { may: rows, held } = runnable(await planned(db, "post-review", { repo, refused: true }), by);
+  const due = (await planned(db, "post-review", { repo, refused: true, ...(only.approved !== undefined ? { approved: only.approved } : {}) })).filter((p) => only.number === undefined || p.facts.number === only.number);
+  const { may: rows, held } = runnable(due, by);
   const refs = rows.map((p) => ({ repo, number: p.facts.number }));
   const [posts, source] = await Promise.all([loadPosts(db, refs), postSourcesOf(db, refs.map((r) => `${r.repo}#${r.number}`))]);
   for (const { facts: f, plan, action } of rows) {
@@ -111,7 +113,7 @@ export async function runReviewPost(db: Db, params: PostParams, log: (line: stri
   const dryRun = params.dryRun ?? true;
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const s: PostSummary = { repo, dryRun, candidates: 0, posted: [], edited: [], skipped: [], failed: [], note: null };
-  const { due, held } = await postsDue(db, repo, params.by ?? CLI_BY);
+  const { due, held } = await postsDue(db, repo, params.by ?? CLI_BY, params);
   if (held) {
     s.note = held;
     log(`review-post ${repo}: ${held}`);

@@ -78,27 +78,32 @@ test("the runner tick reads the same number of statements for 1 and 6 running jo
   }), 1, 6);
 });
 
-both("claimJob and jobBlock agree on generated running sets (same repo, finding, null repo, cap, mutex)", async (db) => {
-  const { jobBlock } = await import("../../src/runner/concurrency.ts");
+both("claimJob and jobBlock agree on generated running sets (same repo, finding, item lanes, null repo, cap, mutex)", async (db) => {
+  const { jobBlock, wantOf } = await import("../../src/runner/concurrency.ts");
   const q = queryDb(db);
   const steps = new Map([["review", { exclusive: "x" }], ["verify", { exclusive: "x" }], ["security-fix", {}], ["merge", {}]]) as never;
   let seed = 7;
   const rnd = (n: number) => Math.floor((seed = (seed * 1103515245 + 12345) % 2147483648) / 65536) % n;
   const names = ["review", "verify", "security-fix", "merge"], repos = ["a", "b", null];
   const out: boolean[] = [];
-  for (let round = 0; round < 40; round++) {
+  for (let round = 0; round < 120; round++) {
     await q.run(q.k.deleteFrom("jobs"));
     const cap = [null, 1, 2][rnd(3)]!;
     await q.run(q.k.deleteFrom("settings").where("key", "=", "step_parallel"));
     await q.run(q.k.insertInto("settings").values({ key: "step_parallel", value: cap === null ? "none" : String(cap) }));
-    const running = Array.from({ length: rnd(4) }, () => { const step = names[rnd(4)]!, repo = repos[rnd(3)]!, number = 1 + rnd(2); return { step, state: "running", repo, params: { ...(repo ? { repo } : {}), number } }; });
-    await seedJobs(db, running);
-    const want = { step: names[rnd(4)]!, repo: repos[rnd(3)]!, number: 1 + rnd(2) };
-    const [id] = await seedJobs(db, [{ step: want.step, repo: want.repo, params: { ...(want.repo ? { repo: want.repo } : {}), number: want.number } }]);
-    const active = running.map((r, i) => ({ id: i + 1000, step: r.step, state: "running", repo: r.repo, number: r.params.number }));
-    const blocked = await jobBlock(db, steps, want, { states: ["running"], mutex: true, active });
+    // A job of a per-item lane names its item; a job without a lane names one or none.
+    const job = () => {
+      const lane = [null, "approved", "item"][rnd(3)], repo = repos[rnd(3)]!, number = lane ? 1 + rnd(2) : [null, 1, 2][rnd(3)]!;
+      return { step: names[rnd(4)]!, repo, number, lane, params: { ...(repo ? { repo } : {}), ...(number !== null ? { number } : {}), ...(lane ? { lane } : {}) } };
+    };
+    const running = Array.from({ length: rnd(4) }, () => ({ ...job(), state: "running" }));
+    await seedJobs(db, running.map(({ step, state, repo, params }) => ({ step, state, repo, params })));
+    const want = job();
+    const [id] = await seedJobs(db, [{ step: want.step, repo: want.repo, params: want.params }]);
+    const active = running.map((r, i) => ({ id: i + 1000, step: r.step, state: "running", repo: r.repo, number: r.number, params: JSON.stringify(r.params) }));
+    const blocked = await jobBlock(db, steps, wantOf(want.step, want.params), { states: ["running"], mutex: true, active });
     const mutexSteps = names.filter((n) => (steps as Map<string, { exclusive?: string }>).get(n)?.exclusive && (steps as Map<string, { exclusive?: string }>).get(n)!.exclusive === (steps as Map<string, { exclusive?: string }>).get(want.step)?.exclusive);
-    const claimed = await claimJob(db, { id: id!, ...want, cap, mutexSteps, logPath: "/tmp/x.log" });
+    const claimed = await claimJob(db, { id: id!, step: want.step, repo: want.repo, number: want.number, lane: want.lane, cap, mutexSteps, logPath: "/tmp/x.log" });
     assert.equal(claimed, blocked === null, `round ${round}: ${JSON.stringify({ cap, running, want, blocked })}`);
     out.push(claimed);
   }

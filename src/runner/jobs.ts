@@ -79,8 +79,8 @@ export async function checkRequest(db: Db, stepName: unknown, rawParams: unknown
     if (e instanceof ParamError) throw new JobError(400, e.message);
     throw e;
   }
-  // A lane job works the one pull request it names.
-  if (params.lane !== undefined && params.lane !== "" && typeof params.number !== "number") throw new JobError(400, "a job with a lane needs the pull request (number)");
+  // A lane job works the one item it names.
+  if (params.lane !== undefined && params.lane !== "" && typeof params.number !== "number") throw new JobError(400, "a job with a lane needs its item (number)");
   const why = step.available?.() ?? null;
   if (why) throw new JobError(409, why);
   const refused = step.check ? await step.check(db, params) : null;
