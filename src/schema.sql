@@ -3104,6 +3104,8 @@ CREATE TABLE IF NOT EXISTS merge_repo_state (
   updated_at TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS merge_batches_pr ON merge_batches(repo, pr_number);
+-- The recent batches the merge queue's publish backoff reads on every planner pass (src/data/merge/batches.ts loadPublishFailures).
+CREATE INDEX IF NOT EXISTS merge_batches_updated ON merge_batches(updated_at);
 CREATE INDEX IF NOT EXISTS pr_builds_created ON pr_builds(repo, created_at);
 
 -- The liveness check's last run (planner): one row.

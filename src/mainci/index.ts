@@ -5,7 +5,9 @@ import type { Querier } from "../mirror.ts";
 import { contextState, type CheckState } from "../review/checks.ts";
 import { trackedNames } from "../repos.ts";
 import { optionalChecks, optionalChecksOf } from "../optional-checks.ts";
-import { tripMergeBreakers } from "../data/control/index.ts";
+import { loadTrips, resumeTripsIf, tripMergeBreakers } from "../data/control/index.ts";
+import type { TripRow } from "../data/control/types.ts";
+import { tripKey } from "../core/push-outcome.ts";
 import { loadMergedInfo } from "../data/merge/index.ts";
 import { autocraftTexts } from "../mainfix/status.ts";
 import { classify, derive, type Culprit, type HeadRow, type MainCheck, type MainCiState } from "./classify.ts";
@@ -116,19 +118,55 @@ export async function pollMainCi(db: Db, client: Querier, only?: string, log: (l
     heads += parsed.length;
   }
   // A red head whose culprit is a PR we merged stops the merge path.
-  const red = (await mainCiRepos(db)).flatMap((r) => (r.state === "red" && r.culprit?.pr ? [{ repo: r.repo, number: r.culprit.pr, sha: r.culprit.sha }] : []));
+  const rows = await mainCiRepos(db);
+  const red = rows.flatMap((r) => (r.state === "red" && r.culprit?.pr ? [{ repo: r.repo, number: r.culprit.pr, sha: r.culprit.sha }] : []));
   if (red.length) {
     const merged = await loadMergedInfo(db, red.map((r) => ({ repo: r.repo, number: r.number })));
     await tripMergeBreakers(db, red.flatMap((r) => {
       const m = merged.get(`${r.repo}#${r.number}`);
-      return m?.lastAt ? [{ repo: r.repo, number: r.number, mergedAt: m.lastAt, reason: `main CI of ${r.repo} is red after our merge of #${r.number}`, evidence: [`${r.repo}#${r.number}`, `${r.repo}@${r.sha.slice(0, 8)}`] }] : [];
+      return m?.lastAt ? [{ repo: r.repo, number: r.number, mergedAt: m.lastAt, reason: `main CI of ${r.repo} is red after our merge of #${r.number}`, evidence: [mainCiEvidence(r.repo, r.number, r.sha)] }] : [];
     }));
   }
+  await resumeMainCiTrips(db, rows, log);
   if (!only) await saveSyncState(db, { main_ci_polled_at: new Date().toISOString() });
   // A new head, or a new toolchain image of the warm producer, queues the repo's warm build.
   const warm = await warmPass(db);
   log(`main-ci: ${heads} heads of ${repos.length} repos${warm ? `; ${warm} warm build${warm === 1 ? "" : "s"} queued` : ""}`);
   return { repos: repos.length, heads };
+}
+
+/** Marks the evidence a red main trips a merge breaker with; no other trip writes it. */
+export const MAIN_CI_EVIDENCE = "main-ci:";
+
+/** The evidence a red main trips a merge breaker with: our merged PR and the red head of main, behind MAIN_CI_EVIDENCE. */
+const mainCiEvidence = (repo: string, number: number, sha: string): string => `${MAIN_CI_EVIDENCE}${repo}#${number}@${sha.slice(0, 8)}`;
+
+const escaped = (repo: string): string => repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Whether every cause on a merge breaker is a red main: each evidence entry is a main-CI entry of the repo. A trip without
+ * the marker (a post-merge defect, also one added while main was red, or a main-CI trip from before the marker) is a person's.
+ */
+export function redMainOnly(t: Pick<TripRow, "evidence">, repo: string): boolean {
+  const form = new RegExp(`^${escaped(MAIN_CI_EVIDENCE)}${escaped(repo)}#\\d+@[0-9a-f]+$`);
+  return t.evidence.length > 0 && t.evidence.every((e) => form.test(e));
+}
+
+/**
+ * Resumes, as the pipeline, each merge breaker that a red main tripped once that main counts as green (or failing only optional
+ * checks) again: the state comes from the newest head, so from the red head the trip names rerun green or from a later head that
+ * holds it. The check is made again in the write that clears the trip, so a cause added meanwhile keeps it. A merge breaker with
+ * any other cause stays for a person.
+ */
+async function resumeMainCiTrips(db: Db, rows: MainCiRepoRow[], log: (line: string) => void): Promise<void> {
+  const passing = rows.filter((r) => r.state === "green" || r.state === "optional");
+  if (!passing.length) return;
+  const trips = await loadTrips(db, { keys: passing.map((r) => tripKey("merge", r.repo)) });
+  const due = passing.filter((r) => { const t = trips.get(tripKey("merge", r.repo)); return !!t && redMainOnly(t, r.repo); });
+  if (!due.length) return;
+  const repoOf = new Map(due.map((r) => [tripKey("merge", r.repo), r.repo]));
+  const resumed = await resumeTripsIf(db, [...repoOf.keys()], "pipeline", (t) => redMainOnly(t, repoOf.get(t.stage)!));
+  for (const t of resumed) log(`main-ci: resumed ${t.key}: main CI passes again (${t.reason})`);
 }
 
 /** Polls when the last full poll is older than POLL_EVERY_MS; the sync run calls it, so it runs with the pipeline on or off. */

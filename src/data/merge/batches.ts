@@ -8,7 +8,7 @@ import { applyLocal } from "../mirror/index.ts";
 import { addStageEvents } from "../planner/index.ts";
 import { loadItemAreas } from "../triage/index.ts";
 import { batchViews, headOf, holdsMembers, publishDelayMs, refOf, short, toBatchView } from "./read.ts";
-import { ACTIVE_BATCH, MAX_BATCH, START_BATCH } from "./types.ts";
+import { ACTIVE_BATCH, MAX_BATCH, PUBLISH_FAILED, START_BATCH } from "./types.ts";
 import type { BatchByTask, BatchDue, BatchEnd, BatchLanded, BatchListRow, BatchPageView, BatchRun, BatchState, BatchUpdate, BatchView, HeadRef, HiddenRepos, NewBatch } from "./types.ts";
 
 const sizeOf = (n: number | undefined): number => (n !== undefined && Number.isInteger(n) && n >= 1 && n <= MAX_BATCH ? n : START_BATCH);
@@ -107,6 +107,30 @@ export async function loadBatchDue(db: Db, now: Date): Promise<BatchDue[]> {
   const rows = (await queryDb(db).all(batchViews(db).where("b.state", "in", ACTIVE_BATCH).orderBy("b.id"))).map(toBatchView);
   return rows.filter((b) => b.state === "open" || now.getTime() - Date.parse(b.updated_at) >= publishDelayMs(b.retries))
     .map((b) => ({ repo: b.repo, id: b.id, memberRefs: b.members.map((m) => refOf(b.repo, m.number)) }));
+}
+
+/**
+ * Per repo, the publish failures since its last batch PR opened, from the batches updated since `since` (newest first): how many
+ * batches in a row failed to push or open their PR, and when the newest of them ended. 1 statement.
+ */
+export async function loadPublishFailures(db: Db, since: string, repos?: string[]): Promise<Map<string, { count: number; at: string }>> {
+  if (repos && repos.length === 0) return new Map();
+  const q = queryDb(db);
+  // Only the batches that count are read: the failed ones and the ones whose PR opened (merge_batches_updated bounds the range).
+  const rows = await q.all(q.k.selectFrom("merge_batches as b").select(["b.repo", "b.state", "b.summary", "b.pr_number", "b.updated_at"])
+    .where("b.updated_at", ">=", since).where((eb) => eb.or([eb("b.state", "=", "failed"), eb("b.pr_number", "is not", null)]))
+    .$if(!!repos, (s) => s.where(kx.inList(db, "b.repo", repos!))).orderBy("b.id", "desc"));
+  const out = new Map<string, { count: number; at: string }>(), done = new Set<string>();
+  for (const r of rows) {
+    if (done.has(r.repo)) continue;
+    // A batch whose PR opened ends the run of failures; a batch that failed before it had a PR for another reason does not count.
+    if (r.pr_number !== null) { done.add(r.repo); continue; }
+    if (r.state !== "failed" || !r.summary?.startsWith(PUBLISH_FAILED)) continue;
+    const o = out.get(r.repo);
+    if (o) o.count++;
+    else out.set(r.repo, { count: 1, at: r.updated_at });
+  }
+  return out;
 }
 
 /** Opens a batch in one `db.write`: branch name, batch row, member rows and the `batch-start` audit row. */

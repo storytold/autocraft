@@ -5,7 +5,9 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { classify, derive, prNumberOf, type HeadRow, type MainCheck } from "../src/mainci/classify.ts";
-import { mainCiRepos, redMainHolds, redMainRepos } from "../src/mainci/index.ts";
+import { mainCiRepos, pollMainCi, redMainHolds, redMainRepos } from "../src/mainci/index.ts";
+import { loadTrip, loadTrips, tripMergeBreakers, tripStage } from "../src/data/control/index.ts";
+import type { Querier } from "../src/mirror.ts";
 import { saveMainHeads } from "../src/data/mirror/mainci.ts";
 import { decidePr } from "../src/core/decide.ts";
 import { prFacts } from "./world.ts";
@@ -96,4 +98,51 @@ test("a red branch stays red while a head's checks run, also a rerun of the red 
   await poll("f", 70, "green", 70);
   assert.equal(await held(ms(75)), false);
   assert.equal((await row(ms(75))).culprit, null);
+});
+
+test("a merge breaker only red mains tripped resumes once main passes again; one with any other cause, or from before the main-CI marker, stays", async () => {
+  mkdirSync(SCRATCH, { recursive: true });
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "main-ci-")), "t.db"));
+  const t = (min: number) => new Date(Date.now() - 60 * 60_000 + min * 60_000).toISOString();
+  for (const name of ["app", "lib", "old", "svc", "two"]) {
+    await db.run(db.k.insertInto("tracked_repos").values({ name, added_by: "op", added_at: t(0), pipeline: 1 }));
+    await db.run(db.k.insertInto("repos").values({ name, visibility: "public", synced_at: t(0) }));
+  }
+  for (const repo of ["app", "svc"]) await db.run(db.k.insertInto("merges").values({ repo, number: 7, head_oid: "h7", at: t(1), run_id: "r", path: "rule", outcome: "merged" }));
+  // What GitHub answers for each repo's default branch (in tracked order): its head, the PR its headline names, and its gate check.
+  type Head = { sha: string; pr: number; gate: "SUCCESS" | "FAILURE" };
+  let heads: Record<string, Head> = {};
+  const client: Querier = {
+    spent: 0, remaining: null,
+    query: async (_q, vars) => Object.fromEntries(Object.entries(vars).map(([k, owner], i) => {
+      const repo = Object.keys(heads)[i]!, h = heads[repo]!;
+      return [k.replace("o", "r"), { defaultBranchRef: { name: "main", target: { oid: h.sha, committedDate: new Date().toISOString(), messageHeadline: `Merge pull request #${h.pr} from ${owner}/x`,
+        statusCheckRollup: { contexts: { nodes: [{ __typename: "CheckRun", name: "gate / test", status: "COMPLETED", conclusion: h.gate, detailsUrl: null }] } } } } }];
+    })) as never,
+  };
+  const green = (sha: string): Head => ({ sha, pr: 1, gate: "SUCCESS" });
+  const active = async () => [...(await loadTrips(db)).keys()].sort();
+
+  heads = { app: { sha: "a1", pr: 7, gate: "FAILURE" }, lib: green("b1"), old: green("d1"), svc: { sha: "c1", pr: 7, gate: "FAILURE" }, two: green("e1") };
+  await pollMainCi(db, client);
+  await tripStage(db, [{ key: "merge:lib", reason: "the post-merge review of lib#3 found 1 defect", evidence: ["lib#3"], at: t(2) }]);
+  // The post-merge review of the PR that broke svc's main finds a defect while the red main holds the breaker.
+  await tripMergeBreakers(db, [{ repo: "svc", number: 7, mergedAt: t(1), reason: "the post-merge review of svc#7 found 1 defect", evidence: ["svc#7"] }]);
+  assert.deepEqual(await active(), ["merge:app", "merge:lib", "merge:svc"]);
+  assert.match((await loadTrip(db, "merge:svc"))!.reason, /post-merge review/);
+
+  // Still red on a later head: nothing resumes.
+  heads = { app: { sha: "a2", pr: 8, gate: "FAILURE" }, lib: green("b2"), old: green("d1"), svc: { sha: "c2", pr: 8, gate: "FAILURE" }, two: green("e1") };
+  await pollMainCi(db, client);
+  assert.deepEqual(await active(), ["merge:app", "merge:lib", "merge:svc"]);
+
+  // A main-CI trip in the form from before the marker, and a trip holding two red-main causes.
+  await tripStage(db, [{ key: "merge:old", reason: "main CI of old is red after our merge of #5", evidence: ["old#5", "old@d0d0d0d0"], at: t(3) }]);
+  for (const n of [1, 2]) await tripMergeBreakers(db, [{ repo: "two", number: n, mergedAt: t(1), reason: `main CI of two is red after our merge of #${n}`, evidence: [`main-ci:two#${n}@e${n}e${n}e${n}e${n}`] }]);
+  assert.equal((await loadTrip(db, "merge:two"))!.evidence.length, 2);
+
+  heads = { app: { sha: "a3", pr: 9, gate: "SUCCESS" }, lib: green("b3"), old: green("d2"), svc: { sha: "c3", pr: 9, gate: "SUCCESS" }, two: green("e2") };
+  await pollMainCi(db, client);
+  assert.deepEqual(await active(), ["merge:lib", "merge:old", "merge:svc"]);
+  assert.equal((await loadTrip(db, "merge:app"))?.clearedBy, "pipeline");
 });

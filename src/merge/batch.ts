@@ -37,7 +37,7 @@ import { branchOf, forkOf, mainHeadOf } from "../github/fork.ts";
 import type { Querier } from "../mirror.ts";
 import { refreshChecks } from "../review/checks.ts";
 import { BatchGit } from "./batch-git.ts";
-import { ACTIVE_BATCH, BLOCKED_BY_REVIEW, CLOSED_BY_PERSON, MAX_PUBLISH_FAILURES, PUBLISH_FAILED, RUNS_WAIT_NOTE, BUILD_MAX_MS, MAX_BUILD_TRIES, admits, cancelBuild, retryDelayMs, getBatch, publishDelayMs, updateBatch, type BatchMember, type BatchView } from "./batch-store.ts";
+import { ACTIVE_BATCH, BLOCKED_BY_REVIEW, CLOSED_BY_PERSON, MAX_PUBLISH_FAILURES, PUBLISH_FAILED, RUNS_WAIT_NOTE, BUILD_MAX_MS, MAX_BUILD_TRIES, admits, cancelBuild, retryDelayMs, getBatch, publishBackoffs, publishDelayMs, updateBatch, type BatchMember, type BatchView } from "./batch-store.ts";
 import { firstRefusal, mergeVerdicts } from "./approval.ts";
 import { baseRefusal, recordLiveBase } from "./base.ts";
 import { allowFailedArgs, ciNow, prInfo, mergeRun, DEFAULT_MERGE_COMMAND, type CommandResult } from "./index.ts";
@@ -465,7 +465,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     return false;
   }
 
-  /** A push or PR creation failed: the error is kept on the batch, the next try waits longer, and the fifth failure ends the batch so its PRs go back to the queue. */
+  /** A push or PR creation failed: the error is kept on the batch, the next try waits longer, and the fifth failure ends the batch so its PRs go back to the queue; the repo's next batch waits (publishBackoffMs). */
   async function publishFailed(b: BatchView, error: string): Promise<void> {
     const failures = b.retries + 1;
     log(`  ${b.branch}: ${error}`);
@@ -748,7 +748,10 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   if (repoInScope(scope, "work") && !(await batchesNow()).mine.length && (params.limit === undefined || params.limit > 0)) {
     // PRs in a repo Verify cannot build are left to the single-PR merge (the plan's merge action is not batchable).
     const due = (await planned(db, "merge", { repo, by })).filter((p) => p.action.params?.batchable);
-    if (due.length) {
+    const backoff = due.length ? (await publishBackoffs(db, d.now(), [repo])).get(repo) : undefined;
+    if (backoff !== undefined && backoff > d.now().getTime()) {
+      log(`merge ${repo}: ${due.length} PRs may merge; the next batch starts after ${new Date(backoff).toISOString()}, as the last batches could not be published`);
+    } else if (due.length) {
       const keys = due.map((p) => ({ repo, number: p.facts.number }));
       const [scores, sizes, areas] = await db.together(() => Promise.all([loadWorkScores(db, keys), loadBatchSizes(db, [repo]), loadItemAreas(db, keys)]));
       const score = (n: number) => scores.get(refOf(n)) ?? NO_WORKFLOW_SCORE;

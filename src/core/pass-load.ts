@@ -32,6 +32,7 @@ import { authorWritesIn } from "../fixup/author-permission.ts";
 import { longLivedAll } from "../fixup/pushable.ts";
 import type { Settled } from "../classify/settled.ts";
 import { redMainHolds } from "../mainci/index.ts";
+import { publishBackoffs } from "../merge/batch-store.ts";
 import { loadBlockerReads, type BlockerReads } from "../review/blockers.ts";
 import { CARRIED, carriedReviews, type Carried } from "../review/carry.ts";
 import { loadHoldInputs } from "../review/gate.ts";
@@ -83,6 +84,8 @@ export type PrPassData = {
   act: Map<PermKey, ActFacts>;
   /** Repos whose default branch is red, with the time it stops counting as red when nothing new is read (null: only a new result ends it). */
   mainRed: Map<string, number | null>;
+  /** Per repo whose last batches could not be published, when its next batch may start (ms; it may be past). */
+  batchBackoff: Map<string, number>;
   quiet: Set<string>;
   longLived: Awaited<ReturnType<typeof longLivedAll>>;
   authorWrites: ReturnType<typeof authorWritesIn>;
@@ -182,7 +185,7 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
   const logins = [...o.base.own];
   const keyRepos = reposOf(keys);
   const dupeRepo = o.repo ?? (keyRepos?.length === 1 ? keyRepos[0] : undefined);
-  const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, dupes, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, scoped, mergeActions, mainRed, quiet, longLived, authorPerms, holds, repins, made, landedApprovals, mergeEntryReviews] =
+  const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, dupes, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, scoped, mergeActions, mainRed, quiet, longLived, authorPerms, holds, repins, made, landedApprovals, mergeEntryReviews, batchBackoff] =
     await Promise.all([
       loadControl(db), loadPrMirror(db, keys), loadRepos(db, { all: true }), loadRepoCiSignals(db), loadDiffFacts(db, keys),
       loadFormalReviews(db, keys), loadGates(db, keys), loadRanks(db, keys), o.dupes?.() ?? loadDupeState(db, dupeRepo ? { repo: dupeRepo } : {}), loadMergeFacts(db, keys), loadPatchFacts(db, keys), loadPushFacts(db, keys),
@@ -190,13 +193,14 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
       loadReviewFacts(db, keys, { now: o.now, own: logins }), loadAssignments(db, {}), loadOutsideHolds(db, keys),
       loadInScope(db, keys), loadActions(db, { kinds: ["merge"], states: ACTION_WAITS }),
       redMainHolds(db, o.now), listQuietPrs(db, { repo: o.repo }), longLivedAll(db, keyRepos), loadAuthorPermissions(db), loadHoldInputs(db, keys, o.now), loadRepinPushes(db, keys), loadMadePushes(db, keys), loadLandedApprovals(db, keys), loadMergeEntryReviews(db, keys),
+      publishBackoffs(db, new Date(o.now)),
     ]);
   const own = new Map<RefKey, RecordedPush[]>([...new Set([...made.keys(), ...patches.keys(), ...pushes.keys(), ...repins.keys()])]
     .map((key) => [key, ownPushes(made.get(key) ?? [], patches.get(key)?.pushes ?? [], pushes.get(key)?.moves ?? [], repins.get(key) ?? [])]));
   const data: PrPassData = {
     now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, duplicates: prDuplicates(dupes), merge, patches, pushes, ownPushes: own, landedApprovals, mergeEntryReviews, mainFixPrs, workflow,
     workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins: o.base.own,
-    inScope: scoped, mergeActions, mainRed, quiet, longLived, authorWrites: authorWritesIn(control.settings.get(PIPELINE_LOGIN_KEY), authorPerms, o.now), holds,
+    inScope: scoped, mergeActions, mainRed, batchBackoff, quiet, longLived, authorWrites: authorWritesIn(control.settings.get(PIPELINE_LOGIN_KEY), authorPerms, o.now), holds,
     tasks: new Map(), ownCommits: new Set(), statements: new Map(), act: new Map(),
     settled: new Map(), tiers: new Map(), postSource: async () => null, blockers: { item: new Map(), pending: new Set(), latest: new Map() }, carried: new Map(),
   };
