@@ -1,5 +1,5 @@
 // A red default branch whose failure log GitHub does not serve yet: read again after the main CI poll, classified once readable,
-// given up after an hour, and never counted toward the step's daily limit; a model reply that sorts nothing is given up after three.
+// read again hourly after the first hour while the head is the newest and red, and never counted toward the step's daily limit; a model reply that sorts nothing is given up after three.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -13,7 +13,7 @@ mkdirSync(SCRATCH, { recursive: true });
 const ms = (min: number) => Date.parse("2026-01-01T00:00:00Z") + min * 60_000;
 const at = (min: number) => new Date(ms(min)).toISOString();
 
-test("an unread failure log is read again after the main CI poll, classified once readable, and given up after an hour", async () => {
+test("an unread failure log is read again after the main CI poll, then hourly, classified once readable, and left once a newer head comes", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "mainfix-unread-")), "t.db"));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: at(0), pipeline: 1 }));
   await setMainFixApproval(db, "op", "app", true);
@@ -58,13 +58,15 @@ test("an unread failure log is read again after the main CI poll, classified onc
   assert.deepEqual(await rows("a2"), ["unread"], "still read again within the hour");
   assert.notEqual(await mainFixClock(db, ms(40)), await mainFixClock(db, ms(43)), "the lane's clock moves while the current head is unread");
   await run(72);
-  assert.deepEqual([await rows("a2"), (await due(80)).due, w.classified], [["nothing-to-do"], false, 1]);
-  assert.equal(await mainFixClock(db, ms(80)), await mainFixClock(db, ms(83)));
+  assert.deepEqual([await rows("a2"), w.classified], [["unread"], 1], "not given up after an hour");
+  assert.equal(await mainFixClock(db, ms(80)), await mainFixClock(db, ms(83)), "then read again once an hour");
+  assert.notEqual(await mainFixClock(db, ms(80)), await mainFixClock(db, ms(132)));
 
   w.readable = true;
   w.usable = false;
   handled = 0;
   await head("a3", 90);
+  assert.ok(!(await mainFixClock(db, ms(91))).includes("a2"), "a head that is no longer the newest is not read again");
   for (const min of [91, 100, 110]) {
     assert.equal((await due(min)).due, true);
     await run(min);

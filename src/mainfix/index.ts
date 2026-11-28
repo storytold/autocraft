@@ -7,8 +7,8 @@
 //          row is `issue-opening` before the create, later red heads of the streak reuse its number, and a create whose outcome was
 //          lost is looked up in the audit and on GitHub before another one is made.
 //   code   a compile, test, lint or format failure: recorded as needs-fix for the fix PR step (`onCodeVerdict`).
-// A failure log GitHub does not serve yet is recorded as an `unread` row at the head and read again once per main CI poll interval,
-// for at most an hour (a fix PR's re-read of the log keeps reading it hourly after that). A classification call that ended without a
+// A failure log GitHub does not serve yet is recorded as an `unread` row at the head and read again once per main CI poll interval
+// for an hour, then hourly, for as long as the head is the repo's newest and red (also a fix PR's re-read of the log). A classification call that ended without a
 // reply (lost, given back, ended with its job) and a model reply that sorts none of the checks leave the head `unclassified` and are
 // asked again after CLASSIFY_RETRY_MS; only the replies count, and the third unusable one gives the head up. A rerun GitHub refused
 // stays `rerun-requested` with the reason and is asked again on RERUN_RETRY_MS. Only a usable classification counts toward the
@@ -61,8 +61,8 @@ const RERUN_WAIT_MS = 10 * 60_000;
 const EXCERPT_CHARS = 1500;
 /** The check of a head's row that is about the head as a whole: nothing to read there, or a log not readable yet. */
 const HEAD_ROW = "(none)";
-/** A head whose failure log stays unreadable this long after the first read is given up: the row records why. */
-const UNREAD_GIVE_UP_MS = 60 * 60_000;
+/** A failure log not readable yet is read again once per main CI poll for this long after the first read, then hourly. */
+const UNREAD_POLLED_MS = 60 * 60_000;
 /** Model replies at a head that sort none of its failed checks before the head is given up. */
 const UNUSABLE_GIVE_UP = 3;
 /** An unclassified head (a call that ended without a reply, or a reply that sorted nothing) is asked again this long after. */
@@ -220,7 +220,7 @@ export async function mainFixDueRepos(db: Db, repos: readonly string[], o: { now
 function nextTry(r: MainFixTry, now: number): { due: boolean; slot: string; next: number } | null {
   if (r.state === "unread") {
     const from = Date.parse(r.createdAt), age = now - from;
-    const every = age < UNREAD_GIVE_UP_MS ? POLL_EVERY_MS : HOUR_MS;
+    const every = age < UNREAD_POLLED_MS ? POLL_EVERY_MS : HOUR_MS;
     const k = Math.floor(age / every);
     return { due: k >= 1, slot: `${every}:${k}`, next: from + Math.max(k + 1, 1) * every };
   }
@@ -296,18 +296,12 @@ async function classifyHead(db: Db, repo: string, cur: Current, deps: MainFixDep
   const headRow = (await rowsAt(db, repo, cur.headSha)).find((r) => r.check === HEAD_ROW);
   const unread = headRow?.state === "unread" ? headRow : undefined;
   if (reading.kind === "unread") {
+    // Read again while the head is the repo's newest and red (nextTry); only the first unread reading is written, so a retry that
+    // reads nothing moves no planner input.
     const why = oneLine(scrub(reading.why));
-    const first = unread?.createdAt ?? at;
-    if (Date.parse(at) - Date.parse(first) >= UNREAD_GIVE_UP_MS) {
-      await save(db, { ...base, createdAt: first, check: HEAD_ROW, verdict: "code", state: "nothing-to-do", reason: oneLine(`the failure log could not be read for an hour: ${why}`), updatedAt: at }, at);
-      log(`  ${repo}: given up: the failure log could not be read for an hour: ${why}`);
-    } else {
-      // Only the first unread reading is written: a retry that reads nothing moves no planner input.
-      if (!unread) await save(db, { ...base, check: HEAD_ROW, verdict: "code", state: "unread", reason: why, updatedAt: at }, at);
-      log(`  ${repo}: ${why}; read again after the next main CI poll`);
-      return `${short} not classified: its failure log could not be read yet`;
-    }
-    return null;
+    if (!unread) await save(db, { ...base, check: HEAD_ROW, verdict: "code", state: "unread", reason: why, updatedAt: at }, at);
+    log(`  ${repo}: ${why}; read again later`);
+    return `${short} not classified: its failure log could not be read yet`;
   }
   const failure = reading.failure;
   const verdicts = await deps.classify(db, inputOf(repo, failure));
