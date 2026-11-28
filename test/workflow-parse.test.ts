@@ -188,8 +188,10 @@ describe("workflow commands", () => {
       assert.ok(p.kind === "ambiguous" && p.understood.includes("photocraft#12") && !p.understood.includes("fix"), `${text}: ${JSON.stringify(p)}`);
     }
     // A colon inside a fix's words is theirs.
-    const inside = parse("fix the merge: conflict markers left in Cargo.toml");
-    assert.ok(inside.kind === "commands" && inside.parts.length === 1 && "text" in inside.parts[0]! && inside.parts[0].text === "the merge: conflict markers left in Cargo.toml");
+    const inside = parse("fix the importer: conflict markers left in Cargo.toml");
+    assert.ok(inside.kind === "commands" && inside.parts.length === 1 && "text" in inside.parts[0]! && inside.parts[0].text === "the importer: conflict markers left in Cargo.toml");
+    const cond = parse("merge: once dylan approves");
+    assert.ok(cond.kind === "ambiguous" && cond.rest === "once dylan approves", "a leading once is a condition, whatever follows");
     const said = parse("implement: store it per document");
     assert.ok(said.kind === "commands" && said.parts.some((x) => x.word === "implement") && said.parts.some((x) => "text" in x && x.text === "store it per document"));
   });
@@ -204,9 +206,41 @@ describe("workflow commands", () => {
       const p = parse(text);
       assert.ok(p.kind === "ambiguous" && /merge/.test(p.rest), `${text}: ${JSON.stringify(p)}`);
     }
-    // Inside a sentence it is part of the instructions.
-    const code = parse("fix: make sure we don't merge duplicate rows");
+    // Inside a sentence it is part of the instructions, where a merge conflict is code.
+    const code = parse("fix the merge conflict markers so the build does not break");
     assert.ok(code.kind === "commands" && !code.parts.some((x) => x.word === "no-merge"));
+  });
+
+  test("instructions that talk about the merge or doubt the work leave the end open: nothing runs, and the reply offers both ends", () => {
+    for (const text of [
+      "fix the typo. Do not merge this one", "fix the typo; don't ship it yet", "fix the typo but don't land it", "fix the typo, I'll merge it myself",
+      "fix the typo and leave it for me to merge", "fix the typo, keep it open", "fix the typo, but let me look before it goes in",
+      "fix the typo but I'm not convinced we want this", "fix the typo, no rush", "fix: make sure we don't merge duplicate rows",
+    ]) {
+      const p = parse(text);
+      assert.ok(p.kind === "ambiguous" && p.ends, `${text}: ${JSON.stringify(p)}`);
+      const r = resolve(p, pr());
+      assert.equal(r.kind, "ambiguous", text);
+      const line = replyLine(r as Exclude<typeof r, { kind: "run" }>);
+      assert.ok(line.includes(", then merge`") && line.includes(", but don't merge`"), line);
+    }
+    // The offer reads back as the fix with each end.
+    const p = parse("fix the typo, I'll merge it myself");
+    assert.ok(p.kind === "ambiguous" && p.ends === "fix the typo");
+    for (const [reply, merges] of [["fix the typo, then merge", true], ["fix the typo, but don't merge", false]] as const) {
+      const r = run(reply, pr());
+      assert.ok(r.kind === "run" && r.run.instruction?.text === "the typo" && r.run.merges === merges, `${reply}: ${JSON.stringify(r)}`);
+    }
+    // A negation that says what the code should do leaves the default end.
+    const keep = run("fix the export so it does not drop normals", pr());
+    assert.ok(keep.kind === "run" && keep.run.merges);
+  });
+
+  test("first fix before a start, and then merge after instructions on an issue, read as written", () => {
+    const first = run("review and merge, but first fix the typo in the README", pr());
+    assert.ok(first.kind === "run" && first.run.start === "review" && first.run.approve && first.run.instruction?.text === "the typo in the README", JSON.stringify(first));
+    const issue = run("fix the export so normals are kept, then merge", { kind: "issue", workflow: null });
+    assert.ok(issue.kind === "run" && issue.run.start === "implement" && issue.run.approve && issue.run.instruction?.text === "the export so normals are kept", JSON.stringify(issue));
   });
 
   test("instructions on an issue start its implementation only with implement or fix; don't merge never takes back an approved merge", () => {

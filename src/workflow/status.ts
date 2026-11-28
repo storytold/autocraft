@@ -391,6 +391,12 @@ function partHint(rest: string): string | null {
 function ambiguityText(understood: string, a: Ambiguity, mention?: string, proposed?: string): string {
   switch (a.why) {
     case "unreadable":
+      if (a.ends && !proposed) {
+        const say = (command: string) => (mention ? `@${mention} ${command}` : command);
+        return t("I understood “{understood}” but not whether the work should end in a merge (“{rest}”). Nothing runs. Reply `{merge}` to merge it when CI is green, or `{back}` to have it come back to you.", {
+          understood, rest: a.rest, merge: say(`${a.ends}, then merge`), back: say(`${a.ends}, but don't merge`),
+        });
+      }
       if (proposed) {
         const unread = understood && a.rest ? t("I understood “{understood}” but not “{rest}”.", { understood, rest: a.rest }) : a.rest ? t("I couldn't read “{rest}” as a command.", { rest: a.rest }) : null;
         return [unread, proposalLine(proposed, mention)].filter((x) => x !== null).join(" ");

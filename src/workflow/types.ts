@@ -232,7 +232,10 @@ export type CommandPart =
   /** `args`: the person's own words for the author, as written. */
   | { word: "ask-author"; args?: string }
   | { word: "close"; reason?: CloseReason }
-  | { word: "drop" | "fix"; part: number | string; /** A fix's words as written, which the fix-up carries out when they name no part of the plan. */ text?: string }
+  | {
+    word: "drop" | "fix"; part: number | string; /** A fix's words as written, which the fix-up carries out when they name no part of the plan. */ text?: string;
+    /** The words followed an entry word's colon (`merge: X`): that word says how the work starts, not where it ends. */ colon?: true;
+  }
   | { word: "weight"; weight: number }
   /** "don't merge", "review only", "hold after": beside instructions, the work comes back to the person instead of merging. */
   | { word: "no-merge" };
@@ -244,7 +247,14 @@ export type CommandPart =
 export type Parsed =
   | { kind: "yes"; items?: ItemRef[]; weight?: number }
   | { kind: "commands"; items: ItemRef[]; parts: CommandPart[]; /** A yes-word stood beside the commands ("yes, merge"). */ yes?: true }
-  | { kind: "ambiguous"; understood: string; rest: string };
+  | {
+    kind: "ambiguous"; understood: string; rest: string;
+    /**
+     * Instructions that leave open whether the work ends in a merge: the fix to offer with each end, or the usage. A model reading
+     * (read.ts) may settle the end instead.
+     */
+    ends?: string;
+  };
 
 /** A registered control: a state change a panel needs that is not one of the command words. */
 export type Control = "resume-breaker" | "release-outside" | "set-automatic" | "runner-settings";

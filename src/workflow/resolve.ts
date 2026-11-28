@@ -70,7 +70,7 @@ export type Run = {
 };
 
 export type Ambiguity =
-  | { why: "unreadable"; rest: string }
+  | { why: "unreadable"; rest: string; /** Only the end of these instructions is unclear (Parsed `ends`). */ ends?: string }
   | { why: "nothing-to-answer" }
   | { why: "no-plan" }
   | { why: "no-such-part"; part: number }
@@ -147,7 +147,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
       const option = optionNamed(wf, parsed.rest);
       if (option) return pick(wf, option, {});
     }
-    return { kind: "ambiguous", understood: parsed.understood, ambiguity: { why: "unreadable", rest: parsed.rest } };
+    return { kind: "ambiguous", understood: parsed.understood, ambiguity: { why: "unreadable", rest: parsed.rest, ...(parsed.ends ? { ends: parsed.ends } : {}) } };
   }
   if (parsed.kind === "yes") {
     const understood = "yes";
@@ -211,15 +211,17 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     if (state.held && parsed.yes && (entry || merge)) return ambiguous({ why: "conflict", words: ["yes", ...parts.map((p) => p.word)] });
     // Words after fix on an item nobody started name no part: they are the work, and approve it unless the text says not to merge.
     const said = named.length === 1 && named[0]!.word === "fix" && typeof named[0]!.part === "string" && "text" in named[0]! && named[0].text && !chain ? named[0].text : null;
+    // `merge: <words>` makes merge how the work starts, which an issue has not; "fix it, then merge" only names the end.
+    const mergeLed = merge && said !== null && "colon" in named[0]! && !!named[0].colon;
     if (said !== null) {
       const instruction = { text: said }, approve = !noMerge, how = approve ? "approved" as const : "started" as const;
-      // On an issue only implement or fix starts the implementation with them; merge alone stays no start of an issue.
-      if (state.kind === "issue" && (entry === "implement" || (entry === null && !merge))) return run({ start: "implement", instruction, approve, merges: approve, weight, how });
+      // On an issue implement or fix starts the implementation with them; `merge:` stays no start of an issue.
+      if (state.kind === "issue" && (entry === "implement" || (entry === null && !mergeLed))) return run({ start: "implement", instruction, approve, merges: approve, weight, how });
       if (state.kind === "pr" && (entry === "review" || entry === "fix-up")) return run({ start: ENTRY_OF[entry], instruction, approve, merges: approve, weight, how });
       // Their fix, then the merge queue's steps; without the merge, the fix-up start: the fix, its review, a recommendation.
       if (state.kind === "pr" && entry === null) return run({ start: approve ? "merge" : "fixup", instruction, approve, merges: approve, weight, how });
     }
-    if (said !== null && state.kind === "issue" && entry === null && merge) return refused({ why: "issue-merge-queue" });
+    if (mergeLed && state.kind === "issue" && entry === null) return refused({ why: "issue-merge-queue" });
     if (named.length) return ambiguous({ why: "no-plan" });
     if (entry) return run({ start: ENTRY_OF[entry], approve: merge, merges: merge, weight, thenImplement: chain, how: merge ? "approved" : "started" });
     if (merge) {
