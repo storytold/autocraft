@@ -73,6 +73,9 @@ function checked(diff: string, problems: string[], allowed: string[] | null, can
   return v.ok ? { ok: true, patch: v.patch, files: v.files, changed: v.changed } : { ok: false, problems: [v.reason] };
 }
 
+/** The patch rules of a CI fix made in a fix session: git's own diff, no line cap. A stored one is validated again with them. */
+export const CIFIX_SESSION_RULES: PatchRules = { lineCap: null, exact: true };
+
 const quietWord = (diff: string, quiet: boolean | undefined): string | null => (quiet && patchGiveaway(diff) ? QUIET_PATCH_REFUSAL : null);
 
 /** Runs the step's gate on the diff read from the workspace, and the session's report (a security fix's title and summary). */
@@ -107,7 +110,7 @@ export async function runGate(g: StepGate, diff: string, report: SecurityReport 
       }
       const q = quietWord(diff, g.quiet);
       if (q) problems.push(q);
-      const r = checked(diff, problems, g.allowed, (p) => editable(p, g.scripts), { lineCap: null, exact: true });
+      const r = checked(diff, problems, g.allowed, (p) => editable(p, g.scripts), CIFIX_SESSION_RULES);
       if (!r.ok) return r;
       const bad = await g.guard(r.patch);
       return bad ? { ok: false, problems: [bad] } : r;

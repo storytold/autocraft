@@ -72,6 +72,7 @@ import { STEP_STAGE, tripOf } from "../core/push-outcome.ts";
 import { planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
 import { leaseTurnover } from "../remote/calls.ts";
+import { loadFixWorkspaceWaits } from "../data/fixsession/index.ts";
 import type { Db } from "../db/index.ts";
 import { createHash } from "node:crypto";
 
@@ -843,6 +844,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "cifix",
     perRepo: true,
     topics: TASK_TOPICS,
+    // A CI fix that waited for its fix session's workspace runs again when that workspace moves (workspaces is no input topic).
+    extra: async (db) => await loadFixWorkspaceWaits(db, "pr"),
     detect: async (db, ctx) => {
       // A stored patch whose lint task ended is collected by the same step.
       const plans = await plansOf(db, ctx);

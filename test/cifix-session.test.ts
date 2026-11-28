@@ -1,8 +1,8 @@
 // A CI fix in a fix session, through runCifix with the switch on: the session's turn starts from a reseeded tree (an edit another
 // step left in the pod is gone), lint findings on its stored change go back to the session that wrote it, a follow-up that comes
 // back unclaimed goes to a fresh session that gets the stored change and the findings, nothing is pushed while lint has findings,
-// and the push once lint is clean changes only the CI fix's file. The pod runs the real workspace helper on a scratch /work; the
-// model, AutoCraft's in-pod checks, GitHub and the Opus check are fakes.
+// and the push once lint is clean changes only the CI fix's file, with no line cap. The pod runs the real workspace helper on a
+// scratch /work; the model, AutoCraft's in-pod checks, GitHub and the Opus check are fakes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -42,7 +42,8 @@ const helper = new URL("../deploy/container/ws", import.meta.url).pathname;
 const T0 = "2026-01-01T00:00:00Z";
 const LIB = "src/lib.rs", OTHER = "src/other.rs";
 const ORIGINAL: Record<string, string> = { "Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\n', [LIB]: "fn a() {}\nfn main() { b(); }\n", [OTHER]: "pub fn o() {}\n" };
-const FIXED = "fn b() {}\nfn main() { b(); }\n";
+// Over the patch path's 300-line cap, which a fix session's change does not have.
+const FIXED = `fn b() {}\nfn main() { b(); }\n${Array.from({ length: 320 }, (_, i) => `pub fn f${i}() {}`).join("\n")}\n`;
 const LOG = "test\tcargo test\t2026-01-01T00:00:00Z error[E0425]: cannot find value `b` in this scope\ntest\tcargo test\t2026-01-01T00:00:01Z  --> src/lib.rs:2:20\n";
 const APPROVE = JSON.stringify({ verdict: "approve", reasons: "fixes the compile error only", problems: [] });
 const FINDING = "error[E0425]: cannot find value `zz` in this scope";
@@ -218,5 +219,6 @@ test("lint findings on a session's CI fix go back to that session, an unclaimed 
   assert.deepEqual((await stored()).map((r) => r.state), ["pushed"], out.join("\n"));
   assert.equal(log.filter((l) => l === "push").length, 1);
   assert.deepEqual(git(fork, "diff", "--name-only", head, "refs/heads/fix").split("\n"), [LIB]);
+  assert.ok(Number(git(fork, "diff", "--numstat", head, "refs/heads/fix").split("\t")[0]) > 300, "a session's change over 300 lines is pushed after a clean lint");
   assert.equal((await getWorkspace(db, ws))?.state, "parked");
 });

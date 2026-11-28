@@ -36,6 +36,17 @@ export async function loadLiveFixSession(db: Db, kind: FixSessionKind, repo: str
   return r ? sessionOf(r) : null;
 }
 
+/**
+ * The workspaces of live fix sessions of `kind` that are not ready, as `id:state` sorted by id: a step that waited for one runs
+ * again when it moves (the planner's reading of the lane). 1 statement.
+ */
+export async function loadFixWorkspaceWaits(db: Db, kind: FixSessionKind): Promise<string> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.fix_sessions as fs").innerJoin("main.workspaces as w", "w.id", "fs.workspace_id")
+    .select(["w.id", "w.state"]).where("fs.kind", "=", kind).where("fs.state", "=", "live").where("w.state", "<>", "ready").orderBy("w.id"));
+  return rows.map((r: Raw) => `${Number(r.id)}:${r.state}`).join(",");
+}
+
 /** Sessions by id. 1 statement. */
 export async function loadFixSessions(db: Db, ids: readonly number[]): Promise<Map<number, FixSession>> {
   const out = new Map<number, FixSession>();
