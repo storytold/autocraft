@@ -2571,6 +2571,15 @@ export interface ItemPeek {
   /** PRs: the issues it closes when it merges. */
   closes: number[];
 }
+/** An author's items in the repos the reader may see (GET /api/authors/<login>). Rejected: pull requests closed without a merge. */
+export interface AuthorStats {
+  /** The login as GitHub spells it. */
+  login: string;
+  /** On the team, as Items rows mark it. */
+  team: boolean;
+  prs: { opened: number; merged: number; rejected: number; open: number };
+  issues: { opened: number; open: number; closed: number };
+}
 /** A PR's merge checks as the merge queue shows them. */
 export type ItemChecks = Pick<QueueRow, "verdict" | "ci" | "mergeable" | "verify" | "size" | "prBuild">;
 

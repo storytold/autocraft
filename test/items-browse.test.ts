@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { connectDb } from "./helpers/raw-db.ts";
 import { forReader, parseItemQuery, PRESETS } from "../src/core/item-query.ts";
 import { countPresets, loadBrowsePage, loadFacets } from "../src/data/views/items-browse.ts";
+import { loadAuthorCounts } from "../src/data/views/author-counts.ts";
 
 const NOW = Date.parse("2026-11-20T12:00:00.000Z");
 const at = (h: number) => new Date(NOW - h * 3600_000).toISOString();
@@ -126,5 +127,31 @@ test("items: lists exactly the named items of tracked repos; another owner's rep
     assert.deepEqual(await numbers("is:outside items:app/1", { ...scope, insiders: ["ann"] }), []);
   } finally {
     await db.close();
+  }
+});
+
+test("an author's counts match their page's tab queries, ignore the login's case and leave hidden repos out", async () => {
+  const db = await connectDb(":memory:");
+  try {
+    const item = (repo: string, number: number, kind: string, state: string, author = "Ann") => ({
+      repo, number, kind, state, title: `t${number}`, author, author_association: "NONE", labels: "[]", comments_count: 0, created_at: at(number), updated_at: at(number),
+    });
+    await db.run(db.k.insertInto("main.items").values([
+      item("app", 1, "pr", "MERGED"), item("app", 2, "pr", "CLOSED"), item("app", 3, "pr", "OPEN"), item("app", 4, "pr", "MERGED"),
+      item("app", 5, "issue", "OPEN"), item("app", 6, "issue", "CLOSED"), item("app", 7, "pr", "OPEN", "eve"),
+      item("other", 1, "pr", "CLOSED"), item("other", 2, "issue", "OPEN"),
+    ]));
+    const scope = { repos: ["app"], hidden: Object.assign(["other"], { visible: ["app"] }), staff: false, login: "eve" };
+    const c = await loadAuthorCounts(db, scope, "ann");
+    const total = async (q: string) => (await loadBrowsePage(db, scope, parseItemQuery(`author:ann ${q}`), { offset: 0, limit: 50, normalWeight: 5 })).total;
+    assert.equal(c.login, "Ann");
+    assert.equal(c.prs + c.issues, await total(""));
+    assert.equal(c.merged, await total("is:merged"));
+    assert.equal(c.rejected, await total("is:pr is:closed"));
+    assert.equal(c.openPrs + c.openIssues, await total("is:open"));
+    assert.ok(c.rejected > 0 && c.rejected < c.prs - c.merged);
+    assert.equal((await loadAuthorCounts(db, scope, "nobody")).login, null);
+  } finally {
+    await db.close?.();
   }
 });

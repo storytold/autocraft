@@ -2,6 +2,7 @@ import { ArrowCounterClockwiseIcon, CircleNotchIcon, DiscordLogoIcon, GithubLogo
 import { t } from "../../../../../src/i18n/index.ts";
 import type { ChatEntry, ChatVia } from "../../../api/types";
 import { Avatar } from "../../atoms/Avatar";
+import { AuthorName } from "../AuthorName";
 import { MessageTime } from "../../atoms/MessageTime";
 import { messageTime } from "../../../lib/format";
 import { safeHref } from "../../safeHref";
@@ -39,7 +40,7 @@ export function ChatBubble({ e, answer, onWithdraw }: { e: Said; answer?: string
     <li aria-label={t("{login}, {time}, {surface}: {text}", { login: e.login, time: messageTime(e.at), surface: where, text: clipName(e.body || VEILED()) })} className="flex flex-col items-end gap-1.5 pl-10 md:pl-28">
       <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-0.5 text-xs text-ink/70">
         <Avatar login={e.login} size={18} />
-        <span className="font-semibold text-ink">@{e.login}</span>
+        <AuthorName login={e.login} className="font-semibold text-ink">@{e.login}</AuthorName>
         <MessageTime iso={e.at} />
         {e.url ? (
           <a href={safeHref(e.url)} target="_blank" rel="noopener noreferrer" className="rounded hover:text-ink hover:underline">

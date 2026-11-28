@@ -3,6 +3,7 @@ import { useState } from "react";
 import { CheckCircleIcon, CircleNotchIcon, GitCommitIcon, GitMergeIcon, TagIcon, XCircleIcon, ChatCircleIcon, UploadSimpleIcon, EyeIcon, CircleIcon } from "@phosphor-icons/react";
 import type { CiState, GithubEvent, GithubTab, ItemPageData } from "../../api/types";
 import { Avatar } from "../atoms/Avatar";
+import { AuthorName } from "../molecules/AuthorName";
 import { MessageTime } from "../atoms/MessageTime";
 import { PrBuildLine } from "../molecules/PrBuildLine";
 import { Markdown } from "../molecules/Markdown";
@@ -39,7 +40,7 @@ export function GithubSide({ d }: { d: ItemPageData }) {
             {g.commits.map((c) => (
               <li key={c.sha} className={cn("flex items-center gap-2.5 border-t border-line px-3 py-2 text-sm first:border-t-0", c.byAutoCraft && "border-l-2 border-l-accent")}>
                 <GitCommitIcon className="shrink-0 text-ink/70" />
-                <span className="min-w-0 flex-1 break-words">{c.message}<span className="block text-xs text-ink/70">{c.byAutoCraft ? "AutoCraft" : c.author} · <MessageTime iso={c.at} /></span></span>
+                <span className="min-w-0 flex-1 break-words">{c.message}<span className="block text-xs text-ink/70">{c.byAutoCraft ? "AutoCraft" : <AuthorName login={c.author} />} · <MessageTime iso={c.at} /></span></span>
                 <span className="code text-ink/70">{c.sha}</span>
               </li>
             ))}
@@ -97,7 +98,7 @@ function Conversation({ d }: { d: ItemPageData }) {
             </li>
           );
         if (e.type === "push" || e.type === "label" || e.type === "merged" || e.type === "closed")
-          return <li key={e.id} className="flex items-center gap-2 px-1 text-xs text-ink/60"><Ico className="shrink-0" /> <span><span className="font-medium text-ink/80">{e.actor}</span> {e.body} <MessageTime iso={e.at} className="text-ink/70" /></span></li>;
+          return <li key={e.id} className="flex items-center gap-2 px-1 text-xs text-ink/60"><Ico className="shrink-0" /> <span><AuthorName login={e.actor} className="font-medium text-ink/80" /> {e.body} <MessageTime iso={e.at} className="text-ink/70" /></span></li>;
         return <li key={e.id}><Box actor={e.actor} at={e.at}><Markdown source={e.body ?? ""} /></Box></li>;
       })}
     </ol>
@@ -109,7 +110,7 @@ function Box({ actor, at, verb, children }: { actor: string; at: string; verb?: 
     <div className="rounded-md border border-line bg-panel">
       <div className="flex items-center gap-2 border-b border-line bg-ink/[0.03] px-3 py-2 text-xs">
         <Avatar login={actor} size={18} />
-        <span className="font-medium text-ink">{actor}</span>
+        <AuthorName login={actor} className="font-medium text-ink" />
         <span className="text-ink/70">{verb}</span>
         <MessageTime iso={at} className="num text-ink/70" />
       </div>

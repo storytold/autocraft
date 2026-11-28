@@ -24,6 +24,13 @@ const readableQuery = (q: string): string => encodeURIComponent(q).replace(/%3A/
 export const itemsPath = (q: string, open?: { repo: string; number: number }): string =>
   `/items?q=${readableQuery(q)}${open ? `&open=${encodeURIComponent(shortRepo(open.repo))}/${open.number}` : ""}`;
 
+/** A GitHub account's profile; an app's `name[bot]` login is the app's page. */
+export const githubProfileUrl = (login: string): string =>
+  login.endsWith("[bot]") ? `https://github.com/apps/${encodeURIComponent(login.slice(0, -"[bot]".length))}` : `https://github.com/${encodeURIComponent(login)}`;
+
+/** An author's page, `/authors/<login>`. */
+export const authorPath = (login: string): string => `/authors/${encodeURIComponent(login)}`;
+
 /** The Items list of exactly these items; a single one also opens beside the list. */
 export const itemsListPath = (items: readonly { repo: string; number: number }[]): string =>
   itemsPath(`items:${items.map((i) => `${shortRepo(i.repo)}/${i.number}`).join(",")}`, items.length === 1 ? items[0] : undefined);

@@ -33,6 +33,7 @@ import type {
   MaintainReply,
   ItemPageData,
   ItemPeek,
+  AuthorStats,
   LiveBoard,
   SecurityList,
   FindingPageData,
@@ -207,6 +208,8 @@ export interface Api {
   };
   /** The item in brief, for the hover card on its number. */
   itemPeek(repo: RepoName, number: number): Promise<ItemPeek>;
+  /** An author's item counts in the repos the reader may see, for their page and the hover card on their name. */
+  authorStats(login: string): Promise<AuthorStats>;
   /** Staff: all findings grouped by what they need. */
   securityList(): Promise<SecurityList>;
   /** Staff: a finding with its status, fix rounds and history. */

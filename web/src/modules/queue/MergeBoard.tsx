@@ -19,6 +19,7 @@ import { CHECK_COLUMNS, checkCells, Size, SIZE_COLUMN } from "./checks";
 import { PENDING_STEP } from "./pendingStep";
 import { RowMenu } from "./RowMenu";
 import { usePage } from "./usePage";
+import { AuthorName } from "../../ui/molecules/AuthorName";
 
 type StepId = "verify" | "ci" | "premerge" | "ready" | "batch";
 
@@ -95,8 +96,8 @@ function PrRow({ r, next }: { r: Row; next: Next }) {
         ...checkCells(r),
         size: <Size size={r.size} />,
         author: (
-          <span className="block truncate text-xs text-ink/70" title={`${r.author || "unknown"}, ${TIER[r.tier]}`}>
-            {r.author || "unknown"}
+          <span className="block truncate text-xs text-ink/70" title={TIER[r.tier]}>
+            {r.author ? <AuthorName login={r.author} /> : "unknown"}
             {r.tier === "whitelisted" && <span className="ml-1 text-2xs text-ok">●</span>}
           </span>
         ),
@@ -138,7 +139,7 @@ function PendingRow({ r }: { r: QueuePendingRow }) {
         ),
         ...checkCells(null),
         size: r.size ? <Size size={r.size} /> : null,
-        author: <span className="block truncate text-xs text-ink/70">{r.author || "unknown"}</span>,
+        author: <span className="block truncate text-xs text-ink/70">{r.author ? <AuthorName login={r.author} /> : "unknown"}</span>,
         added: <Added r={r} />,
         actions: <RowMenu repo={r.repo} number={r.number} inBatch={false} backlog />,
       }}

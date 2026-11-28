@@ -38,6 +38,7 @@ import * as mcp from "./mcp.ts";
 import * as userSettings from "./user-settings.ts";
 import * as maintain from "./maintain.ts";
 import * as itemsBrowse from "./items-browse.ts";
+import * as authors from "./authors.ts";
 import * as maintainItem from "./maintain-item.ts";
 import * as runners from "./runners.ts";
 import * as modelQueue from "./model-queue.ts";
@@ -390,6 +391,8 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     // The Items browser: one page of the items matching a search with qualifiers, presets and quick-filter values.
     scoped(get("/api/maintain/browse", itemsBrowse.browse)),
     get("/api/maintain/items/:repo/:n", maintainItem.item),
+    // An author's item counts, for their page and the hover card on their name.
+    get("/api/authors/:login", authors.stats),
     get("/api/maintain/repos", maintain.repos),
     get("/api/me/settings", userSettings.settings),
     { method: "PUT", pattern: "/api/me/settings", handler: ok(userSettings.setSettings) },

@@ -6,6 +6,7 @@ import { TimeAgo } from "../../ui/atoms/TimeAgo";
 import { WorkableRow, WorkableTable, type WorkableColumn } from "../../ui/organisms/Workable";
 import { num } from "../../lib/format";
 import { ErrorLine } from "../admin/parts";
+import { AuthorName } from "../../ui/molecules/AuthorName";
 
 const LIMIT = 50;
 
@@ -46,7 +47,7 @@ export function RecentlyMerged({ repo }: { repo: string | null }) {
                       <Badge tone="merged">{how[0]}</Badge>
                     </span>
                   ),
-                  author: <span className="block truncate text-xs text-ink/70">{r.author || "unknown"}</span>,
+                  author: <span className="block truncate text-xs text-ink/70">{r.author ? <AuthorName login={r.author} /> : "unknown"}</span>,
                   merged: r.merged && <TimeAgo iso={r.merged.at} className="num text-xs text-ink/50" />,
                 }}
               />
