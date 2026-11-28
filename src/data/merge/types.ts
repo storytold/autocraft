@@ -35,9 +35,9 @@ export type BatchRow = {
   merge_sha?: string | null;
   ci_reruns?: number;
   ci_rerun_at?: string | null;
-  /** When the batch PR opened: its upstream CI started then. */
+  /** When the first batch PR of its lineage opened: upstream CI started then. A rebuild carries its parent's. */
   opened_at?: string | null;
-  /** 1: built by a top-up, which a batch gets at most once. */
+  /** 1: built by a top-up or a rebuild of one; a lineage is topped up at most once. */
   topped_up?: number;
 };
 export type BatchView = BatchRow & { members: BatchMember[] };
@@ -46,8 +46,10 @@ export type BatchPatch = Partial<Pick<BatchRow, "state" | "commit_sha" | "task_i
 export type NewBatch = {
   repo: string; baseSha: string; commitSha: string; parentId: number | null; taskId: number | null; members: BatchMember[]; at: string;
   build: "pending" | "skipped" | null; runId: string; prs: number[];
-  /** The batch is a top-up of another. */
+  /** The batch is a top-up, or a rebuild of one. */
   toppedUp?: boolean;
+  /** When the first batch PR of its lineage opened (a rebuild carries its parent's). */
+  openedAt?: string;
 };
 export type StageRow = { repo: string; number: number; stage: string; at: string; actor: string | null; note: string | null };
 /** An audit row a caller hands a writer: `target` is `repo#number`, `repo:branch` or null. */

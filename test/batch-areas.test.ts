@@ -35,7 +35,7 @@ test("a batch with room for some takes the top PR's area first; one with room fo
   assert.deepEqual(await members([null, "render", "text", "render"], 2), [1, 2]);
 });
 
-test("a rebuild after the default branch moved takes a newly eligible PR; a batch in its first CI minutes is topped up once", async () => {
+test("a rebuild after the default branch moved takes a newly eligible PR; a batch in its first CI minutes is topped up once per lineage", async () => {
   const w = (current = await (await world()).repo());
   const ready = async (n: number) => { await (await (await (await w.pr(n)).review(n)).verified(n)).premerge(n, "clean"); };
   const base = w.gh.batchDeps();
@@ -72,4 +72,11 @@ test("a rebuild after the default branch moved takes a newly eligible PR; a batc
   await run();
   assert.deepEqual(await active(), [[1, 2, 3]], "a topped-up batch is not topped up again");
   assert.equal((await w.db.all(w.db.k.selectFrom("merge_batches").select("id"))).length, count);
+  // Its rebuild on a newer head takes #4 and stays marked: the lineage got its one top-up.
+  main = "e".repeat(40);
+  await run();
+  assert.deepEqual(await active(), [[1, 2, 3, 4]]);
+  await ready(5);
+  await run();
+  assert.deepEqual(await active(), [[1, 2, 3, 4]], "a rebuild of a topped-up batch is not topped up");
 });

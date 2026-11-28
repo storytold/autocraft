@@ -143,7 +143,7 @@ export async function openBatch(db: Db, b: NewBatch): Promise<{ id: number; bran
     const branch = `${prefix}${Number(n) + 1}`;
     const row = (await q.get(q.k.insertInto("merge_batches").values({
       repo: b.repo, branch, state: "checking", base_sha: b.baseSha, commit_sha: b.commitSha, parent_id: b.parentId, task_id: b.taskId, created_at: b.at, updated_at: b.at,
-      build_state: b.build, build_tries: b.build === "pending" ? 1 : 0, topped_up: b.toppedUp ? 1 : 0,
+      build_state: b.build, build_tries: b.build === "pending" ? 1 : 0, topped_up: b.toppedUp ? 1 : 0, opened_at: b.openedAt ?? null,
     }).returning("id")))!;
     const id = Number(row.id);
     for (const values of kx.batches(b.members.map((m, i) => ({ batch_id: id, repo: b.repo, number: m.number, head_oid: m.head_oid, position: i }))))

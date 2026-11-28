@@ -1563,8 +1563,8 @@ CREATE TABLE IF NOT EXISTS merge_batches (
   build_tries INTEGER NOT NULL DEFAULT 0, -- build tasks queued for the batch
   ci_reruns INTEGER NOT NULL DEFAULT 0, -- failed runs of the batch PR rerun (once, when no PR was traced)
   ci_rerun_at TEXT,                   -- when that rerun was asked for
-  opened_at TEXT,                     -- when the batch PR opened and its upstream CI started
-  topped_up INTEGER NOT NULL DEFAULT 0 -- 1: the batch came from a top-up, so it takes no other
+  opened_at TEXT,                     -- when the first batch PR of its lineage opened (upstream CI started); a rebuild carries its parent's
+  topped_up INTEGER NOT NULL DEFAULT 0 -- 1: a top-up or a rebuild of one, so the lineage takes no other
 );
 CREATE INDEX IF NOT EXISTS merge_batches_repo ON merge_batches(repo, state);
 CREATE TABLE IF NOT EXISTS merge_batch_prs (

@@ -115,6 +115,8 @@ const diffProblem = (patch: string): string =>
 type Cand = { number: number; head: string; size: string; lines: number };
 /** PRs a batch takes after its own members, and the batch size they fill up to. */
 type Extra = { cands: Cand[]; max: number };
+/** A batch built in the cache but not opened: its base and each PR's merge commit; `extra`: the PR came from an Extra. */
+type Chain = { base: string; chain: { cand: Cand; commit: string; extra: boolean }[] };
 
 /**
  * Candidates in the order a new batch takes them: the top-ranked PR, then the other PRs of its area in rank order, then
@@ -161,8 +163,6 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   const stageRow = (number: number, stage: StageRow["stage"], note: string): StageRow => ({ repo, number, stage, at: at(), actor: ACTOR, note });
   const audit = async (action: string, target: string, details: Record<string, unknown>): Promise<void> => await addAudit(db, [{ login: ACTOR, action, target, details }]);
   let landed = 0;
-  /** Batches whose CI this run found red. */
-  const redNow = new Set<number>();
   /** PRs this run may still start or land under the stage's daily limit. */
   const left = () => (params.limit === undefined ? Infinity : params.limit - landed);
 
@@ -216,11 +216,17 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
    * them while the batch has room under `extra.max`. `toppedUp`: the batch is a top-up and gets none of its own.
    */
   async function startBatch(cands: Cand[], max: number, parentId: number | null, opts: { onBase?: string; extra?: Extra; toppedUp?: boolean } = {}): Promise<number | null> {
+    const built = await chainOf(cands, max, opts);
+    return built.chain.length ? openChain(built, parentId, opts) : null;
+  }
+
+  /** The merge commits of the candidates that go into a batch, in order, on `base`; `extra` marks a PR from `opts.extra`. Writes nothing but the cache. */
+  async function chainOf(cands: Cand[], max: number, opts: { onBase?: string; extra?: Extra } = {}): Promise<Chain> {
     const base = opts.onBase ?? await git.fetchMain(ownerOf(repo), repo, branch);
     const who = await whoAmI(d.exec);
     const author = await commitIdentity(db, repo, async () => who);
     await setPipelineLogin(db, who.login);
-    const chain: { cand: Cand; commit: string }[] = [];
+    const chain: Chain["chain"] = [];
     let cur = base;
     const takes = [...cands.map((c) => ({ c, max })), ...(opts.extra?.cands ?? []).map((c) => ({ c, max: opts.extra!.max }))];
     for (const { c, max } of takes) {
@@ -245,9 +251,19 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       const tree = await git.mergeTree(cur, sha);
       if (!tree) { log(`  ${refOf(c.number)}: conflicts with the batch so far; waits for the next one`); continue; }
       cur = await git.mergeCommit(tree, [cur, sha], `Merge pull request #${c.number}`, { name: author.name, email: author.email });
-      chain.push({ cand: c, commit: cur });
+      chain.push({ cand: c, commit: cur, extra: !cands.includes(c) });
     }
-    if (!chain.length) return null;
+    return { base, chain };
+  }
+
+  /**
+   * Opens the batch of a chain: its row (as a rebuild of `parentId`, carrying the parent's top-up mark and first PR
+   * opening), its build task or its PR at once.
+   */
+  async function openChain({ base, chain }: Chain, parentId: number | null, opts: { toppedUp?: boolean } = {}): Promise<number> {
+    const who = await whoAmI(d.exec);
+    const parent = parentId === null ? null : await getBatch(db, parentId);
+    const toppedUp = !!opts.toppedUp || Number(parent?.topped_up ?? 0) === 1;
     const tip = chain[chain.length - 1]!.commit;
     // With Build batches on, a build task checks the combined tree before the batch PR opens. Any trouble queueing it
     // opens the PR as usual: upstream CI stays the authority.
@@ -269,13 +285,13 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     // The batch row, its members and the `batch-start` audit row in one write.
     const { id, branch: name } = await openBatch(db, {
       repo, baseSha: base, commitSha: tip, parentId, taskId, members, at: at(), build: taskId !== null ? "pending" : skipped ? "skipped" : null, runId, prs: members.map((m) => m.number),
-      ...(opts.toppedUp ? { toppedUp: true } : {}),
+      ...(toppedUp ? { toppedUp: true } : {}), ...(parent?.opened_at ? { openedAt: parent.opened_at } : {}),
     });
     if (taskId === null && skipped) await skipBuild(await getBatch(db, id), skipped, false);
     s.started.push(name);
     const ag = await grant(members);
     if (ag) for (const m of members) await claimForWork(w, ag, d.querier, repo, m.number, "pr", { id: who.nodeId, login: who.login }, { run: runId, batch: name }, log);
-    const joined = chain.filter((x) => !cands.includes(x.cand)).length;
+    const joined = chain.filter((x) => x.extra).length;
     log(`  ${name}: ${members.length} PR${members.length === 1 ? "" : "s"} (${members.map((m) => `#${m.number}`).join(", ")}) on ${short(base)}${joined ? `, ${joined} of them newly eligible` : ""}; ${taskId === null ? "opening the batch PR" : `building and testing it in task #${taskId} first`}`);
     if (taskId === null) await publish(await getBatch(db, id), members);
     return id;
@@ -301,12 +317,14 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
 
   /**
    * The PRs a new batch would take now, in the order it takes them, and how many it takes (the repo's batch size within the
-   * daily limit); none while the repo has no work scope or the limit is used up. `taken`: PRs already batched, left out.
-   * `backoff`: the repo waits out its publish backoff until then, and nothing is taken.
+   * daily limit, less `reserved`: the PRs of the repo's other active batches, which land under the same limit); none while
+   * the repo has no work scope or the limit is used up. `taken`: PRs already batched, left out. `backoff`: the repo waits
+   * out its publish backoff until then, and nothing is taken.
    */
-  async function eligibleNow(taken: ReadonlySet<number>): Promise<{ cands: Cand[]; max: number; due: number; backoff: number | null }> {
+  async function eligibleNow(taken: ReadonlySet<number>, reserved = 0): Promise<{ cands: Cand[]; max: number; due: number; backoff: number | null }> {
     const none = { cands: [], max: 0, due: 0, backoff: null };
-    if (!repoInScope(scope, "work") || left() <= 0) return none;
+    const room = left() - reserved;
+    if (!repoInScope(scope, "work") || room <= 0) return none;
     // PRs in a repo Verify cannot build are left to the single-PR merge (the plan's merge action is not batchable).
     const due = (await planned(db, "merge", { repo, by })).filter((p) => p.action.params?.batchable && !taken.has(p.facts.number));
     if (!due.length) return none;
@@ -317,14 +335,19 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     const score = (n: number) => scores.get(refOf(n)) ?? NO_WORKFLOW_SCORE;
     const ranked = due.sort((a, b) => score(b.facts.number) - score(a.facts.number) || a.facts.number - b.facts.number)
       .map((p): Cand => ({ number: p.facts.number, head: p.action.head!, size: p.facts.size, lines: p.facts.lines }));
-    return { cands: areaFirst(ranked, (n) => areas.get(refOf(n))?.area ?? null), max: Math.min(sizes.get(repo)!, left()), due: due.length, backoff: null };
+    return { cands: areaFirst(ranked, (n) => areas.get(refOf(n))?.area ?? null), max: Math.min(sizes.get(repo)!, room), due: due.length, backoff: null };
   }
 
-  /** Every PR in an active batch of the repo, and `also`. */
-  async function batched(also: BatchMember[]): Promise<Set<number>> {
-    const out = new Set(also.map((m) => m.number));
-    for (const b of (await loadBatchRun(db, repo)).active) for (const m of b.members) out.add(m.number);
-    return out;
+  /** The PRs to leave out of a fill: `also` and every PR in an active batch of the repo; `reserved`: how many of those are in active batches other than `except`. */
+  async function batched(also: BatchMember[], except: number | null = null): Promise<{ taken: Set<number>; reserved: number }> {
+    const taken = new Set(also.map((m) => m.number));
+    let reserved = 0;
+    for (const b of (await loadBatchRun(db, repo)).active) {
+      if (b.id === except) continue;
+      reserved += b.members.length;
+      for (const m of b.members) taken.add(m.number);
+    }
+    return { taken, reserved };
   }
 
   /**
@@ -332,13 +355,14 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
    * members of the batches this rebuild replaces, which stay out of the fill (they return to the queue, or go to their own batch).
    */
   async function rebuild(keep: BatchMember[], max: number, parentId: number, old: BatchMember[], opts: { onBase?: string; toppedUp?: boolean } = {}): Promise<number | null> {
-    const pool = await eligibleNow(await batched([...keep, ...old]));
+    const { taken, reserved } = await batched([...keep, ...old]);
+    const pool = await eligibleNow(taken, reserved);
     if (!pool.cands.length) return startBatch(asCands(keep), max, parentId, opts);
     return startBatch(await sizedCands(keep), max, parentId, { ...opts, extra: { cands: pool.cands, max: pool.max } });
   }
 
   /** Closes the batch; `keep` is rebuilt on the current default branch head. `named`: the members its closing comment speaks of. */
-  async function supersede(b: BatchView, keep: BatchMember[], why: string, named = keep, toppedUp = false): Promise<void> {
+  async function supersede(b: BatchView, keep: BatchMember[], why: string, named = keep, next?: Chain): Promise<void> {
     // A control may have ended the batch while the caller's GitHub calls ran.
     if (!ACTIVE_BATCH.includes((await getBatch(db, b.id)).state)) return;
     await cancelBuild(db, b, ACTOR);
@@ -346,7 +370,8 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     await closePr(b, `Closing: ${why}.${await afterBatch(db, repo, named.map((m) => m.number), named.length < b.members.length)}`);
     s.superseded.push(b.branch);
     log(`  ${b.branch}: ${why}`);
-    if (keep.length && left() > 0) await rebuild(keep, left(), b.id, b.members, { toppedUp });
+    if (next) await openChain(next, b.id, { toppedUp: true });
+    else if (keep.length && left() > 0) await rebuild(keep, left(), b.id, b.members);
   }
 
   /** Why the batch must be rebuilt because the default branch moved, or null: a move that merges cleanly with the batch tip does not matter (GitHub and upstream CI re-check the batch PR). */
@@ -462,7 +487,6 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
    * failure the log traces drops those PRs (tested alone); otherwise the failed runs are rerun once; then the batch fails.
    */
   async function red(b: BatchView, members: BatchMember[], names: string[], vs: VsMainRow | null): Promise<void> {
-    redNow.add(b.id);
     const optional = new Set(await optionalChecks(db, repo));
     const failing = names.filter((n) => !optional.has(n));
     const why = `upstream CI failed on the batch PR${failing.length ? `: ${vs?.state === "new" && vs.reason ? vs.reason : failing.join(", ")}` : ""}`;
@@ -604,7 +628,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       log(`  ${b.branch}: ended while its PR was opened; closed ${url}`);
       return;
     }
-    await updateBatch(db, b.id, at(), { state: "open", pr_number: Number(m[1]), pr_url: url, opened_at: at() });
+    await updateBatch(db, b.id, at(), { state: "open", pr_number: Number(m[1]), pr_url: url, ...(b.opened_at ? {} : { opened_at: at() }) });
     s.published.push(b.branch);
     log(`  ${b.branch}: opened ${url}`);
   }
@@ -678,6 +702,8 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     const moved = await movedAway(b);
     if (moved) return supersede(b, members, moved);
     if (members.length > left()) { log(`  ${b.branch}: ${members.length} PRs exceed the ${Math.max(left(), 0)} left of the daily limit; waits`); s.waiting.push(b.branch); return; }
+    // CI still running (neither red nor green): the PRs that became eligible since it started may join, once.
+    if (ci !== "success" && await topUp(b)) return;
     if (ci !== "success" || ch.mergeable !== "MERGEABLE") {
       // A fork's runs wait for a maintainer's approval; the ci-approve step does it where the repo allows, and the note says so until the runs started.
       const waiting = (await loadRunApprovals(db, [{ repo, number: b.pr_number! }])).get(`${repo}#${b.pr_number}@${b.commit_sha}`);
@@ -801,19 +827,24 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   }
 
   /**
-   * Rebuilds an open batch whose PR opened less than TOPUP_WINDOW_MS ago with the PRs a new batch would take now added,
-   * when at least one of them fits; at most once per batch, as the batch a top-up builds is marked and takes no other.
+   * Called by `land` while the open batch's CI runs (neither red nor green): when the batch's first PR opened less than
+   * TOPUP_WINDOW_MS ago, the batch is rebuilt with the PRs a new batch would take now, if it really grows by one. At most
+   * once per lineage: the batch a top-up builds, and every rebuild of it, is marked. A passed build or a publish that had
+   * to be retried is not thrown away for it. True: the batch was replaced.
    */
-  async function topUp(id: number): Promise<void> {
-    const b = await getBatch(db, id);
-    // A red batch is worked out first: a rebuild would throw away its trace, rerun or split.
-    if (b.state !== "open" || Number(b.topped_up ?? 0) === 1 || !b.opened_at || redNow.has(b.id) || Number(b.ci_reruns ?? 0) > 0) return;
-    if (d.now().getTime() - Date.parse(b.opened_at) >= TOPUP_WINDOW_MS) return;
-    const pool = await eligibleNow(await batched(b.members));
-    if (!pool.cands.length) return;
-    const taken = await sizedCands(b.members);
-    if (!pool.cands.some((c) => admits(taken, c, pool.max))) return;
-    await supersede(b, b.members, `rebuilt to take the PRs that became eligible in the first ${TOPUP_WINDOW_MS / 60_000} minutes of its CI`, b.members, true);
+  async function topUp(b: BatchView): Promise<boolean> {
+    if (Number(b.topped_up ?? 0) === 1 || !b.opened_at || b.build_state === "passed" || b.retries > 0) return false;
+    if (d.now().getTime() - Date.parse(b.opened_at) >= TOPUP_WINDOW_MS) return false;
+    const { taken, reserved } = await batched(b.members, b.id);
+    const pool = await eligibleNow(taken, reserved);
+    if (!pool.cands.length) return false;
+    const members = await sizedCands(b.members);
+    if (!pool.cands.some((c) => admits(members, c, pool.max))) return false;
+    const next = await chainOf(members, left() - reserved, { extra: { cands: pool.cands, max: pool.max } });
+    // Every member must still go in, and at least one new PR, or the open batch is left as it is.
+    if (!next.chain.some((x) => x.extra) || next.chain.filter((x) => !x.extra).length < b.members.length) return false;
+    await supersede(b, b.members, `rebuilt to take the PRs that became eligible in the first ${TOPUP_WINDOW_MS / 60_000} minutes of its CI`, b.members, next);
+    return true;
   }
 
   async function advance(id: number, q: QueueEntry[]): Promise<void> {
@@ -844,9 +875,6 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   }
   // A batch in a repo whose pipeline is off loses its place when a PR in it has no live workflow any more: it is only closed, never advanced, also in a repo with no work left.
   for (const b of first.outside) await supersede(b, [], "a PR in the batch has no live workflow and the repo's pipeline is off", b.members);
-
-  // A batch whose CI started moments ago takes, once, the PRs that became eligible since, rather than leaving them for the next batch.
-  for (const b of first.mine) await topUp(b.id);
 
   if (!(await batchesNow()).mine.length) {
     const pool = await eligibleNow(new Set());

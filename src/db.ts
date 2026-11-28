@@ -168,7 +168,7 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["merge_batches", "build_tries", "INTEGER NOT NULL DEFAULT 0"],
   ["merge_batches", "ci_reruns", "INTEGER NOT NULL DEFAULT 0"],
   ["merge_batches", "ci_rerun_at", "TEXT"],
-  // When the batch PR opened (its upstream CI started), and 1 once a top-up rebuilt the batch, or the batch is a top-up's.
+  // When the first batch PR of the batch's lineage opened (its upstream CI started; a rebuild carries its parent's), and 1 for a top-up and every rebuild of one.
   ["merge_batches", "opened_at", "TEXT"],
   ["merge_batches", "topped_up", "INTEGER NOT NULL DEFAULT 0"],
   ["fixups", "source", "TEXT"],
