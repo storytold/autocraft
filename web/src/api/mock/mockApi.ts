@@ -13,6 +13,7 @@ import { createActivityMock } from "./activityMock";
 import { createAreasMock } from "./areasMock";
 import { createSecurityMock } from "./securityMock";
 import { createItemPagesMock, type ItemPagesApi } from "./itemPagesMock";
+import { authorStatsFor } from "./browseMock";
 import { createBuildMock } from "./buildMock";
 import { createWorkspacesMock } from "./workspacesMock";
 import { createNightlyMock } from "./nightlyMock";
@@ -126,6 +127,7 @@ export function createMockApi(): Api {
     }),
     repos: () => wait(REPOS, 10),
     repoOwners: () => wait(MOCK_REPO_OWNERS, 10),
+    authorStats: (login) => wait(authorStatsFor(login)),
     item: (repo, number) => {
       const it = itemFor(repo, number);
       const postmerge = postmergeFor(number, it.kind, mockRole() !== "viewer");

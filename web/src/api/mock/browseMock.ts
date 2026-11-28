@@ -1,6 +1,6 @@
 // The Items browser's mock: about fifty items of several repos, matched by the same query grammar the server parses.
 import { forReader, itemOfValue, KINDS, parseItemQuery, PRESETS, type ItemQuery, type QueryTerm } from "../../../../src/core/item-query.ts";
-import type { BrowseQuery, BrowseResult, BrowseRow, User } from "../types";
+import type { AuthorStats, BrowseQuery, BrowseResult, BrowseRow, User } from "../types";
 import { requestProject } from "../scope";
 import { NOW } from "./fixtures";
 
@@ -26,6 +26,8 @@ const SEEDS: Seed[] = [
   s({ repo: "photocraft", number: 8470, kind: "issue", title: "Gradient tool dithering looks banded on wide-gamut screens", author: "hue-shift", outside: true, labels: ["bug", "color"], priority: "P2", classified: "bug", area: "Color", comments: 3, reactions: 2, updated: 50 } as Seed),
   s({ repo: "photocraft", number: 8462, kind: "issue", title: "Plugin API: expose the active layer's mask", author: "plugin-smith", outside: true, labels: ["plugins"], priority: "P3", classified: "plugin", comments: 6, discord: 1, replied: true, updated: 70 } as Seed),
   s({ repo: "photocraft", number: 8455, kind: "pr", title: "Speed up the histogram for large documents", author: "kiri-n", labels: ["performance"], priority: "P2", size: "M", classified: "perf", area: "Canvas", comments: 2, ci: "green", autocraft: "done", state: "merged", updated: 20 } as Seed),
+  s({ repo: "photocraft", number: 8431, kind: "pr", title: "Draw the histogram on the GPU", author: "kiri-n", labels: ["performance"], priority: "P3", size: "L", classified: "perf", area: "Canvas", comments: 6, ci: "red", state: "closed", updated: 60 } as Seed),
+  s({ repo: "photocraft", number: 8402, kind: "issue", title: "Histogram ignores the selection on 16-bit images", author: "kiri-n", labels: ["bug"], priority: "P2", classified: "bug", area: "Canvas", comments: 2, state: "closed", updated: 120 } as Seed),
   s({ repo: "photocraft", number: 8440, kind: "issue", title: "Crash on paste from a remote desktop clipboard", author: "remote-ray", outside: true, labels: [], priority: "P1", classified: "bug", area: "Clipboard", comments: 0, updated: 90 } as Seed),
   s({ repo: "designcraft", number: 1882, kind: "issue", title: "Documents cannot be reopened after saving only as IDML", author: "kicrows", outside: true, labels: ["priority: critical", "file-compat", "needs info"], priority: "P0", classified: "bug", area: "Files", comments: 8, reactions: 3, discord: 4, duplicate: false, replied: true, updated: 1.2 } as Seed),
   s({ repo: "designcraft", number: 1880, step: { name: "recommend", state: "answer" }, kind: "pr", title: "Keep the native document beside an IDML export", author: "ochre-fox", labels: ["bug"], priority: "P0", size: "M", classified: "bug", area: "Files", comments: 4, linked: 1882, ci: "green", autocraft: "waiting", approved: false, mine: true, updated: 1.4 } as Seed),
@@ -147,5 +149,18 @@ export function browseFor(me: User, query: BrowseQuery): BrowseResult {
     total: all.length, offset, limit, unknown: q.unknown,
     presets: query.presets ? Object.fromEntries(PRESETS.map((p) => [p.id, ROWS.filter((r) => matches(r, forReader(parseItemQuery(p.query), staff), repo)).length])) : null,
     facets: query.presets ? { labels: top(open.flatMap((r) => r.labels)), authors: top(open.flatMap((r) => (r.author ? [r.author] : []))), areas: top(open.flatMap((r) => (r.area ? [r.area] : []))) } : null,
+  };
+}
+
+/** An author's counts over every mock item, as GET /api/authors/<login> counts them; the team mark as the rows show it. */
+export function authorStatsFor(login: string): AuthorStats {
+  const mine = ROWS.filter((r) => (r.author ?? "").toLowerCase() === login.toLowerCase());
+  const prs = mine.filter((r) => r.kind === "pr");
+  const issues = mine.filter((r) => r.kind === "issue");
+  return {
+    login: mine[0]?.author ?? login,
+    team: mine.some((r) => r.team),
+    prs: { opened: prs.length, merged: prs.filter((r) => r.state === "merged").length, rejected: prs.filter((r) => r.state === "closed").length, open: prs.filter((r) => r.state === "open").length },
+    issues: { opened: issues.length, open: issues.filter((r) => r.state === "open").length, closed: issues.filter((r) => r.state !== "open").length },
   };
 }

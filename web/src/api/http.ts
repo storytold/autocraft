@@ -142,6 +142,7 @@ export function createHttpApi(): Api {
       withdraw: (repo, number) => post(`/api/items/${encodeURIComponent(repo)}/${number}/chat/withdraw`),
     },
     itemPeek: (repo, number) => get(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}/peek`),
+    authorStats: (login) => get(`/api/authors/${encodeURIComponent(login)}`),
     securityList: () => get("/api/security/findings"),
     findingPage: (repo, number) => get(`/api/security/findings/${encodeURIComponent(repo)}/${number}/page`),
     mainCi: () => get("/api/main-ci"),

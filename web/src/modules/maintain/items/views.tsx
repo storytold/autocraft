@@ -34,6 +34,7 @@ import { Pending } from "../../../ui/atoms/Pending";
 import { Select } from "../../../ui/atoms/Select";
 import { TimeAgo } from "../../../ui/atoms/TimeAgo";
 import { ItemRef } from "../../../ui/molecules/ItemRef";
+import { AuthorName } from "../../../ui/molecules/AuthorName";
 import { Pager } from "../../../ui/molecules/Pager";
 import { SearchField } from "../../../ui/molecules/SearchField";
 import { Segmented } from "../../../ui/molecules/Segmented";
@@ -324,7 +325,7 @@ function PhoneFacts({ r, byCreated }: { r: BrowseRow; byCreated: boolean }) {
 function Who({ r, byCreated, className }: { r: BrowseRow; byCreated: boolean; className?: string }) {
   return (
     <span className={cn("flex items-center gap-1 whitespace-nowrap", className)}>
-      {r.author && <span className="max-w-[7rem] truncate md:max-w-[10rem]">{r.author}</span>}
+      {r.author && <AuthorName login={r.author} className="max-w-[7rem] truncate md:max-w-[10rem]" />}
       {r.team && (
         <span role="img" aria-label={t("On the team")} title={t("On the team")} className="relative z-10 inline-flex text-accent-ink">
           <UsersThreeIcon weight="bold" />
@@ -913,3 +914,6 @@ export function ItemsView(props: ViewProps) {
     </PanelGroup>
   );
 }
+
+// The author page (AuthorView.tsx) lists items with the same rows, keys and panel.
+export { Row as ItemRow, ROW_HINT, ROW_KEYS, PANEL_WIDTH, listKey };
