@@ -71,7 +71,7 @@ export type FindingDetailData = {
   scanTest: ScanTestView | null; log: LogRound[]; rounds: LiveRound[];
 };
 /** `by` is who started the fix (`decided_by`); `tasks` is null for a finding waiting on a confidential environment. */
-export type FixAdvanceRow = { repo: string; number: number; by: string | null; tasks: { head: number; base: number } | null; roundCreatedAt: string | null; envWaitAt: string | null };
+export type FixAdvanceRow = { repo: string; number: number; by: string | null; tasks: { head: number; base: number } | null; roundCreatedAt: string | null; envWaitAt: string | null; /** A waiting fix's security fix session workspace state, when it has one. */ workspaceState: string | null };
 export type LinkRow = Pick<FindingRow, "repo" | "number" | "state" | "fingerprint" | "title" | "refs" | "category">;
 /** `endedJobScans`: active scans whose job ended (`cancelled` when it was cancelled); `jobless`: active scans with no job; `findings`: stuck `fixing` or `landing` findings. */
 export type StaleWork = { endedJobScans: { id: number; cancelled: boolean }[]; jobless: number[]; findings: { repo: string; number: number; state: "fixing" | "landing" }[] };

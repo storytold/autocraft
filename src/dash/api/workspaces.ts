@@ -1,13 +1,15 @@
 // Workspaces over JSON: the list, one workspace with its sessions, its call log and the screenshots of its calls. Everyone
-// signed in sees a workspace of a repo they can see (repo, state, node, times). Operators and maintainers with write on the
-// repo also read errors, sessions' prompts, replies and outcomes, call arguments, outputs and screenshots (the rule for job logs
-// and model outputs). Everything a pod or a model wrote is text, never HTML; images are served with a sandbox policy.
+// signed in sees a workspace of a repo they can see (repo, state, node, times); a security fix session's workspace only those who
+// see the repo's security pseudo repo (operators, and maintainers who can see the repo). Operators and maintainers with write on
+// the repo also read errors, sessions' prompts, replies and outcomes, call arguments, outputs and screenshots (the rule for job
+// logs and model outputs). Everything a pod or a model wrote is text, never HTML; images are served with a sandbox policy.
 import type { WorkspaceCall, WorkspaceCallOutput, WorkspaceCalls, WorkspaceDetail, WorkspacePage, WorkspaceSession, WorkspaceState, WorkspaceSummary } from "../../../web/src/api/types.ts";
 import { OWN_CALLS } from "../../build/workspace-tools.ts";
 import { warmOf } from "../../build/workspace-layout.ts";
-import { loadCallImage, loadCallOutput, loadWorkspaceCalls, loadWorkspacePage, loadWorkspaces } from "../../data/build/index.ts";
+import { isSecurityWorkspace, loadCallImage, loadCallOutput, loadWorkspaceCalls, loadWorkspacePage, loadWorkspaces } from "../../data/build/index.ts";
 import { loadSessionCosts, loadSessionDetails } from "../../data/views/workspace-sessions.ts";
 import { isHiddenRepo } from "../../data/control/index.ts";
+import { securityRepo } from "../../security/rules.ts";
 import type { Db } from "../../db/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { HttpError } from "../server/util.ts";
@@ -51,7 +53,7 @@ const warmText = (w: { warm: string | null }): string | null => {
   return warm.why ? `started cold: ${warm.why}` : null;
 };
 
-type Row = { id: number; repo: string; base_sha: string; app: string | null; state: string; state_at: string; node: string | null; warm: string | null; created_at: string; ended_at: string | null; error?: string | null };
+type Row = { id: number; repo: string; base_sha: string; app: string | null; state: string; state_at: string; node: string | null; warm: string | null; owner: string | null; created_at: string; ended_at: string | null; error?: string | null };
 
 async function summaries(db: Db, req: Req, rows: Row[]): Promise<WorkspaceSummary[]> {
   const repos = [...new Set(rows.map((r) => r.repo))];
@@ -62,7 +64,8 @@ async function summaries(db: Db, req: Req, rows: Row[]): Promise<WorkspaceSummar
     const costs = mine.map((s) => costOf(s.usage)).filter((c): c is number => c !== null);
     const canSee = can.get(r.repo) === true;
     return {
-      id: r.id, repo: r.repo, baseSha: r.base_sha, app: r.app, state: r.state as WorkspaceState, stateAt: r.state_at, node: r.node, warm: warmText(r),
+      // A security fix session's workspace names its repo's security pseudo repo, so its item is the finding's run, never an item of the repo.
+      id: r.id, repo: isSecurityWorkspace(r) ? securityRepo(r.repo) : r.repo, baseSha: r.base_sha, app: r.app, state: r.state as WorkspaceState, stateAt: r.state_at, node: r.node, warm: warmText(r),
       createdAt: r.created_at, endedAt: r.ended_at, item: mine[0]?.item ?? null, sessions: mine.length,
       costUsd: canSee && costs.length ? costs.reduce((a, b) => a + b, 0) : null, canSee,
     };
@@ -83,7 +86,7 @@ export async function list(db: Db, req: Req): Promise<WorkspacePage> {
 async function visibleWorkspace(db: Db, req: Req, id: number) {
   const w = (await loadWorkspaces(db, { ids: [id] })).get(id);
   // The list's rule: the same answer for a workspace that does not exist and one of a repo the viewer cannot see.
-  if (!w || isHiddenRepo(await hiddenRepos(db, req), w.repo)) throw new HttpError(404, "no such workspace");
+  if (!w || isHiddenRepo(await hiddenRepos(db, req), isSecurityWorkspace(w) ? securityRepo(w.repo) : w.repo)) throw new HttpError(404, "no such workspace");
   return w;
 }
 
