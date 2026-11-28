@@ -97,8 +97,13 @@ export type PlanQuestion = { audience: QuestionAudience; text: string; options: 
 /**
  * The result of a `revise` round: the PR head it revises and why (the review's fixes, red CI or both), the commit our last
  * push made (the revision's push carries the change since it onto the PR's head), and the follow-up it sends the session.
+ * `verified`: the hash of the workspace diff the revision's first turn started from, set once it was checked to be the change
+ * last pushed (the attempt's `diffHash`); the push is refused without it. A copy of the round for a new revision leaves it out.
  */
-export type ReviseRound = { prNumber: number; head: string; from: string; review: boolean; ci: boolean; message: string };
+export type ReviseRound = { prNumber: number; head: string; from: string; review: boolean; ci: boolean; message: string; verified?: string };
+
+/** The `revise` round a new revision starts with, copied from an earlier one: without its start check (`verified`). */
+export const reviseCopy = (r: ReviseRound): ReviseRound => ({ prNumber: r.prNumber, head: r.head, from: r.from, review: r.review, ci: r.ci, message: r.message });
 
 /** The plan call's reply: ready to implement, or the questions that come first. */
 export type PlanReply = {

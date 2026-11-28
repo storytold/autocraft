@@ -165,26 +165,28 @@ export async function loadImplementStamps(db: Db, keys: KeySource): Promise<Map<
 }
 
 /**
- * Per repo, the newest due time (ms) at or before `now` of AutoCraft's own retries of its live attempts (start-retry.ts ownRetryOf).
- * It moves when a retry falls due, which the implement lane reads so a due retry runs although the lane's last job was idle. 1 statement.
+ * Per repo, the newest due time (ms) at or before `now` of AutoCraft's own retries of its live attempts: a retry after a stop of
+ * our own (start-retry.ts ownRetryOf) or a new start after a workspace that did not start (startRetryOf). It moves when a retry
+ * falls due, which the implement lane reads so a due retry runs although the lane's last job was idle. 1 statement.
  */
 export async function loadDueOwnRetries(db: Db, now: number): Promise<Map<string, number>> {
   const q = queryDb(db);
   const k = q.k as any;
   const rows = await q.all(k.selectFrom("main.implementation_rounds as r").innerJoin("main.implementations as im", "im.id", "r.implementation_id")
-    .select(["im.repo", "r.id", "r.implementation_id", "r.kind", "r.call_id", "r.result", "r.at"])
-    .where("r.kind", "in", ["question", "answer", "guidance", "retry"]).where("im.state", "not in", ENDED)
-    .where((eb: any) => eb.exists(eb.selectFrom("main.implementation_rounds as x").select(eb.lit(1).as("one")).whereRef("x.implementation_id", "=", "im.id").where("x.kind", "=", "retry")))
-    .orderBy("r.id")) as (RoundRow & { repo: string })[];
-  const byImpl = new Map<number, { repo: string; rounds: ReturnType<typeof roundOf>[] }>();
+    .select(["im.repo", "im.state", "r.id", "r.implementation_id", "r.kind", "r.call_id", "r.result", "r.at"])
+    .where("r.kind", "in", ["question", "answer", "guidance", "retry", "start-failed"]).where("im.state", "not in", ENDED)
+    .where((eb: any) => eb.exists(eb.selectFrom("main.implementation_rounds as x").select(eb.lit(1).as("one")).whereRef("x.implementation_id", "=", "im.id").where("x.kind", "in", ["retry", "start-failed"])))
+    .orderBy("r.id")) as (RoundRow & { repo: string; state: ImplementationState })[];
+  const byImpl = new Map<number, { repo: string; state: ImplementationState; rounds: ReturnType<typeof roundOf>[] }>();
   for (const r of rows) {
     const id = Number(r.implementation_id);
-    (byImpl.get(id) ?? byImpl.set(id, { repo: r.repo, rounds: [] }).get(id)!).rounds.push(roundOf(r));
+    (byImpl.get(id) ?? byImpl.set(id, { repo: r.repo, state: r.state, rounds: [] }).get(id)!).rounds.push(roundOf(r));
   }
   const out = new Map<string, number>();
-  for (const { repo, rounds } of byImpl.values()) {
-    const due = ownRetryOf(rounds)?.dueAt;
-    if (due !== undefined && due <= now && due > (out.get(repo) ?? -1)) out.set(repo, due);
+  for (const { repo, state, rounds } of byImpl.values()) {
+    for (const due of [ownRetryOf(rounds)?.dueAt, startRetryOf({ state, rounds })?.dueAt]) {
+      if (due !== undefined && due <= now && due > (out.get(repo) ?? -1)) out.set(repo, due);
+    }
   }
   return out;
 }

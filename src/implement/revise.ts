@@ -273,7 +273,8 @@ async function readyWorkspace(run: BuildRun, deps: ReviseDeps, impl: Implementat
     }
     await sleep(READY_POLL_MS);
   }
-  await restore(run, deps, impl, wsId);
+  // A reset still to be made rebuilds the tree from the cache, so a checkpoint of the stopped turns is not restored first.
+  if (!resetPending(await roundsNow(db, impl))) await restore(run, deps, impl, wsId);
   return { wsId, base, impl };
 }
 
@@ -313,20 +314,30 @@ async function restore(run: BuildRun, deps: ReviseDeps, impl: Implementation, ws
 }
 
 /**
- * A revision AutoCraft starts over after a stop of its own (its `revise` round follows a `retry` round with `reset`): the tree goes
- * back to the change last pushed, once, so the revise message reads against what is on the PR and nothing of the stopped turns
- * stays. Its `workspace` round marks the reset; the turns after it start a fresh session. A tree that cannot be rebuilt asks.
+ * Whether a reset of the tree to the change last pushed is still to be made: no `workspace` round with `reset` follows the newest
+ * `retry` round with `reset`, whatever lies between (a stuck question on a failed reset and its Try again among them).
  */
-async function resetToPushed(run: BuildRun, deps: ReviseDeps, impl: Implementation, wsId: number): Promise<void> {
+export function resetPending(rounds: readonly ImplementationRound[]): boolean {
+  const flagged = (r: ImplementationRound, kind: string) => r.kind === kind && (r.result as { reset?: unknown } | null)?.reset === true;
+  const at = rounds.findLastIndex((r) => flagged(r, "retry"));
+  return at >= 0 && !rounds.slice(at + 1).some((r) => flagged(r, "workspace"));
+}
+
+/**
+ * A revision AutoCraft starts over after a stop of its own (a `retry` round with `reset`): the tree goes back to the change last
+ * pushed before the revision's first turn, so the revise message reads against what is on the PR and nothing of the stopped
+ * turns stays. The change is rebuilt from the cache and checked to apply onto the workspace's base before the live tree is
+ * touched; its `workspace` round marks the reset, and the turns after it start a fresh session. A tree that cannot be rebuilt
+ * asks, and the reset stays due until one is made (resetPending), also after a Try again.
+ */
+async function resetToPushed(run: BuildRun, deps: ReviseDeps, impl: Implementation, wsId: number, base: string): Promise<void> {
   const db = run.db;
   const all = await roundsNow(db, impl);
-  const at = all.map((r) => r.kind).lastIndexOf("revise");
-  const before = at > 0 ? all[at - 1]! : null;
-  if (before?.kind !== "retry" || (before.result as Partial<RetryRound> | null)?.reset !== true) return;
-  if (epochOf(all).some((r) => r.kind === "workspace" && (r.result as Partial<WorkspaceRound> | null)?.reset === true)) return;
-  const req = all[at]!.result as ReviseRound;
+  if (!resetPending(all)) return;
+  const req = all.filter((r) => r.kind === "revise").at(-1)!.result as ReviseRound;
   const lost = (why: string) => new Stuck("workspace-lost", `the tree could not be reset to the change last pushed: ${why}`, { retry: false });
   if (!impl.baseSha || !impl.branch) throw lost("the attempt has no base commit or branch");
+  if (!SHA.test(base)) throw lost(`the workspace's base commit ${base} is not a commit id`);
   const git = new Git(deps.exec, deps.root, impl.repo);
   if (!await git.fetchBranch(ownerOf(impl.repo), impl.repo, await branchOf(db, impl.repo), impl.baseSha)) throw lost("the base commit is no longer in the repository");
   const tree = await builtTree(git, deps.root, await pushesOf(db, impl, impl.branch), req.from);
@@ -334,19 +345,48 @@ async function resetToPushed(run: BuildRun, deps: ReviseDeps, impl: Implementati
   const diff = await git.must(["diff-tree", "-p", "--binary", "-r", "--no-renames", "--no-ext-diff", "--no-textconv", impl.baseSha, tree]);
   const api = deps.api(db);
   const ok = (r: Awaited<ReturnType<typeof execWs>>) => r.header?.kind === "status" && r.header.state === "exited" && r.header.exit === 0;
-  const clean = await execWs(db, api, wsId, ["run", "120", "--", "bash", "-c", "cd /work/src && git checkout -- . && git clean -fd -q"], { tool: "checkpoint", args: { reset: true }, timeoutMs: 130_000 });
-  if (!ok(clean)) throw lost(clean.error ?? describeHeader(clean.header));
+  const bash = async (script: string, args: Record<string, unknown>) =>
+    await execWs(db, api, wsId, ["run", "300", "--", "bash", "-c", script, "reset", base, RESTORE_FILE], { tool: "checkpoint", args: { reset: true, ...args }, timeoutMs: 310_000 });
   if (diff.trim()) {
     const put = await execWs(db, api, wsId, ["put", RESTORE_FILE], { tool: "checkpoint", args: { reset: true, bytes: diff.length }, stdin: Buffer.from(diff), timeoutMs: 120_000 });
     if (put.header?.kind !== "ok") throw lost(`the change could not be copied in: ${put.error ?? describeHeader(put.header)}`);
-    const r = await execWs(db, api, wsId, ["run", "300", "--", "git", "apply", "--binary", "--whitespace=nowarn", RESTORE_FILE], { tool: "checkpoint", args: { reset: true, apply: true }, timeoutMs: 310_000 });
+    // Checked onto the base in an index of its own, so the live tree is left alone when it does not apply.
+    const check = await bash(`cd /work/src && export GIT_INDEX_FILE=/work/.ws/reset-check.index && git read-tree "$1" && git apply --cached --check --binary --whitespace=nowarn "$2"; s=$?; rm -f "$GIT_INDEX_FILE"; exit $s`, { check: true });
+    if (!ok(check)) throw lost(`the change does not apply onto the base (${check.error ?? describeHeader(check.header)})`);
+  }
+  // A hard reset to the base drops staged edits, staged new files and commits too; ignored build output stays.
+  const clean = await bash(`cd /work/src && git reset -q --hard "$1" && git clean -fdq`, { clean: true });
+  if (!ok(clean)) throw lost(clean.error ?? describeHeader(clean.header));
+  if (diff.trim()) {
+    const r = await bash(`cd /work/src && git apply --binary --whitespace=nowarn "$2"`, { apply: true });
     if (!ok(r)) throw lost(`the change does not apply (${r.error ?? describeHeader(r.header)})`);
   }
   const d = await workspaceDiff(db, api, wsId);
   if (!d.ok) throw new Error(`workspace ${wsId}: ${d.reason}`);
+  if (d.base !== impl.baseSha) throw lost(`the workspace is at ${short(d.base)}, not the attempt's base commit ${short(impl.baseSha)}`);
   if (sha256(d.diff) !== impl.diffHash) throw lost("the tree is not the change last pushed");
   await addRounds(db, impl.id, [{ kind: "workspace", result: { workspaceId: wsId, reason: "the tree was reset to the change last pushed", from: wsId, restored: true, reset: true } satisfies WorkspaceRound }]);
   run.log(`${ref(impl)}: workspace ${wsId} reset to the change last pushed (${short(req.from)}); the revision starts over`);
+}
+
+/**
+ * The revision's start check, before its first turn: the workspace diff is the change last pushed (the attempt's `diffHash`)
+ * against the attempt's base commit, so no session revises, and no push carries, a tree without it. The check is kept on the
+ * `revise` round (`verified`), which the push requires. A tree that is not the change last pushed is a stop of our own, whose
+ * retry resets the tree; a workspace on another base asks.
+ */
+async function verifyStart(run: BuildRun, deps: ReviseDeps, impl: Implementation, wsId: number): Promise<void> {
+  const db = run.db;
+  const all = await roundsNow(db, impl);
+  if (turnsOf(epochOf(all)).length) return;
+  const round = all.filter((r) => r.kind === "revise").at(-1)!;
+  const d = await workspaceDiff(db, deps.api(db), wsId);
+  if (!d.ok) throw new Error(`workspace ${wsId}: ${d.reason}`);
+  if (d.base !== impl.baseSha) throw new Stuck("workspace-lost", `workspace ${wsId} is at ${short(d.base)}, not the attempt's base commit ${short(impl.baseSha ?? "")}`, { retry: false });
+  const hash = sha256(d.diff);
+  if (hash !== impl.diffHash) throw new Stuck("workspace-lost", `the tree of workspace ${wsId} is not the change last pushed, so the revision does not start on it`);
+  const req = round.result as ReviseRound;
+  if (req.verified !== hash) await setRound(db, impl.id, round.id, { ...req, verified: hash } satisfies ReviseRound);
 }
 
 /** The revision's latest `workspace` round, or null. */
@@ -416,7 +456,8 @@ async function revise(run: BuildRun, deps: ReviseDeps, impl: Implementation): Pr
   const db = run.db;
   const ws = await readyWorkspace(run, deps, impl);
   impl = ws.impl;
-  await resetToPushed(run, deps, impl, ws.wsId);
+  await resetToPushed(run, deps, impl, ws.wsId, ws.base);
+  await verifyStart(run, deps, impl, ws.wsId);
   const pod = deps.pod(db, ws.wsId, run.cancelled);
   for (let n = 0;;) {
     const all = await roundsNow(db, impl);
@@ -471,6 +512,8 @@ async function pushStep(run: BuildRun, deps: ReviseDeps, impl: Implementation, w
   const d = await workspaceDiff(db, deps.api(db), ws.wsId);
   if (!d.ok) return await pushFailed(db, impl, d.reason, all);
   if (d.base !== impl.baseSha) throw new Stuck("push-failed", `the workspace diff is against ${short(d.base)}, not the attempt's base commit ${short(impl.baseSha ?? "")}`, { retry: false });
+  // Only a revision that started from the change last pushed may push: its delta would otherwise undo that change.
+  if (!impl.diffHash || req.verified !== impl.diffHash) throw new Stuck("workspace-lost", "the revision did not start from a tree checked to hold the change last pushed");
   if (sha256(d.diff) !== checks.diffHash) {
     // The tree is not the one the last clean checks ran on: they run again on it, once.
     if (refusalOf(all).some((x) => x === "recheck")) throw new Stuck("push-failed", "the workspace changed after the checks, twice", { retry: false });

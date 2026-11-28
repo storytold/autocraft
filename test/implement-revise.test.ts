@@ -16,9 +16,14 @@ import { setFeature } from "../src/build/features.ts";
 import { exec as realExec, type Exec, type ExecResult } from "../src/fixup/git.ts";
 import { DIFF_FLAGS } from "../src/implement/diff.ts";
 import { lastPush, openImplementationPr } from "../src/implement/pr.ts";
-import { pushRevision, type ReviseDeps } from "../src/implement/revise.ts";
-import { implementationById, setImplementationState, startImplementation } from "./implement-rows.ts";
-import type { Implementation, ReviseRound } from "../src/implement/types.ts";
+import { pushRevision, runRevise, type ReviseDeps } from "../src/implement/revise.ts";
+import { implementationById, roundsOf, setImplementationState, startImplementation } from "./implement-rows.ts";
+import type { Implementation, RetryRound, ReviseRound } from "../src/implement/types.ts";
+import type { BuildRun } from "../src/implement/build.ts";
+import { addRounds } from "../src/implement/attempt.ts";
+import { retryRevision } from "../src/data/implement/index.ts";
+import { createEnv } from "../src/build/envs.ts";
+import { createWorkspace, moveWorkspace } from "../src/build/workspaces.ts";
 
 /** The live implement workflow of the PR's issue. */
 const ISSUES = { entry: "implement", approved: true, startedBy: "op", startedAt: "2026-11-04T09:00:00.000Z", own: false } as const;
@@ -150,4 +155,41 @@ test("a revision after a base merge keeps main's change, also in the revision af
   await revise("pub fn a() -> u8 { 3 }\n", join(dir, "cache"));
   await revise("pub fn a() -> u8 { 4 }\n", join(dir, "cache"));
   await revise("pub fn a() -> u8 { 5 }\n", join(dir, "cache-again"));
+});
+
+test("a revision whose tree reset failed resets again after Try again, and never revises or pushes a tree without the pushed change", async () => {
+  const w = await (await (await (await world()).repo()).pr(12)).issue(5);
+  const db = w.db;
+  const base = "a".repeat(40);
+  await createEnv(db, { id: "pods", label: "Pods", kind: "kubernetes", slots: 2, settings: { image: "autocraft:test" } }, "op");
+  const ws = await createWorkspace(db, { repo: "app", baseSha: base, envId: "pods", owner: "test" });
+  await moveWorkspace(db, ws, ["requested"], "ready", { pod: "ws-1", base_commit: base });
+  const impl = await startImplementation(db, { repo: "app", number: 5, queuedBy: "op", textHash: "h", baseSha: base });
+  await setImplementationState(db, impl.id, "revising", { prNumber: 12, branch: "autocraft/app-5", workspaceId: ws, diffHash: "d".repeat(64) });
+  const req: ReviseRound = { prNumber: 12, head: "b".repeat(40), from: "c".repeat(40), review: true, ci: false, message: "fix" };
+  // A stop of AutoCraft's own started the revision over, on a tree to be reset to the change last pushed.
+  const retry: RetryRound = { cause: "session-lost", detail: null, runner: true, from: "revising", to: "revising", reset: true };
+  await addRounds(db, impl.id, [{ kind: "revise", result: req }, { kind: "retry", result: retry }, { kind: "revise", result: req }]);
+
+  let touched = 0;
+  const deps = {
+    // The cache answers every git command, but the base commit is not in it, so the change cannot be rebuilt.
+    exec: async (_cmd: string, args: string[]): Promise<ExecResult> => ({ code: args.includes("cat-file") ? 1 : 0, stdout: "", stderr: "" }),
+    root: mkdtempSync(join(SCRATCH, "impl-reset-")),
+    api: () => { touched++; throw new Error("the workspace tree is read or changed"); },
+    pod: () => { touched++; throw new Error("a session turn or the checks run"); },
+  } as unknown as ReviseDeps;
+  const run = { db, log: () => {}, progress: async () => {}, cancelled: async () => false, stopping: async () => false, startedMs: Date.now(), by: "pipeline" } as unknown as BuildRun;
+  const stuckOn = async () => {
+    const now = (await implementationById(db, impl.id))!;
+    const q = (await roundsOf(db, impl.id)).filter((r) => r.kind === "question").at(-1)?.result as { cause?: string } | undefined;
+    return now.state === "stuck" ? q?.cause : now.state;
+  };
+
+  await runRevise(run, "app", 5, deps);
+  assert.equal(await stuckOn(), "workspace-lost", "a tree that cannot be reset asks");
+  assert.ok(await retryRevision(db, { id: impl.id }), "Try again starts the revision again");
+  await runRevise(run, "app", 5, deps);
+  assert.equal(await stuckOn(), "workspace-lost", "the reset is still due after Try again, and asks again when it still fails");
+  assert.equal(touched, 0, "no turn ran and nothing reached the workspace without the reset");
 });

@@ -6,20 +6,22 @@
 //
 // A stop on a failure of AutoCraft's own (OWN) asks nobody at first: the attempt goes back to where its step starts again and
 // runs after a backoff (start-retry.ts), and only the stop after the retries asks. Three implementations in a row on a repo
-// that end stuck on the item's own cause, or failed without a PR, trip the repo's Implement breaker (`implement:<repo>`); a stop
-// of our own neither counts nor breaks the row.
+// that end stuck on the item's own cause, or failed without a PR, trip the repo's Implement breaker (`implement:<repo>`) until a
+// person resumes it; a stop of our own neither counts nor breaks that row. Three issues in a row whose implementations stopped
+// on failures of our own after their retries trip it too; that trip lifts itself after a backoff for one probe implementation.
 import type { Db } from "../db/index.ts";
-import { addAudit, loadTrip, tripStage } from "../data/control/index.ts";
+import { addAudit, liftTrips, loadTrip, loadTrips, tripStage } from "../data/control/index.ts";
 import { loadImplementFacts, loadStuckStreaks, restartAttempt, retryRevision } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { endWorkspace } from "../build/workspaces.ts";
-import { tripKey } from "../core/push-outcome.ts";
+import { IMPLEMENT_OWN_TRIP_LIFT_MS } from "../core/backoff.ts";
+import { parseTripKey, tripKey } from "../core/push-outcome.ts";
 import { textHash } from "../core/open-prs.ts";
 import { queuerOf } from "./gate.ts";
 import { addRounds, attemptNow, writeStep, type Attempt, type NewRound } from "./attempt.ts";
 import { IMPLEMENT_RETRIES, ownRetries, ownRetryOf } from "./start-retry.ts";
 import { IMPLEMENT_ASKER, openQuestion, type QuestionOption } from "./questions.ts";
-import { ENDED_STATES, IMPLEMENTATION_STATES, type Implementation, type ImplementationRound, type ImplementationState, type QuestionRound, type RetryRound } from "./types.ts";
+import { ENDED_STATES, IMPLEMENTATION_STATES, reviseCopy, type Implementation, type ImplementationRound, type ImplementationState, type QuestionRound, type RetryRound, type ReviseRound } from "./types.ts";
 
 const ACTOR = IMPLEMENT_ASKER;
 const OPEN_STATES = IMPLEMENTATION_STATES.filter((s) => !ENDED_STATES.has(s));
@@ -139,7 +141,7 @@ function restartOf(impl: Implementation, cause: StuckCause, rounds: readonly Imp
     if (impl.state !== "revising") return null;
     if (cause === "checks-no-verdict" || cause === "push-failed") return { to: "revising", fresh: false, rounds: [] };
     const last = rounds.filter((r) => r.kind === "revise").at(-1);
-    return last ? { to: "revising", fresh: false, reset: true, rounds: [{ kind: "revise", result: last.result }] } : null;
+    return last ? { to: "revising", fresh: false, reset: true, rounds: [{ kind: "revise", result: reviseCopy(last.result as ReviseRound) }] } : null;
   }
   if (impl.state === "planning" || impl.state === "asked" || !impl.plan || ["plan-unparseable", "plan-failed", "question-failed", "reset-failed"].includes(cause)) return { to: "planning", fresh: false, rounds: [] };
   if (cause === "checks-no-verdict" && impl.state === "checking") return { to: "checking", fresh: false, rounds: [] };
@@ -165,12 +167,14 @@ async function retryOwn(db: Db, impl: Implementation, cause: StuckCause, reason:
       ...((restart.fresh || restart.reset) && { patch: { sessionCallId: null } }),
       rounds: [{ kind: "retry", result: retry }, ...restart.rounds],
     });
-    if (w) await addAudit(db, [{ login: ACTOR, action: "implement-self-retry", target: `${impl.repo}#${impl.number}`, details: { implementation: impl.id, cause, reason, runner, to: restart.to }, at }]);
+    if (!w) return w;
+    await addAudit(db, [{ login: ACTOR, action: "implement-self-retry", target: `${impl.repo}#${impl.number}`, details: { implementation: impl.id, cause, reason, runner, to: restart.to }, at }]);
+    // In the same write, so a fresh start never finds the stopped session's workspace still live.
+    if (restart.fresh && impl.workspaceId !== null) await endWorkspace(db, impl.workspaceId);
     return w;
   });
   // An attempt that ended meanwhile (a cancel, its PR merged) keeps its end.
   if (!w) return "left";
-  if (restart.fresh && impl.workspaceId !== null) await endWorkspace(db, impl.workspaceId);
   const due = ownRetryOf([...rounds, { kind: "retry", at, result: retry }])!;
   return { n: due.n, of: IMPLEMENT_RETRIES, at: new Date(due.dueAt).toISOString() };
 }
@@ -219,21 +223,50 @@ export async function tripIfStuckInARow(db: Db, repo: string, at = new Date().to
   return tripped.length > 0;
 }
 
+/** The login that lifts an own-failures trip by itself, and the words its reason carries, which only that trip's reason has. */
+export const OWN_TRIP_LIFTER = "implement-probe";
+const OWN_TRIP_MARK = "stopped on failures of AutoCraft's own";
+const hhmm = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
+
 /**
- * Trips `implement:<repo>` when the repo's last STUCK_IN_A_ROW finished implementations since its last resume all stopped on a
- * failure of our own after using up their own retries: AutoCraft's own machinery is broken on the repo, and every further
- * attempt would run its sessions for nothing. A stop on the item's own cause is left out of this row; a PR breaks it.
+ * Trips `implement:<repo>` when the repo's last finished implementations since its last resume stopped on failures of our own
+ * after using up their own retries, on STUCK_IN_A_ROW different issues in a row: AutoCraft's own machinery is broken on the
+ * repo, and every further attempt would run its sessions for nothing. One issue's repeated attempts count once. A stop on the
+ * item's own cause is left out of this row; a PR or a stop that asked before its retries breaks it. After the trip lifted itself
+ * (liftOwnTrips), the first implementation to finish is the probe: when it stops the same way, the trip comes back at once.
+ * The trip lifts itself IMPLEMENT_OWN_TRIP_LIFT_MS after it tripped, which its reason says.
  */
 export async function tripIfOwnInARow(db: Db, repo: string, at = new Date().toISOString()): Promise<boolean> {
   const key = tripKey("implement", repo);
   const t = await loadTrip(db, key);
   if (t?.active) return false;
   const theirs = (Object.keys(STUCK_SIDE) as StuckCause[]).filter((c) => STUCK_SIDE[c] === "theirs");
-  const rows = (await loadStuckStreaks(db, new Map([[repo, t?.clearedAt ?? ""]]), STUCK_IN_A_ROW, theirs)).get(repo) ?? [];
+  // Enough rows for STUCK_IN_A_ROW issues when some of them were tried a few times.
+  const rows = (await loadStuckStreaks(db, new Map([[repo, t?.clearedAt ?? ""]]), STUCK_IN_A_ROW * MAX_ATTEMPTS_PER_TEXT, theirs)).get(repo) ?? [];
   const usedUp = (r: (typeof rows)[number]) => r.prNumber === null && r.stuck !== null && STUCK_SIDE[r.stuck.cause as StuckCause] === "ours" && (r.stuck.retried ?? 0) >= IMPLEMENT_RETRIES;
-  if (rows.length < STUCK_IN_A_ROW || !rows.every(usedUp)) return false;
-  const tripped = await tripStage(db, [{ key, reason: `${STUCK_IN_A_ROW} implementations in a row in ${repo} stopped on failures of AutoCraft's own after their retries`, evidence: rows.map((r) => `${repo}#${r.number} attempt ${r.attempt}: ${r.stuck!.cause}`), at }]);
+  const end = rows.findIndex((r) => !usedUp(r));
+  const streak = end < 0 ? rows : rows.slice(0, end);
+  const issues = new Set(streak.map((r) => r.number));
+  // The probe failed: nothing finished since the lift got through.
+  const probeFailed = t?.clearedBy === OWN_TRIP_LIFTER && streak.length > 0 && streak.length === rows.length;
+  if (!probeFailed && issues.size < STUCK_IN_A_ROW) return false;
+  const lift = `AutoCraft lifts the pause for one probe implementation at ${hhmm(Date.parse(at) + IMPLEMENT_OWN_TRIP_LIFT_MS)} UTC`;
+  const reason = probeFailed && issues.size < STUCK_IN_A_ROW
+    ? `The probe implementation in ${repo} ${OWN_TRIP_MARK} after its retries; ${lift}`
+    : `${STUCK_IN_A_ROW} issues in a row in ${repo} ${OWN_TRIP_MARK} after their retries; ${lift}`;
+  const tripped = await tripStage(db, [{ key, reason, evidence: streak.map((r) => `${repo}#${r.number} attempt ${r.attempt}: ${r.stuck!.cause}`), at }]);
   return tripped.length > 0;
+}
+
+/**
+ * Lifts the repo trips of the Implement breaker that failures of our own tripped (tripIfOwnInARow), IMPLEMENT_OWN_TRIP_LIFT_MS
+ * after each tripped, for one probe implementation. Other trips of `implement:<repo>` (stops on the item's own cause in a row,
+ * red pushes) are left to a person's resume. The sync run calls it, with the pipeline on or off. Returns the keys lifted.
+ */
+export async function liftOwnTrips(db: Db, now = Date.now()): Promise<string[]> {
+  const due = [...(await loadTrips(db)).values()].filter((t) =>
+    parseTripKey(t.stage)?.stage === "implement" && t.reason.includes(OWN_TRIP_MARK) && Date.parse(t.trippedAt) + IMPLEMENT_OWN_TRIP_LIFT_MS <= now);
+  return await liftTrips(db, due.map((t) => ({ key: t.stage, trippedAt: t.trippedAt })), OWN_TRIP_LIFTER, new Date(now).toISOString());
 }
 
 /** A Try again note for the attempt: who answered, when, and the text. */

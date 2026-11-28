@@ -4,7 +4,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { addAudit } from "../control/index.ts";
 import { COLUMN_TYPE, ENDED, IMPL_COLS, columnsOf, json, ofRow, type ImplRow } from "./rows.ts";
-import type { AttemptGuidance, AttemptStep, Implementation, ImplementationState, RefKey, ReviseRound, StartAttempt } from "./types.ts";
+import { reviseCopy, type AttemptGuidance, type AttemptStep, type Implementation, type ImplementationState, type RefKey, type ReviseRound, type StartAttempt } from "./types.ts";
 
 const now = () => new Date().toISOString();
 const refOf = (r: { repo: string; number: number }): RefKey => `${r.repo}#${r.number}`;
@@ -120,7 +120,7 @@ export async function retryRevision(db: Db, o: { id: number; guidance?: AttemptG
     const message = note ? `${was.message}\n\nA maintainer's note on this revision:\n<guidance>\n${note.slice(0, 4000).replace(/</g, "\\u003c")}\n</guidance>` : was.message;
     await q.run(q.k.insertInto("main.implementation_rounds").values([
       ...(note ? [{ implementation_id: o.id, kind: "guidance", call_id: null, result: json({ by: o.guidance!.by, text: note.slice(0, 4000) }), at }] : []),
-      { implementation_id: o.id, kind: "revise", call_id: null, result: json({ ...was, message } satisfies ReviseRound), at },
+      { implementation_id: o.id, kind: "revise", call_id: null, result: json({ ...reviseCopy(was), message } satisfies ReviseRound), at },
     ]));
     return true;
   });
