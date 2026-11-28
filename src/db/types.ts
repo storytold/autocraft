@@ -355,6 +355,7 @@ export interface CiFixes {
   lint_task: number | null;
   lint_round: number | null;
   lint_state: string | null;
+  session_turn: number | null;
 }
 
 export interface CiRunApprovals {
@@ -465,6 +466,7 @@ export interface ConflictMerges {
   lint_round: number | null;
   own_diff: string | null;
   own_delta: string | null;
+  session_turn: number | null;
 }
 
 export interface ConversationCards {
@@ -994,6 +996,44 @@ export interface FixAttempts {
   format_diff: string | null;
 }
 
+export interface FixSessionTurns {
+  id: Generated<number>;
+  session_id: number;
+  step: string;
+  purpose: string;
+  head: string | null;
+  call_id: number | null;
+  parent_id: number | null;
+  outcome: Generated<string>;
+  report: string | null;
+  error: string | null;
+  turns: number | null;
+  cost_usd: number | null;
+  tool_calls: number | null;
+  shell_ms: number | null;
+  diff_hash: string | null;
+  created_at: string;
+  settled_at: string | null;
+}
+
+export interface FixSessions {
+  id: Generated<number>;
+  kind: string;
+  repo: string;
+  number: number;
+  workspace_id: number | null;
+  head: string | null;
+  last_call_id: number | null;
+  model: string | null;
+  turns: Generated<number>;
+  cost_usd: Generated<number>;
+  state: Generated<string>;
+  end_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  ended_at: string | null;
+}
+
 export interface Fixups {
   repo: string;
   number: number;
@@ -1013,6 +1053,7 @@ export interface Fixups {
   operator_fix: number | null;
   changes: string | null;
   session: string | null;
+  session_turn: number | null;
 }
 
 export interface FlowSummary {
@@ -2457,6 +2498,7 @@ export interface SecurityFixRounds {
   state: Generated<string>;
   failure: string | null;
   created_at: string;
+  session_turn: number | null;
 }
 
 export interface SecurityQuietPrs {
@@ -2890,6 +2932,8 @@ export interface DB {
   fast_track: FastTrack;
   final_reviews: FinalReviews;
   fix_attempts: FixAttempts;
+  fix_session_turns: FixSessionTurns;
+  fix_sessions: FixSessions;
   fixups: Fixups;
   flow_summary: FlowSummary;
   github_app: GithubApp;
@@ -3115,6 +3159,8 @@ export interface DB {
   "main.fast_track": FastTrack;
   "main.final_reviews": FinalReviews;
   "main.fix_attempts": FixAttempts;
+  "main.fix_session_turns": FixSessionTurns;
+  "main.fix_sessions": FixSessions;
   "main.fixups": Fixups;
   "main.flow_summary": FlowSummary;
   "main.github_app": GithubApp;
@@ -3287,7 +3333,7 @@ export const COLUMNS = {
   change_seq: ["topic", "seq", "at"],
   chat_conversations: ["id", "repo", "number", "is_main", "title", "created_at", "created_by"],
   chat_messages: ["id", "conversation_id", "author", "via", "kind", "body", "payload", "workflow_event_id", "turn_id", "workflow_id", "github_comment_id", "at"],
-  ci_fixes: ["repo", "number", "head", "to_head", "kind", "state", "reason", "files", "attempt", "task_id", "runs", "created_at", "session", "patch", "lint_task", "lint_round", "lint_state"],
+  ci_fixes: ["repo", "number", "head", "to_head", "kind", "state", "reason", "files", "attempt", "task_id", "runs", "created_at", "session", "patch", "lint_task", "lint_round", "lint_state", "session_turn"],
   ci_run_approvals: ["repo", "number", "head_oid", "cross_repo", "runs", "approved", "reread", "failed", "checked_at", "approved_at"],
   ci_vs_main: ["repo", "number", "head", "main_head", "state", "checks", "failing", "reason", "reads", "first_at", "read_at"],
   classifications: ["repo", "number", "classifier", "run_id", "at", "type_label", "want", "reference", "flags", "dup_of", "reason", "probs", "input_hash"],
@@ -3296,7 +3342,7 @@ export const COLUMNS = {
   claude_account_tokens: ["account_id", "set_at", "rejected_at"],
   claude_accounts: ["id", "label", "enabled", "max_concurrent", "updated_by", "updated_at"],
   comments: ["repo", "number", "id", "kind", "author", "created_at", "body", "review_state", "commit_oid", "counted", "author_association", "mentions_pipeline", "url"],
-  conflict_merges: ["repo", "number", "from_head", "to_head", "base_sha", "state", "reason", "files", "attempt", "created_at", "session", "patch", "lint_task", "lint_round", "own_diff", "own_delta"],
+  conflict_merges: ["repo", "number", "from_head", "to_head", "base_sha", "state", "reason", "files", "attempt", "created_at", "session", "patch", "lint_task", "lint_round", "own_diff", "own_delta", "session_turn"],
   conversation_cards: ["id", "turn_id", "repo", "number", "kind", "params", "text", "description", "state", "result", "result_url", "error", "acted_by", "acted_at", "edited_by", "edited_at", "seen", "choice_id", "queued_at", "queue_args", "dispute_by", "dispute_reason", "dispute_at"],
   conversation_includes: ["repo", "number", "source", "by", "at", "sent_turn"],
   conversation_turns: ["id", "repo", "number", "kind", "login", "at", "body", "block", "status", "error", "notes", "seq", "claim", "claimed_at", "progress", "conversation_id", "ended_at"],
@@ -3344,7 +3390,9 @@ export const COLUMNS = {
   fast_track: ["id", "repo", "number", "added_by", "added_at", "weight"],
   final_reviews: ["repo", "number", "head_oid", "run_id", "at", "model", "verdict", "reason", "fixes", "risks", "sure", "mode", "base_head", "seen_at", "disc_hash"],
   fix_attempts: ["repo", "number", "main_sha", "text_hash", "state", "round", "files", "crate", "crate_dir", "patch", "test_patch", "head_task_id", "base_task_id", "retries", "push_tries", "summary", "pr_url", "reason", "created_at", "updated_at", "size", "format_diff"],
-  fixups: ["repo", "number", "from_head", "to_head", "state", "reason", "files", "attempt", "created_at", "source", "patch", "lint_task", "lint_round", "lint_state", "carry_decision", "operator_fix", "changes", "session"],
+  fix_session_turns: ["id", "session_id", "step", "purpose", "head", "call_id", "parent_id", "outcome", "report", "error", "turns", "cost_usd", "tool_calls", "shell_ms", "diff_hash", "created_at", "settled_at"],
+  fix_sessions: ["id", "kind", "repo", "number", "workspace_id", "head", "last_call_id", "model", "turns", "cost_usd", "state", "end_reason", "created_at", "updated_at", "ended_at"],
+  fixups: ["repo", "number", "from_head", "to_head", "state", "reason", "files", "attempt", "created_at", "source", "patch", "lint_task", "lint_round", "lint_state", "carry_decision", "operator_fix", "changes", "session", "session_turn"],
   flow_summary: ["repo", "counts", "counted_at", "stale", "decisions_sig"],
   github_app: ["id", "app_id", "slug", "keys_enc", "updated_at"],
   github_app_states: ["state", "login", "session_hash", "created_at"],
@@ -3456,7 +3504,7 @@ export const COLUMNS = {
   security_calls: ["id", "scan_id", "kind", "area_idx", "finding_number", "started_at", "ended_at", "ok", "cost_usd", "agent_run_id", "resumed"],
   security_findings: ["repo", "number", "scan_id", "area", "title", "severity", "urgent", "state", "refs", "category", "reach", "impact", "verification", "fingerprint", "fix_commit", "fix_pr", "ghsa_id", "fork", "fix_patch", "fix_title", "fix_summary", "fix_branch", "fix_files", "fix_ref", "note", "env_wait_at", "reason", "decided_by", "duplicate_of", "created_at", "updated_at", "fix_attempts", "last_failure"],
   security_fix_log: ["repo", "number", "attempt", "round", "state", "failure", "title", "created_at", "ended_at"],
-  security_fix_rounds: ["repo", "number", "round", "patch", "test_patch", "title", "summary", "head_task", "base_task", "retried", "session", "state", "failure", "created_at"],
+  security_fix_rounds: ["repo", "number", "round", "patch", "test_patch", "title", "summary", "head_task", "base_task", "retried", "session", "state", "failure", "created_at", "session_turn"],
   security_quiet_prs: ["repo", "pr", "finding"],
   security_scan_tests: ["repo", "number", "test_path", "crate", "test_patch", "test_source", "task_id", "retried", "state", "detail", "created_at", "ended_at"],
   security_scans: ["id", "repo", "commit_sha", "state", "cap_usd", "cost_usd", "estimate_usd", "areas_total", "areas_done", "started_by", "started_at", "ended_at", "error", "job_id", "threat_model"],

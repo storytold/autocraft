@@ -654,6 +654,21 @@ export async function warmChanges(repo: string, warmCommit: string, base: string
   return changedFrom(tree, head, (d) => dirs.has(d));
 }
 
+/**
+ * Whether the Cargo.lock files of `to` differ from those of `from`, read in AutoCraft's clone; with `from` null, whether `to` has
+ * any. A clone that cannot tell counts as a difference.
+ */
+export async function cargoLocksDiffer(repo: string, from: string | null, to: string): Promise<boolean> {
+  try {
+    const g = await cloneWith(repo, to);
+    if (from === null) return (await g.must(["ls-tree", "-r", "-z", "--name-only", to])).split("\0").some((p) => p === "Cargo.lock" || p.endsWith("/Cargo.lock"));
+    if ((await g.git(["cat-file", "-e", `${from}^{commit}`])).code !== 0) await cloneWith(repo, from, "warm");
+    return (await g.git(["diff", "--quiet", from, to, "--", "Cargo.lock", ":(glob)**/Cargo.lock"])).code !== 0;
+  } catch {
+    return true;
+  }
+}
+
 /** The base commit `ws untar` made, or null when it failed. */
 const untarCommit = (r: WsCallResult): string | null => (r.header?.kind === "ok" && /^[0-9a-f]{40}$/.test(r.header.fields[0] ?? "") ? r.header.fields[0]! : null);
 
@@ -819,7 +834,8 @@ async function checkpoint(c: Ctx, id: number): Promise<boolean> {
     if (raw.exitCode !== 0) return await problem(`the diff could not be read (${raw.error ?? `exit ${raw.exitCode}`})`);
     if (raw.stdout.length > MAX_CHECKPOINT_BYTES) return await problem(`the diff is over ${MAX_CHECKPOINT_BYTES / 1024 ** 2} MiB; the previous checkpoint is kept`);
     const at = new Date(c.now()).toISOString();
-    await patchWorkspaces(db, [{ id, whereState: ["ready"], set: { checkpoint: raw.stdout, checkpoint_at: at, checkpoint_error: null, error: null, updated_at: at } }]);
+    // A reseed meanwhile moved the base: this diff is against the old one.
+    await patchWorkspaces(db, [{ id, whereState: ["ready"], where: { base_commit: w.base_commit }, set: { checkpoint: raw.stdout, checkpoint_at: at, checkpoint_error: null, error: null, updated_at: at } }]);
     return true;
   } catch (e) {
     return await problem(errText(e));
