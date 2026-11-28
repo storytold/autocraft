@@ -37,6 +37,8 @@ export type MirrorConfig = {
   /** Holds `<host>.crt` and `<host>.key` for every host in MIRROR_HOSTS. */
   tlsDir: string;
   gitAllowlistFile?: string;
+  /** The list AutoCraft derives from the tracked repos' Cargo.lock files (src/build/mirror-sources.ts); a missing file is an empty list. */
+  gitDerivedFile?: string;
   gitRepos?: string;
   crateCapBytes: number;
   indexCapBytes: number;
@@ -151,7 +153,7 @@ export async function startMirror(cfg: MirrorConfig, deps: MirrorDeps = {}): Pro
   const slots = new Slots(cfg.upstreamSlots ?? 64, queue);
   const index = new IndexCache({ dir: join(cfg.dataDir, "index"), capBytes: cfg.indexCapBytes, upstream: deps.indexUpstream, ttlMs: deps.indexTtlMs, maxBytes: deps.indexMaxBytes, fetch: deps.fetch, log, now: deps.now, slots });
   const crates = new CrateStore({ dir: join(cfg.dataDir, "crates"), capBytes: cfg.crateCapBytes, indexUpstream: deps.indexUpstream, staticUpstream: deps.staticUpstream, maxBytes: deps.crateMaxBytes, minFreeBytes: deps.minFreeBytes, fetch: deps.fetch, log, slots });
-  const git = new GitMirrors({ dir: join(cfg.dataDir, "git"), upstream: deps.gitUpstream, allowlist: () => readAllowlist(cfg.gitAllowlistFile, cfg.gitRepos, log), slots: new Slots(GIT_SLOTS, queue), log });
+  const git = new GitMirrors({ dir: join(cfg.dataDir, "git"), upstream: deps.gitUpstream, allowlist: () => readAllowlist(cfg.gitAllowlistFile, cfg.gitRepos, log, cfg.gitDerivedFile), slots: new Slots(GIT_SLOTS, queue), log });
 
   async function handle(req: Req, res: Res): Promise<void> {
     const started = Date.now();
@@ -351,6 +353,7 @@ export function mirrorConfig(args: string[], env: NodeJS.ProcessEnv = process.en
     dataDir: v("--data-dir", "MIRROR_DIR") ?? "/data",
     tlsDir: v("--tls-dir", "MIRROR_TLS_DIR") ?? "/tls",
     gitAllowlistFile: v("--git-allowlist", "MIRROR_GIT_ALLOWLIST"),
+    gitDerivedFile: v("--git-derived", "MIRROR_GIT_DERIVED"),
     gitRepos: v("--git-repos", "MIRROR_GIT_REPOS"),
     crateCapBytes: gib(v("--crate-cap-gb", "MIRROR_CRATE_CAP_GB"), 50, "crate cap"),
     indexCapBytes: gib(v("--index-cap-gb", "MIRROR_INDEX_CAP_GB"), 2, "index cap"),
@@ -363,7 +366,7 @@ export const commands = {
     summary: "serve the crates.io and GitHub git mirror for build pods (crate-mirror serve)",
     async run(args: string[]): Promise<void> {
       if (args[0] !== "serve") {
-        console.error("usage: autocraft-server crate-mirror serve [--listen host:port] [--health-listen host:port] [--data-dir DIR] [--tls-dir DIR] [--git-allowlist FILE] [--git-repos LIST] [--crate-cap-gb N] [--index-cap-gb N] [--upstream-slots N]");
+        console.error("usage: autocraft-server crate-mirror serve [--listen host:port] [--health-listen host:port] [--data-dir DIR] [--tls-dir DIR] [--git-allowlist FILE] [--git-derived FILE] [--git-repos LIST] [--crate-cap-gb N] [--index-cap-gb N] [--upstream-slots N]");
         process.exit(1);
       }
       const m = await startMirror(mirrorConfig(args.slice(1)));

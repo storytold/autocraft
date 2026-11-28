@@ -15,3 +15,4 @@ export const UPDATE_FAILURES_KEY = "worker_update_failures";
 export const ENDPOINT_KEY = "leader:runner:endpoint";
 export const warmBytesKey = (key: string): string => `warm_bytes:${key}`;
 export const warmRebuildKey = (repo: string): string => `warm_rebuild:${repo}`;
+export const mirrorSourcesKey = (repo: string): string => `mirror_git_sources:${repo}`;
