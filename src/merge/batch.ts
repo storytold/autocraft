@@ -479,13 +479,21 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
    * Why the batch must be rebuilt because the default branch moved, or null: main at the train's root or at the merge of the car below
    * is no move, and a move that merges cleanly with the batch tip does not matter (GitHub and upstream CI re-check the batch PR).
    */
-  async function movedAway(b: BatchView): Promise<string | null> {
+  /**
+   * Why the batch must be rebuilt because the default branch moved under it, null when it still merges cleanly, or "wait" when that cannot be
+   * told now: the batch tip is fetched from its pushed branch into a cache that lost it (a new pod), and a comparison that fails is no conflict.
+   */
+  async function movedAway(b: BatchView): Promise<string | null | "wait"> {
     const head = await d.mainHead(repo, branch);
     if (!head || head === rootOf(b) || head === await landedBelow(b)) return null;
+    if (!await git.haveCar(b)) { log(`  ${b.branch}: its tip ${short(b.commit_sha)} is not in the cache and could not be fetched; waits`); return "wait"; }
     try {
       const now = await git.fetchMain(ownerOf(repo), repo, branch);
       if (await git.mergeTree(now, b.commit_sha)) return null;
-    } catch { /* the batch commit is gone from the cache: rebuild */ }
+    } catch (e) {
+      log(`  ${b.branch}: could not compare it with ${branch} at ${short(head)}: ${oneLine(String((e as Error).message ?? e), 120)}; waits`);
+      return "wait";
+    }
     return `${branch} moved to ${short(head)} and conflicts with the batch`;
   }
 
@@ -707,6 +715,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
 
   async function publish(b: BatchView, members: BatchMember[]): Promise<void> {
     const moved = await movedAway(b);
+    if (moved === "wait") { s.waiting.push(b.branch); return; }
     if (moved) return supersede(b, members, moved);
     // Time passes between building and pushing (and between retries of a failed push): the members must still be open at the batched heads.
     const checks = await refreshChecks(db, d.querier, repo, members.map((m) => m.number));
@@ -820,6 +829,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     if (ci === "failure") return red(b, members, ch.checks.filter((c) => c.state === "failure").map((c) => c.name), vs);
     if (ch.mergeable === "CONFLICTING") return supersede(b, members, `the batch PR conflicts with ${branch}`);
     const moved = await movedAway(b);
+    if (moved === "wait") { s.waiting.push(b.branch); return; }
     if (moved) return supersede(b, members, moved);
     const today = await dayLeft();
     if (members.length > today) { log(`  ${b.branch}: ${members.length} PRs exceed the ${Math.max(today, 0)} left of the daily limit; waits`); s.waiting.push(b.branch); return; }

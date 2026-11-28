@@ -22,7 +22,8 @@ async function setup(depth: number) {
   const base = w.gh.batchDeps({ cars: { ci: "pending" } });
   // `conflicts`: commits that conflict with a moved default branch; `clashes`: PR heads whose content conflicts with it, in any commit
   // that holds them; `behind`: PRs GitHub reports BEHIND; `commits`: commit-tree calls.
-  const fake = { main: MAIN, conflicts: new Set<string>(), clashes: new Set<string>(), behind: new Set<number>(), commits: 0, log: "", blame: {} as Record<string, number> };
+  // `lost`: car tips missing from the cache (a new pod); `unfetchable`: lost tips a fetch of their branch does not bring back.
+  const fake = { main: MAIN, conflicts: new Set<string>(), clashes: new Set<string>(), behind: new Set<number>(), commits: 0, log: "", blame: {} as Record<string, number>, lost: new Set<string>(), unfetchable: new Set<string>() };
   const parents = new Map<string, string[]>();
   const holds = (c: string, head: string): boolean => c === head || (parents.get(c) ?? []).some((p) => holds(p, head));
   const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
@@ -50,6 +51,12 @@ async function setup(depth: number) {
           parents.set(r.stdout.trim(), a.flatMap((x, i) => (a[i - 1] === "-p" ? [x] : [])));
           return r;
         }
+        if (a[0] === "cat-file" && fake.lost.has(a.at(-1)!.replace("^{commit}", ""))) return { code: 1, stdout: "", stderr: "" };
+        if (a[0] === "fetch" && a.some((x) => x.includes("refs/batch/car/"))) {
+          for (const c of [...fake.lost]) if (!fake.unfetchable.has(c)) fake.lost.delete(c);
+          return ok();
+        }
+        if (a[0] === "merge-tree" && fake.lost.has(a.at(-1)!)) return { code: 128, stdout: "", stderr: "fatal: bad object" };
         if (a[0] === "merge-tree" && fake.conflicts.has(a.at(-1)!)) return { code: 1, stdout: "", stderr: "" };
         if (a[0] === "merge-tree" && a.at(-2) === fake.main && [...fake.clashes].some((h) => holds(a.at(-1)!, h))) return { code: 1, stdout: "", stderr: "" };
         if (a[0] === "rev-list") return ok(`${sha40(Number(/sha(\d+)/.exec(a[1]!)![1]))}\n`);
@@ -214,4 +221,20 @@ test("a merge job of a full one-car train gets room for the open batch's one top
   for (const n of [4, 5, 6, 7, 8]) await t.ready(n);
   await t.run(await limit());
   assert.deepEqual((await t.active()).map((b) => b.members), [[1, 2, 3, 4, 5, 6, 7, 8]], "the open batch is topped up within the job's limit");
+});
+
+test("a car whose tip the cache lost is fetched again when the default branch moves, and waits rather than being rebuilt when it cannot be", async () => {
+  const t = await setup(2);
+  for (const n of [1, 2]) { await t.ready(n); await t.run(); }
+  const [one, two] = await t.active();
+  t.fake.main = "d".repeat(40);
+  t.fake.lost.add(one!.commit_sha);
+  t.fake.lost.add(two!.commit_sha);
+  t.fake.unfetchable.add(two!.commit_sha);
+  await t.run();
+  const rows = await t.batches();
+  const stateOf = (id: number) => rows.find((b) => b.id === id)!.state;
+  assert.equal(stateOf(one!.id), "open", "fetched again from its branch, it still merges cleanly");
+  assert.equal(stateOf(two!.id), "open", "not fetchable now: it waits");
+  assert.ok(!t.fake.lost.has(one!.commit_sha));
 });
