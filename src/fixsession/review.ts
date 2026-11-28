@@ -7,6 +7,7 @@
 // stays free for fix steps. When the workspace cannot be had now (a quiet pull request, no cluster, no environment, no slot to
 // spare, a slow or failed start) the review runs read-only over its checkout, as with the switch off, and never waits for a pod past
 // REVIEW_WORKSPACE_READY_MS. The post-merge review always runs read-only.
+import { randomBytes } from "node:crypto";
 import { CancelledError, currentJob, isHalt, StoppedError, WaitLimitError } from "../agents/call.ts";
 import type { WorkspaceAsk } from "../classify/run.ts";
 import { assertFence } from "../db/fence.ts";
@@ -92,7 +93,7 @@ export async function inReviewWorkspace<T>(db: Db, deps: ReviewWorkspaceDeps | n
   const base = deps.env(db);
   if (!base) return await readOnly("this runner is not in the cluster, so it cannot reach a workspace");
   const env: FixWorkspaceEnv = { ...base, db, log };
-  const owner = reviewWorkspaceOwner(currentJob()?.id ?? null, ref);
+  const owner = reviewWorkspaceOwner(currentJob()?.id ?? null, ref, randomBytes(4).toString("hex"));
   let id: number | null = null;
   const end = async (): Promise<void> => {
     if (id !== null && await endWorkspace(db, id).catch(() => false)) log(`  ${ref}: review workspace ${id} ended`);
