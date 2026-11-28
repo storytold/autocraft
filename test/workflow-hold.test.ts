@@ -87,6 +87,8 @@ test("an item held at a blocker comes back with its question; the resume answers
     repo: "app", number: 1, kind: "pr", entry: "fixup", state: "blocked", startedBy: MAINT, startedAt: T0, startedVia: "github", baseHead: "sha1", approvedBy: MAINT, approvedAt: T0,
     blocker: "failed-twice", blockerParams: { step: "fix-up", count: 2 }, rec, recAt: T0, recHead: "sha1", plan: [{ n: 1, title: "A bug", source: "review", state: "planned" }],
   });
+  // The two failed tries the stop counted: one it no longer finds would close it by itself.
+  for (const attempt of [1, 2]) await w.db.run(w.db.k.insertInto("main.fixups").values({ repo: "app", number: 1, from_head: "sha1", to_head: null, state: "failed", reason: "the patch did not apply", files: "[]", attempt, created_at: new Date().toISOString() }));
   await run(w, "hold");
   assert.deepEqual([(await workflowHistory(w.db, "app", 1))[0]!.rec, (await send(w, "fix 1")).outcome], [null, "ambiguous"]);
   assert.match(await run(w, "continue", OTHER), /question is open again/);
