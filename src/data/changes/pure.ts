@@ -111,7 +111,7 @@ export function cifixAt(rows: readonly CifixRow[], head: string, now: number, ta
     skipReason: [...prior].reverse().find((x) => x.state === "skipped")?.reason ?? null,
     lastTry: [...prior].reverse().find((x) => isTry(x) || x.state === "capped")?.reason ?? null,
     askedPatch: prior.some((x) => x.state === "asked" && x.reason !== CIFIX_ASK_REASON),
-    unreads: unread.length,
+    unreads: unread.length, unreadSince: unread.length ? new Date(Math.min(...unread)).toISOString() : null,
     ...(readAgainAt > now ? { readAgainAt } : {}),
     ...unsentOf(prior.filter((x) => x.state === "comment-unsent").map((x) => x.createdAt), now),
   };

@@ -22,6 +22,10 @@ export type CifixCandidate = {
   rerun: boolean;
   /** When the rerun was requested (ISO), else null. */
   rerunAt: string | null;
+  /** The Actions runs the rerun covered; only their checks wait for results newer than it. Null or empty: every failed check. */
+  rerunRuns?: number[] | null;
+  /** When the head's failure log was first found unreadable (ISO), else null: a day of such reads ends in a failed try. */
+  unreadSince?: string | null;
   /** The one rerun of the failed jobs may be asked for: the repo approves CI reruns and a review read the head. */
   mayRerun?: boolean;
   /** The PR author's login, whom an ask about red CI addresses. */

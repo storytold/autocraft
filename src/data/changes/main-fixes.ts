@@ -8,12 +8,14 @@ import type { MainFixRow, MainFixVerdict, RefKey } from "./types.ts";
 
 type Head = { repo: string; headSha: string };
 /** A row as the due test and the lane's clock read it. */
-export type MainFixTry = { check: string; state: string; tries: number; createdAt: string; updatedAt: string };
+export type MainFixTry = { check: string; state: string; reason: string | null; tries: number; createdAt: string; updatedAt: string };
+/** The check of a row about a head as a whole (nothing read there yet, its classification, a log that cannot be read). */
+export const MAIN_FIX_HEAD_CHECK = "(none)";
 type MainFixDue = { rows: MainFixTry[]; lintingHeads: { headSha: string; lintTask: number | null }[]; staleNeedsFix: boolean; /** The repo holds an `issue-opening` row at any head. */ opening: boolean };
 
 const COLS = ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "issue_number", "pr_number", "pr_url", "patch", "files", "lint_task", "lint_round", "lint_state", "session", "tries", "created_at", "updated_at"] as const;
 
-const tryOf = (r: any): MainFixTry => ({ check: r.check, state: r.state, tries: Number(r.tries ?? 0), createdAt: r.created_at, updatedAt: r.updated_at });
+const tryOf = (r: any): MainFixTry => ({ check: r.check, state: r.state, reason: r.reason ?? null, tries: Number(r.tries ?? 0), createdAt: r.created_at, updatedAt: r.updated_at });
 
 const rowOf = (r: any): MainFixRow => ({
   repo: r.repo, headSha: r.head_sha, check: r.check, verdict: r.verdict as MainFixVerdict, state: r.state, reason: r.reason, runId: num(r.run_id), runUrl: r.run_url, excerpt: r.excerpt,
@@ -53,7 +55,7 @@ export async function loadMainFixDue(db: Db, heads: (Head & { running: boolean }
   const k = queryDb(db).k as any;
   const repos = [...new Set(heads.map((h) => h.repo))];
   const [rows, linting, needs] = await db.together(() => Promise.all([
-    rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "check", "state", "tries", "created_at", "updated_at"]).where(kx.tupleIn(db, ["repo", "head_sha"], heads.map((h) => [h.repo, h.headSha]), ["text", "text"]))
+    rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "check", "state", "reason", "tries", "created_at", "updated_at"]).where(kx.tupleIn(db, ["repo", "head_sha"], heads.map((h) => [h.repo, h.headSha]), ["text", "text"]))
       .orderBy("repo").orderBy("head_sha").orderBy("check")),
     rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "lint_task"]).where(kx.inList(db, "repo", repos)).where("state", "=", "linting").orderBy("created_at").orderBy("head_sha").orderBy("check")),
     rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "state"]).distinct().where(kx.inList(db, "repo", repos)).where("state", "in", ["needs-fix", "issue-opening"])),
@@ -101,7 +103,7 @@ export async function countMainFixes(db: Db, f: { state: string }): Promise<numb
 export async function loadMainFixHeads(db: Db, states: string[]): Promise<(Head & MainFixTry)[]> {
   if (!states.length) return [];
   const k = queryDb(db).k as any;
-  return (await rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "check", "state", "tries", "created_at", "updated_at"]).where(kx.inList(db, "state", states))
+  return (await rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "check", "state", "reason", "tries", "created_at", "updated_at"]).where(kx.inList(db, "state", states))
     .orderBy("repo").orderBy("head_sha").orderBy("check"))).map((r) => ({ repo: r.repo, headSha: r.head_sha, ...tryOf(r) }));
 }
 
@@ -115,7 +117,8 @@ export async function dropMainFix(db: Db, key: Head & { check: string }): Promis
 
 /**
  * Multi-row upsert keyed by (repo, head, check): 1 statement per 500 rows. A row that exists keeps its `created_at`; every other
- * column takes the new value and `updated_at` is `at`. Callers collect the rows of a head and write once.
+ * column takes the new value and `updated_at` is `at`. A head row (MAIN_FIX_HEAD_CHECK) that changes state starts its series again
+ * (`created_at` is `at`) and keeps its `tries` unless the write gives a count. Callers collect the rows of a head and write once.
  */
 export async function saveMainFixes(db: Db, rows: MainFixRow[], at: string): Promise<void> {
   if (!rows.length) return;
@@ -127,9 +130,14 @@ export async function saveMainFixes(db: Db, rows: MainFixRow[], at: string): Pro
           repo: r.repo, head_sha: r.headSha, check: r.check, verdict: r.verdict, state: r.state, reason: r.reason, run_id: r.runId, run_url: r.runUrl, excerpt: r.excerpt, issue_number: r.issueNumber,
           pr_number: r.prNumber, pr_url: r.prUrl, patch: r.patch, files: r.files, lint_task: r.lintTask, lint_round: r.lintRound, lint_state: r.lintState, session: r.session, tries: r.tries ?? 0, created_at: r.createdAt, updated_at: at,
         })))
-        .onConflict((oc: any) => oc.columns(["repo", "head_sha", "check"]).doUpdateSet(kx.excluded([
-          "verdict", "state", "reason", "run_id", "run_url", "excerpt", "issue_number", "pr_number", "pr_url", "patch", "files", "lint_task", "lint_round", "lint_state", "session", "tries", "updated_at",
-        ]))));
+        .onConflict((oc: any) => oc.columns(["repo", "head_sha", "check"]).doUpdateSet((eb: any) => {
+          const turned = eb.and([eb("main.main_fixes.check", "=", MAIN_FIX_HEAD_CHECK), eb("main.main_fixes.state", "<>", eb.ref("excluded.state"))]);
+          return {
+            ...kx.excluded(["verdict", "state", "reason", "run_id", "run_url", "excerpt", "issue_number", "pr_number", "pr_url", "patch", "files", "lint_task", "lint_round", "lint_state", "session", "updated_at"])(eb),
+            created_at: eb.case().when(turned).then(eb.ref("excluded.updated_at")).else(eb.ref("main.main_fixes.created_at")).end(),
+            tries: eb.case().when(eb.and([turned, eb("excluded.tries", "=", 0)])).then(eb.ref("main.main_fixes.tries")).else(eb.ref("excluded.tries")).end(),
+          };
+        })));
     }
   });
 }

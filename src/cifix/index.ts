@@ -77,6 +77,8 @@ const CHECK = CLAUDE_PROMPTS["fixup.check"];
 const MAX_FILES = 8;
 /** Characters of the failure log the Opus check sees. */
 const CHECK_LOG_CAP = 8000;
+/** A failure log still unreadable this long after the first unread read of the head is a failed try. */
+const UNREAD_END_MS = 24 * 3600_000;
 
 /**
  * The formatter step. /src is a writable overlay inside the step, so the formatted copy is made beside an untouched
@@ -656,22 +658,26 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       const reading = await readFailure(d.gh, repo, c.head, await optionalChecks(db, repo));
       const skip = async (why: string) => { await rec.set(c, "code", "skipped", why); summary.skipped.push(ref); log(`  ${ref}: skipped: ${why}`); };
       if (reading.kind === "skip") { handle(); await skip(reading.why); return; }
-      if (reading.kind === "unread") {
-        // A log GitHub does not serve yet is no try: it is read again after a backoff (CIFIX_UNREAD_DELAYS_MS), then hourly while the head stays.
-        handle();
-        const why = scrubReason(oneLine(reading.why), d.root);
-        await rec.set(c, "code", "unread", why);
-        log(`  ${ref}: unread: ${why}`);
-        return;
-      }
+      /**
+       * A log or a rerun result GitHub does not serve yet is no try: it is read again after a backoff (CIFIX_UNREAD_DELAYS_MS), then
+       * hourly while the head stays. A log no later read can find, or a day of such reads, is a failed try with the reason.
+       */
+      const notRead = async (kind: "code" | "infra", raw: string, permanent: boolean): Promise<void> => {
+        const why = scrubReason(oneLine(raw), d.root);
+        const reason = permanent ? `the failure log cannot be read: ${why}`
+          : c.unreadSince && Date.parse(at()) - Date.parse(c.unreadSince) >= UNREAD_END_MS ? `the failure log could not be read for a day: ${why}` : null;
+        if (reason === null) { await rec.set(c, kind, "unread", why); log(`  ${ref}: unread: ${why}`); return; }
+        await rec.set(c, kind, "failed", reason);
+        summary.failed.push({ ref, reason });
+      };
+      if (reading.kind === "unread") { handle(); await notRead("code", reading.why, reading.permanent); return; }
       const failure = reading.failure;
       const runsOf = (): number[] => [...new Set(failure.checks.flatMap((x) => (x.runId === null ? [] : [x.runId])))];
       // After the one rerun, only results from after it say how the code fares; older ones are what the rerun was meant to replace.
-      // Until such results exist the head is unread, read again on the same backoff: no try.
-      if (c.rerun && !failure.checks.every((x) => !!x.completedAt && !!c.rerunAt && Date.parse(x.completedAt) > Date.parse(c.rerunAt))) {
-        const why = "the rerun produced no new check results yet";
-        await rec.set(c, "infra", "unread", why);
-        log(`  ${ref}: unread: ${why}`);
+      // Only the checks of the runs it covered wait for such results; until they exist the head is unread, as above.
+      const reran = c.rerunRuns?.length ? failure.checks.filter((x) => x.runId !== null && c.rerunRuns!.includes(x.runId)) : failure.checks;
+      if (c.rerun && !reran.every((x) => !!x.completedAt && !!c.rerunAt && Date.parse(x.completedAt) > Date.parse(c.rerunAt))) {
+        await notRead("infra", "the rerun produced no new check results yet", false);
         return;
       }
       const t = triage(failure);

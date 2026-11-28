@@ -77,8 +77,8 @@ export type CifixFacts = {
   lastTry: string | null;
   /** A patch was posted as a comment at the head (an `asked` row that is not the plain ask to the contributor). */
   askedPatch: boolean;
-  /** Reads of the head's failure log that found none to read yet (`unread` rows), and when the next read is due (ms) while it waits. */
-  unreads: number; readAgainAt?: number;
+  /** Reads of the head's failure log that found none to read yet (`unread` rows), the first one's time, and when the next read is due (ms) while it waits. */
+  unreads: number; unreadSince: string | null; readAgainAt?: number;
 };
 export type FixupAtHead = { recorded: string[]; unsent?: UnsentAsk; /** The reason of the head's latest hold row (too-large, cannot-push, push-denied), which says why the fix-up made nothing there. */ held?: string };
 export type ConflictBucket = "merge" | "ask" | "ask-retry" | "asked" | "held" | "unapproved" | "linting" | "capped" | "done";

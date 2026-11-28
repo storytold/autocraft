@@ -4,9 +4,10 @@ import type { Db } from "../db/index.ts";
 import { loadMainFixStates } from "../data/changes/index.ts";
 
 /** Shown first when a head has rows in several states: what needs a person comes before what is running. */
-const ORDER = ["fix-failed", "needs-fix", "linting", "pr-opened", "rerun-requested", "issue-opening", "issue-opened", "issue-failed", "declined", "nothing-to-do", "rerun-passed"] as const;
+const ORDER = ["unreadable", "fix-failed", "needs-fix", "linting", "pr-opened", "rerun-requested", "issue-opening", "issue-opened", "issue-failed", "declined", "nothing-to-do", "rerun-passed"] as const;
 
 const TEXT: Record<(typeof ORDER)[number], string> = {
+  unreadable: "needs a person: the failure log cannot be read",
   "fix-failed": "needs a person",
   "pr-opened": "opened fix PR",
   "needs-fix": "needs a fix",
@@ -38,6 +39,9 @@ export async function autocraftTexts(db: Db, heads: { repo: string; headSha: str
     if (f === "pr-opened") {
       const n = fixes.get(`${h.repo}@${h.headSha}`)?.prNumber;
       out.set(k, n ? `${TEXT[f]} #${n}` : TEXT[f]);
+    } else if (f === "unreadable") {
+      const why = fixes.get(`${h.repo}@${h.headSha}`)?.unreadable;
+      out.set(k, why ? `needs a person: ${why}` : TEXT[f]);
     } else if (f) out.set(k, TEXT[f]);
     else out.set(k, h.state === "red" && approvals.get(h.repo) ? "reading the failure" : null);
   }

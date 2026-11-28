@@ -1,10 +1,11 @@
-// A red default branch whose failure log GitHub does not serve yet: read again after the main CI poll, classified once readable,
-// read again hourly after the first hour while the head is the newest and red, and never counted toward the step's daily limit; a model reply that sorts nothing is given up after three.
+// A red default branch whose failure log GitHub does not serve yet: read again once per slot (each main CI poll, hourly after the
+// first hour) while the head is the newest and red, classified once readable, ended for a person when GitHub no longer has the log,
+// and never counted toward the step's daily limit; a model reply that sorts nothing is given up after three, a call without a reply never.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { mainFixClock, mainFixDueRepos, runMainFix, setMainFixApproval, type MainFixDeps } from "../src/mainfix/index.ts";
+import { autocraftText, mainFixClock, mainFixDueRepos, runMainFix, setMainFixApproval, type MainFixDeps } from "../src/mainfix/index.ts";
 import { POLL_EVERY_MS } from "../src/mainci/index.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "./helpers/raw-db.ts";
@@ -17,13 +18,13 @@ test("an unread failure log is read again after the main CI poll, then hourly, c
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "mainfix-unread-")), "t.db"));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: at(0), pipeline: 1 }));
   await setMainFixApproval(db, "op", "app", true);
-  const w = { readable: false, now: at(1), classified: 0, usable: true };
+  const w = { readable: false, gone: false, now: at(1), classified: 0, usable: true };
   const deps: MainFixDeps = {
     now: () => new Date(w.now),
     classify: async (_db, input) => { w.classified++; if (!w.usable) return null; return input.checks.map((c) => ({ check: c.check, verdict: "code" as const, reason: "a test fails" })); },
     gh: async (args) => {
       if (args[1]?.includes("check-runs")) return JSON.stringify({ check_runs: [{ name: "gate / test", status: "completed", conclusion: "failure", details_url: "https://github.com/storytold/app/actions/runs/11/job/1" }] });
-      if (args[0] === "run") { if (!w.readable) throw new Error("HTTP 404: Not Found"); return "test\tcargo test\tassertion failed\n"; }
+      if (args[0] === "run") { if (w.gone) throw new Error("HTTP 410: Gone"); if (!w.readable) throw new Error("HTTP 502: Bad Gateway"); return "test\tcargo test\tassertion failed\n"; }
       throw new Error(`unexpected call: ${args.join(" ")}`);
     },
     exec: async () => ({ code: 1, stdout: "", stderr: "unexpected" }),
@@ -46,6 +47,8 @@ test("an unread failure log is read again after the main CI poll, then hourly, c
   assert.equal((await due(1 + POLL_EVERY_MS / 60_000)).due, true);
   await run(4);
   assert.equal(handled, 0, "a reading that found no log uses none of the daily limit");
+  assert.equal((await due(4)).due, false, "not read again within the slot of the last read");
+  assert.equal((await due(5)).due, true, "read again in the next slot");
 
   w.readable = true;
   await run(6);
@@ -72,6 +75,12 @@ test("an unread failure log is read again after the main CI poll, then hourly, c
     await run(min);
   }
   assert.deepEqual([await rows("a3"), w.classified, handled, (await due(120)).due], [["nothing-to-do"], 4, 0, false]);
+
+  w.gone = true;
+  await head("a4", 130);
+  await run(131);
+  assert.deepEqual([await rows("a4"), (await due(135)).due], [["unreadable"], false], "a log GitHub no longer has ends the head");
+  assert.match(await autocraftText(db, "app", "a4", "red") ?? "", /^needs a person: the failure log cannot be read/);
 });
 
 test("a classification call that ended without a reply is no try: the head stays unclassified and the lane's clock moves when it is asked again", async () => {
@@ -94,17 +103,17 @@ test("a classification call that ended without a reply is no try: the head stays
   const due = async (min: number) => (await mainFixDueRepos(db, ["app"], { now: ms(min) })).length > 0;
   const rows = async () => await db.all(db.k.selectFrom("main_fixes").select(["state", "tries"]).where("head_sha", "=", "b1"));
 
-  // More lost calls than the unusable replies that give a head up.
-  for (const min of [1, 7, 13, 19]) {
+  // More lost calls than the unusable replies that give a head up, asked again after 5, 15 and 60 minutes, then hourly.
+  for (const [min, wait] of [[1, 5], [6, 15], [21, 60], [81, 60]] as const) {
     assert.equal(await due(min), true);
     const s = await run(min);
     assert.match(s.note ?? "", /not classified/, "the job says it did not finish its work");
     assert.deepEqual(await rows(), [{ state: "unclassified", tries: 0 }]);
-    assert.equal(await due(min + 1), false, "not asked again before its retry time");
-    assert.equal(await mainFixClock(db, ms(min + 1)), await mainFixClock(db, ms(min + 4)), "the clock holds still while it waits");
-    assert.notEqual(await mainFixClock(db, ms(min + 1)), await mainFixClock(db, ms(min + 6)), "and moves once the retry is due");
+    assert.equal(await due(min + wait - 1), false, "not asked again before its retry time");
+    assert.equal(await mainFixClock(db, ms(min + 1)), await mainFixClock(db, ms(min + wait - 1)), "the clock holds still while it waits");
+    assert.notEqual(await mainFixClock(db, ms(min + 1)), await mainFixClock(db, ms(min + wait)), "and moves once the retry is due");
   }
   w.lost = false;
-  await run(25);
+  await run(141);
   assert.deepEqual(await rows(), [{ state: "needs-fix", tries: 0 }]);
 });

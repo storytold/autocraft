@@ -108,20 +108,21 @@ export async function loadPatchSignature(db: Db, keys: KeySource): Promise<Map<R
 }
 
 /**
- * Main CI page text: the fix states and the lowest PR number of the fix PRs per default-branch head; key is `repo@headSha`.
- * 1 statement (heads as one JSON list).
+ * Main CI page text: the fix states, the lowest PR number of the fix PRs and why the failure log cannot be read (`unreadable`, the
+ * reason of such a row) per default-branch head; key is `repo@headSha`. 1 statement (heads as one JSON list).
  */
-export async function loadMainFixStates(db: Db, heads: { repo: string; headSha: string }[]): Promise<Map<string, { states: string[]; prNumber: number | null }>> {
-  const out = new Map<string, { states: string[]; prNumber: number | null }>();
+export async function loadMainFixStates(db: Db, heads: { repo: string; headSha: string }[]): Promise<Map<string, { states: string[]; prNumber: number | null; unreadable?: string }>> {
+  const out = new Map<string, { states: string[]; prNumber: number | null; unreadable?: string }>();
   if (!heads.length) return out;
   const k = queryDb(db).k as any;
   for (const part of kx.chunks(heads)) {
-    const rows = await rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "state", "pr_number"])
+    const rows = await rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "state", "reason", "pr_number"])
       .where(kx.tupleIn(db, ["repo", "head_sha"], part.map((h) => [h.repo, h.headSha]), ["text", "text"])).orderBy("repo").orderBy("head_sha").orderBy("check"));
     for (const r of rows) {
       const key = `${r.repo}@${r.head_sha}`;
       const e = out.get(key) ?? out.set(key, { states: [], prNumber: null }).get(key)!;
       if (!e.states.includes(r.state)) e.states.push(r.state);
+      if (r.state === "unreadable" && r.reason) e.unreadable = r.reason;
       if (r.state === "pr-opened" && r.pr_number !== null && (e.prNumber === null || Number(r.pr_number) < e.prNumber)) e.prNumber = Number(r.pr_number);
     }
   }

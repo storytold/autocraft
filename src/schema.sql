@@ -2014,16 +2014,20 @@ CREATE INDEX IF NOT EXISTS main_ci_repo_time ON main_ci(repo, committed_at);
 -- Red default branches (src/mainfix): one row per (repo, head, failing gate check), written once the check is sorted.
 -- verdict: flaky | infra | code (Haiku, from the failed step's log).
 -- state: rerun-requested (flaky: the failed jobs were rerun, written before the call; `tries` counts the requests GitHub refused
---   since the last one it took, and while it is above 0 the rerun is asked again after 5, 15, 60 minutes, then hourly) | rerun-passed (the head turned green) |
+--   since the last one it took, and a reason starting "the rerun was held back" one held back here; either is asked again after 5,
+--   15, 60 minutes, then hourly, and the third refusal by GitHub makes the row needs-fix) | rerun-passed (the head turned green) |
 --   issue-opening (infra: written before the issue is created) | issue-opened (issue_number; later red heads of the streak share it) |
 --   issue-failed (infra: GitHub refused the issue) | asked, declined (infra: rows of an earlier question) |
 --   needs-fix (code, or red again after a rerun: waits for the fix PR step) | nothing-to-do (nothing readable to act on, or main is
 --   green again, or an open PR already covers the failure: `#N` in the reason) | pr-opened (our fix PR: pr_number, pr_url) |
 --   fix-failed (no fix PR could be made: reason; a person takes over) | unread (check "(none)": the head's failure log could not be
---   read yet; written at the first read; read again once per main CI poll interval for an hour, then hourly, while the head is the
---   repo's newest and red; not a classification; at a classified head it holds a fix PR's re-read that found no log, timed the same) | unclassified (check "(none)":
---   `tries` model replies sorted none of the failed checks, the third makes the row nothing-to-do; a classification call that ended without
---   a reply is no try; asked again 5 minutes after the last). One attempt per row.
+--   read yet; each read writes updated_at; read again once per main CI poll interval for an hour, then hourly, while the head is the
+--   repo's newest and red; not a classification; at a classified head it holds a fix PR's re-read that found no log, timed the same) |
+--   unreadable (check "(none)": the log can never be read (gone from GitHub, no job of the check) or was not readable for a day;
+--   reason shown on the Main CI page; a person takes over) | unclassified (check "(none)": `tries` model replies sorted none of the
+--   failed checks, the third makes the row nothing-to-do, asked again 5 minutes after the last; classification calls that ended without
+--   a reply are no try, counted in the reason ("N calls without a reply in a row") and asked again after 5, 15, 60 minutes, then hourly).
+--   A "(none)" row that changes state starts again (created_at) and keeps its tries. One attempt per row.
 CREATE TABLE IF NOT EXISTS main_fixes (
   repo TEXT NOT NULL,
   head_sha TEXT NOT NULL,

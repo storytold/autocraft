@@ -892,7 +892,8 @@ async function rerunOf(identity: string, exec: Exec, repo: string, runId: number
   const fail = (why: string): { off: ExecResult } => ({ off: { code: 1, stdout: "", stderr: `run ${runId} not rerun: ${why}` } });
   try {
     const r = await exec("gh", ["api", `repos/${slugOf(repo)}/actions/runs/${runId}`], identity === "legacy" ? { inherit: true } : undefined);
-    if (r.code !== 0) return fail("the run could not be read");
+    // A read that never went out (no installation token) says so: the caller asks again instead of counting a refusal.
+    if (r.code !== 0) return r.sent === false ? { off: { ...fail(`the run could not be read: ${oneLine(r.stderr).slice(0, 120)}`).off, sent: false } } : fail("the run could not be read");
     const run = JSON.parse(r.stdout) as { head_sha?: string; run_attempt?: number; status?: string };
     if (run.head_sha !== head) return fail("it belongs to another commit");
     const attempt = typeof run.run_attempt === "number" ? run.run_attempt : 1;

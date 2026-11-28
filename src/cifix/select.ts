@@ -23,7 +23,7 @@ export async function selectCifix(db: Db, repo: string, run?: string | null, pla
     const c: CifixCandidate = {
       repo, number: f.number, head: action.head!, verdict: r?.verdict === "take-fix" ? "take-fix" : "take", reason: r?.reason ?? "", attempt: x.tries + 1,
       route: f.pushable ? "branch" : "comment", mayPush: pushPermission(f, "cifix").ok, mayComment: mayComment(f), rerun: x.rerunAt !== null, rerunAt: x.rerunAt,
-      mayRerun: cifixMayRerun(f), author: f.authorIsPipeline ? null : f.author,
+      rerunRuns: x.infraRuns, unreadSince: x.unreadSince, mayRerun: cifixMayRerun(f), author: f.authorIsPipeline ? null : f.author,
     };
     const bucket = action.params?.bucket;
     if (bucket === "work") out.work.push(c);

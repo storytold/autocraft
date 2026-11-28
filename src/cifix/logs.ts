@@ -164,11 +164,15 @@ export function parseJobLog(job: string, text: string, steps: readonly JobStep[]
 const IN_PROGRESS = /is still in progress/i;
 const firstLine = (e: unknown): string => String((e as Error).message ?? e).split("\n")[0]!.slice(0, 200);
 
+/** GitHub answers that it has no such log (expired, deleted): reading it again finds nothing either. */
+const GONE = /\bHTTP (?:404|410)\b/;
+
 /**
- * `unread`: a failed check's log could not be read (GitHub has no log for it yet, or no longer has it), so no CI fix try is made;
- * `failure` holds every failed check, those without a readable log with no steps.
+ * `unread`: a failed check's log could not be read, so no CI fix try is made; `failure` holds every failed check, those without a
+ * readable log with no steps. `permanent`: no later read can find it (GitHub no longer has the log, or the run's log holds no job of
+ * the check), so the caller ends the head instead of reading it again.
  */
-export type Reading = { kind: "failure"; failure: CiFailure } | { kind: "skip"; why: string } | { kind: "unread"; why: string; failure: CiFailure };
+export type Reading = { kind: "failure"; failure: CiFailure } | { kind: "skip"; why: string } | { kind: "unread"; why: string; failure: CiFailure; permanent: boolean };
 
 /**
  * Reads the failed checks of `head` and the failed steps' log tails. A head with no failed check run (a commit status
@@ -182,7 +186,8 @@ export async function readFailure(gh: Gh, repo: string, head: string, optional: 
   const logs = new Map<number, FailedStep[] | "jobs">();
   const checks: FailedCheck[] = [];
   let total = 0;
-  let unread: string | null = null;
+  let unread: string | null = null, gone: string | null = null;
+  const missed = (why: string, fallback: string): void => { if (GONE.test(why)) gone ??= `${fallback.replace("could not be read yet", "is gone")}: ${why}`; else unread ??= `${fallback}: ${why}`; };
   for (const r of runs) {
     let steps: FailedStep[] = [];
     if (r.runId !== null && r.conclusion === "failure") {
@@ -192,7 +197,7 @@ export async function readFailure(gh: Gh, repo: string, head: string, optional: 
         catch (e) {
           const why = firstLine(e);
           if (IN_PROGRESS.test(why)) logs.set(r.runId, "jobs");
-          else { logs.set(r.runId, []); unread ??= `the log of run ${r.runId} could not be read yet: ${why}`; }
+          else { logs.set(r.runId, []); missed(why, `the log of run ${r.runId} could not be read yet`); }
         }
       }
       const all = logs.get(r.runId)!;
@@ -203,7 +208,7 @@ export async function readFailure(gh: Gh, repo: string, head: string, optional: 
           let text: string | null = null;
           // `gh api` refuses output with terminal escape sequences unless told to pass them; parseJobLog strips them.
           try { text = await gh(["api", `${job}/logs`, "--allow-escape-sequences"]); }
-          catch (e) { unread ??= `the log of job ${r.checkId} of run ${r.runId} could not be read yet: ${firstLine(e)}`; }
+          catch (e) { missed(firstLine(e), `the log of job ${r.checkId} of run ${r.runId} could not be read yet`); }
           if (text !== null) {
             // Without the job's step list the log is still cut at its last error, so a failed read of it is not an unread log.
             let listed: JobStep[] = [];
@@ -215,7 +220,9 @@ export async function readFailure(gh: Gh, repo: string, head: string, optional: 
         // A run holds several checks (jobs); a step belongs to the check whose name ends with its job's name.
         steps = all.filter((s) => r.name === s.job || r.name.endsWith(` / ${s.job}`));
         if (!steps.length && runs.filter((x) => x.runId === r.runId).length === 1) steps = all;
-        if (!steps.length) unread ??= `the log of run ${r.runId} has no failed step of ${r.name} yet`;
+        // The run has ended (its whole log was served) and no job in it matches the check: a later read finds the same.
+        if (!steps.length && all.length) gone ??= `the log of run ${r.runId} has no failed step of ${r.name}`;
+        else if (!steps.length) unread ??= `the log of run ${r.runId} has no failed step of ${r.name} yet`;
       }
     }
     const kept: FailedStep[] = [];
@@ -230,5 +237,6 @@ export async function readFailure(gh: Gh, repo: string, head: string, optional: 
     }
     checks.push({ name: r.name, conclusion: r.conclusion, runId: r.runId, completedAt: r.completedAt, steps: kept });
   }
-  return unread === null ? { kind: "failure", failure: { head, checks } } : { kind: "unread", why: unread, failure: { head, checks } };
+  if (gone !== null) return { kind: "unread", why: gone, failure: { head, checks }, permanent: true };
+  return unread === null ? { kind: "failure", failure: { head, checks } } : { kind: "unread", why: unread, failure: { head, checks }, permanent: false };
 }

@@ -455,13 +455,14 @@ test("nothing is posted on a quiet pull request: no ask, and no patch as a comme
   }
 });
 
-test("a failure log that stays unreadable is read again hourly after the backoffs and is never a counted try", async () => {
+test("a failure log that stays unreadable is read again hourly after the backoffs, never a counted try until GitHub no longer has it", async () => {
   const at = Date.parse(T2);
   mock.timers.enable({ apis: ["Date"], now: at });
   try {
     const w = world();
     const gh = w.deps.gh;
-    w.deps.gh = async (args) => { if (args[0] === "run") throw new Error("HTTP 404: Not Found"); return await gh(args); };
+    let gone = false;
+    w.deps.gh = async (args) => { if (args[0] === "run") throw new Error(gone ? "HTTP 410: Gone" : "HTTP 502: Bad Gateway"); return await gh(args); };
     w.deps.now = () => new Date();
     const db = await fresh(w.head);
     const states = async () => (await db.all(db.k.selectFrom("ci_fixes").select("state").orderBy(rowid("ci_fixes")))).map((r) => r.state);
@@ -472,7 +473,10 @@ test("a failure log that stays unreadable is read again hourly after the backoff
     await run(190);
     assert.equal((await states()).length, 5, "not read again within the hour");
     await run(205);
-    assert.deepEqual(await states(), Array(6).fill("unread"), "no failed try, however long the log stays unreadable");
+    assert.deepEqual(await states(), Array(6).fill("unread"), "no failed try while the log may still be served");
+    gone = true;
+    await run(266);
+    assert.deepEqual(await states(), [...Array(6).fill("unread"), "failed"], "a log GitHub no longer has is a failed try");
     assert.equal(w.log.filter((l) => l === "model").length, 0);
   } finally {
     mock.timers.reset();

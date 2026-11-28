@@ -338,8 +338,8 @@ export type PrFacts = {
     lastTry: string | null;
     /** A patch was posted as a comment at the head (an `asked` row that is not the plain ask to the contributor). */
     askedPatch: boolean;
-    /** Reads of the head's failure log that found none to read yet, and when the next read is due (ms) while it waits. */
-    unreads: number; readAgainAt?: number;
+    /** Reads of the head's failure log that found none to read yet, the first one's time, and when the next read is due (ms) while it waits. */
+    unreads: number; unreadSince: string | null; readAgainAt?: number;
     /** A required check at the head has not finished yet: its run's log cannot be read and its failed jobs cannot be rerun before it ends. */
     running: boolean;
     /** The required checks that fail at the head. */
