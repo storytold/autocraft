@@ -387,6 +387,24 @@ test("a hold that plans no fix and gave no recommendation comes back with its fi
   assert.deepEqual(await stale(), before, "the review of the head is not asked for again");
 });
 
+test("a hold with fixes on a PR that conflicts with its base branch recommends no review of the same head", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  await w.pr(2, { label: "feature" });
+  assert.equal((await runCommand(db, actor, "dashboard", { parsed: parse("review"), items: [{ repo: "app", number: 2 }] })).items[0]!.outcome, "run");
+  await db.run(db.k.updateTable("main.items").set({ base_ref: "main", mergeable: "CONFLICTING" }).where("number", "=", 2));
+  await db.run(db.k.updateTable("main.pr_checks").set({ mergeable: "CONFLICTING" }).where("number", "=", 2));
+  await db.run(db.k.insertInto("main.opus_reviews").values({
+    repo: "app", number: 2, head_oid: "sha2", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r",
+    fixes: JSON.stringify([{ file: "src/a.rs", change: "x", title: "wire in the group editor" }]),
+    workflow: JSON.stringify({ outside_purpose: null, recommendation: null }),
+  }));
+  await advanceWorkflows(db);
+  const rec = (await liveWorkflow(db, "app", 2))!.rec!;
+  assert.ok(/conflicts/.test(rec.text) && !/again/i.test(rec.text), rec.text);
+  assert.deepEqual([rec.again, rec.parts.fix], [undefined, []]);
+});
+
 test("a recommendation's fix numbers follow the stored fixes, not the model's list", () => {
   const reply = JSON.stringify({
     ref: "app#1", verdict: "take-fix", sure: true, reason: "two fixes", risks: [],

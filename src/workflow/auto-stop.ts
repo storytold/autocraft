@@ -16,7 +16,7 @@
 // (recheckRuleRow): a PR the rule no longer takes, or one it would now merge, ends it as `superseded` too; a stop that changed comes back
 // with its new recommendation; a wait that clears by itself (red CI, a conflict, a review due again) leaves it as it is. Once a person answered or ended a row, or started any workflow on the PR, the rule starts none.
 import type { WaitCode } from "../core/codes.ts";
-import { conflictPath, decidePr, onAutoPath } from "../core/decide.ts";
+import { decidePr, onAutoPath } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import type { Plan, PlanState, PrFacts } from "../core/plan.ts";
 import { PREMERGE_DEFECT_REASON } from "../core/rules.ts";
@@ -28,7 +28,7 @@ import { loadStartedRefs, recordEvents, saveWorkflows, startWorkflows } from "..
 import type { Db } from "../db/index.ts";
 import { questionFor } from "./ask.ts";
 import { premergePartsOf } from "./premerge.ts";
-import { planOf, premergeFirst, ruleStopped } from "./recommend.ts";
+import { conflictOf, planOf, premergeFirst, ruleStopped } from "./recommend.ts";
 import { RULE_STARTER, WEIGHT_NORMAL, type ItemWorkflow, type PlanPart, type Recommendation, type WorkflowState } from "./types.ts";
 
 /** The waits of a stop that only a person's judgement settles. */
@@ -52,8 +52,8 @@ export function autoStop(f: PrFacts, p: Plan, reviews: readonly ReviewRow[], pre
   if (code === null || p.waitKind !== "person" || !JUDGEMENT_WAITS.includes(code) || p.reasons.some((r) => PASSING.has(r))) return null;
   const review = reviews.find((r) => r.head === f.head) ?? null;
   const fixes = review ? planOf(review.fixes, []) : [];
-  const view = review ? { verdict: review.verdict, sure: review.sure, rec: review.workflow?.recommendation ?? null } : null;
-  const conflict = f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
+  const view = review ? { verdict: review.verdict, sure: review.sure, rec: review.workflow?.recommendation ?? null, finding: review.public_summary, blockedBy: review.blocked_by } : null;
+  const conflict = conflictOf(f);
   const q = questionFor(f, p, { approved: false, review: view, parts: fixes, conflict });
   if (!q) return null;
   const defects = p.reasons.includes(PREMERGE_DEFECT_REASON) ? premergePartsOf(premerge, fixes, false) : null;

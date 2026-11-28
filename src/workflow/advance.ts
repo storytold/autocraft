@@ -26,7 +26,7 @@ import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
 import { AUTHOR_ROUNDS_PER_DAY, CIFIX_NO_LOG_REASON } from "../core/rules.ts";
 import type { StopCode } from "../core/codes.ts";
-import { conflictPath, decidePr, premergeStopLifts } from "../core/decide.ts";
+import { decidePr, premergeStopLifts } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { loadItemFacts } from "../core/issue-facts.ts";
 import { acceptedHeads, agreedAt, approvedHead, chainsOwn, isAccepted, LOCKFILE, neededReview, type RecordedPush } from "../core/evidence.ts";
@@ -48,7 +48,7 @@ import { blockWorkflow } from "./block.ts";
 import { checkedOtherHead, codeOf, detectBlocker, fixesFirst, LANE_STEPS, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
 import { again as fixAgain, EffectError, type Instruction } from "./effects.ts";
 import { premergeParts } from "./premerge.ts";
-import { afterPush, atBlocker, droppedOf, onConflict, planOf, textFor, type ReviewView } from "./recommend.ts";
+import { afterPush, atBlocker, conflictOf, droppedOf, onConflict, planOf, textFor, type ReviewView } from "./recommend.ts";
 import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
 import { issueRecommendation, recommendsImplement } from "./issue-review.ts";
 import { listText, ROUND_STEP, stepsFor, type StepName } from "./status.ts";
@@ -602,7 +602,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const says = review ?? (needed && read?.head === head && read.reviewHold?.kind === "failed" && read.reviewHold.until === undefined ? stored : null);
   const plan: PlanPart[] = says ? planOf(says.fixes, w.plan) : w.plan;
   if (!sameJson(plan, w.plan)) patch.plan = plan;
-  const view: ReviewView | null = says ? { verdict: says.verdict, sure: says.sure, rec: says.workflow?.recommendation ?? null, finding: says.public_summary } : null;
+  const view: ReviewView | null = says ? { verdict: says.verdict, sure: says.sure, rec: says.workflow?.recommendation ?? null, finding: says.public_summary, blockedBy: says.blocked_by } : null;
 
   // The step: the merge leg's state for the merge part, else where the review and its fixes are.
   const leg = legRow?.state ?? null;
@@ -629,7 +629,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const approved = w.approvedBy !== null;
   // A question that went leaves the workflow running, as the facts do not say yet.
   const f = read?.may.workflow && w.state !== w0.state ? { ...read, may: { ...read.may, workflow: { ...read.may.workflow, state: w.state, blocker: null } }, ...(retried ? { mergeWaiting: false, mergeLacksAccess: false } : {}) } : read;
-  const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
+  const conflict = f?.head === head ? conflictOf(f) : null;
   const stopped = approved ? endedLeg(pass, w, since, resumed) : null;
   // Once CI is green at the head, a leg that red CI ended says nothing any more: a new one starts.
   // Nor does a leg the pre-merge review's defects ended, once a fix-up round repairs them at the head.

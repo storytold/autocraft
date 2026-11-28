@@ -302,7 +302,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     return out("ambiguous", reply(line), wf?.id ?? null);
   }
   // Runs the open question's answer, as against a word that ends the work whatever was asked.
-  const accepts = r.kind === "run" && r.run.answers && (r.run.end === null || (r.run.end === "close" && !says(input.parsed, "close")));
+  const accepts = r.kind === "run" && r.run.answers && (r.run.end === null || (r.run.end === "close" && !says(input.parsed, "close")) || (r.run.end === "backlog" && !says(input.parsed, "backlog")));
   const read = accepts && wf?.recAt ? input.asked?.({ ref: key, workflow: wf }) : null;
   if (read && Date.parse(wf!.recAt!) > Date.parse(read)) {
     const why = t("The question changed after you read it. A new question follows. {question}", { question: recommendationLine(wf!.rec) ?? "" });

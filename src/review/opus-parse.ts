@@ -9,6 +9,7 @@ import { safePath } from "../fixup/patch.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { dropMarkup } from "./public-text.ts";
 import { BLOCKING_CLASSES, blockingOf, type Blocking } from "../premerge/types.ts";
+import type { ReviewRecommendation } from "../data/review/types.ts";
 
 export type EarlierOpus = { head: string; verdict: string; sure: boolean; reason: string; fixes: { file: string; change: string }[] };
 
@@ -241,11 +242,7 @@ export function parsePublic(v: unknown, drop: ReadonlySet<string> = new Set()): 
  * `blocking`: whether it stops the merge of a PR a maintainer approved (class null: it does not, and is filed as a follow-up instead of made); absent counts as blocking.
  */
 export type ReviewFix = { file: string; change: string; title?: string; major?: boolean; blocking?: Blocking };
-/**
- * What the review recommends: one sentence, and what a yes runs (the fixes it makes, by number from 1; whether it then merges or closes;
- * `backlog`: it keeps the item open with no work planned, for a hold whose next step is a person's or the author's).
- */
-export type ReviewRecommendation = { text: string; fix: number[]; merge: boolean; close: boolean; backlog?: true };
+export type { ReviewRecommendation };
 /** Lines the change has outside what the pull request sets out to do, and the review's one recommendation. */
 export type ReviewWorkflow = {
   /** `checked`: the note passed the reference and reply checks when it was parsed; a note stored without it is never filed. */
@@ -279,7 +276,7 @@ export function parseReviewWorkflow(r: Record<string, unknown>, partOf: (n: numb
   const named = text && Array.isArray(x!.fix) ? [...new Set(x!.fix)] : [];
   const fix = named.map((n) => (Number.isInteger(n) ? partOf(n as number) : null));
   const close = !!text && x!.close === true && !named.length;
-  const backlog = !!text && !close && x!.backlog === true && !named.length && x!.merge !== true;
+  const backlog = !!text && !close && x!.backlog === true && !named.length;
   const merge = !!text && !close && !backlog && x!.merge === true;
   const usable = keepRec && !!text && fix.every((n) => n !== null) && (fix.length > 0 || merge || close || backlog);
   const exact = fix.every((n, i) => n === named[i]);
