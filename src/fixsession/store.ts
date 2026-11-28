@@ -3,7 +3,7 @@
 // idle for a day, or it has had its turns. Turn writers join the caller's transaction, so a turn row goes in with its queued call.
 import type { Db } from "../db/index.ts";
 import {
-  addFixTurn, endFixSessions, ensureFixSession, loadFixSessions, loadFixTurns, loadFixTurnsById, loadLastFixTurn, loadLiveFixSession, loadLiveFixSessions,
+  addFixTurn, endFixSessions, ensureFixSession, loadFixSessionGate, loadFixSessions, loadFixTurns, loadFixTurnsById, loadLastFixTurn, loadLiveFixSessions,
   settleFixTurn, updateFixSession,
   type EndedFixSession, type FixSession, type FixSessionEnd, type FixSessionKind, type FixSessionPatch, type FixTurn, type FixTurnOutcome, type FixTurnSettle, type NewFixTurn,
 } from "../data/fixsession/index.ts";
@@ -24,17 +24,24 @@ export function expiredReason(s: FixSession, nowMs: number): "idle" | "turns" | 
   return null;
 }
 
+/** ensureSession's answer when a person ended the item's workflow: no session is made, and a live one was ended (`ended`). */
+export type SessionRefused = { refused: "stopped"; ended: EndedFixSession | null };
+
 /**
- * The item's live session, or a new one. A live session past its idle time or turn cap is ended first and replaced, so a step
- * never continues one the sweep would end. `ended` names the replaced session, whose workspace the caller ends.
+ * The item's live session, or a new one. A live session past its idle time or turn cap is ended first and replaced, unless a turn
+ * of it is still queued (its call may still run, and the step adopts it). `ended` names the replaced session, whose workspace the
+ * caller ends. A continued session is touched, so its idle time starts again; its head and workspace move only with updateSession.
+ * An item whose workflow a person ended (stopped, closed, backlog) gets no session, so the sweep and a step never end and make one
+ * in turn: a live one is ended with reason `stopped`, and the answer is a SessionRefused.
  */
 export async function ensureSession(db: Db, kind: FixSessionKind, repo: string, number: number, o: { model?: string | null; head?: string | null; workspaceId?: number | null; nowMs?: number } = {}):
-  Promise<{ session: FixSession; created: boolean; ended: EndedFixSession | null }> {
+  Promise<{ session: FixSession; created: boolean; ended: EndedFixSession | null } | SessionRefused> {
   const nowMs = o.nowMs ?? Date.now(), at = iso(nowMs);
   return await db.write(async () => {
-    const live = await loadLiveFixSession(db, kind, repo, number);
-    const why = live ? expiredReason(live, nowMs) : null;
-    const ended = live && why ? (await endFixSessions(db, [live.id], why, at))[0] ?? null : null;
+    const g = await loadFixSessionGate(db, kind, repo, number);
+    if (g.stopped) return { refused: "stopped" as const, ended: g.live ? (await endFixSessions(db, [g.live.id], "stopped", at))[0] ?? null : null };
+    const why = g.live && !g.queuedTurn ? expiredReason(g.live, nowMs) : null;
+    const ended = g.live && why ? (await endFixSessions(db, [g.live.id], why, at))[0] ?? null : null;
     const r = await ensureFixSession(db, { kind, repo, number, model: o.model, head: o.head, workspaceId: o.workspaceId }, at);
     return { ...r, ended };
   });
@@ -47,14 +54,14 @@ export async function endSession(db: Db, id: number, reason: FixSessionEnd, nowM
 
 /**
  * Ends the live sessions that are done: the PR was closed or merged (a PR the mirror has not read yet is not), a person ended the
- * PR's workflow, the session has been idle for SESSION_IDLE_MS, or it has had more than SESSION_MAX_TURNS turns. Returns the ended
- * sessions, whose workspaces the caller ends.
+ * PR's workflow, or, while no turn of it is queued, the session has been idle for SESSION_IDLE_MS or has had more than
+ * SESSION_MAX_TURNS turns. Returns the ended sessions, whose workspaces the caller ends.
  */
 export async function endIdle(db: Db, nowMs: number = Date.now()): Promise<EndedFixSession[]> {
   const live = await loadLiveFixSessions(db);
   const byReason = new Map<FixSessionEnd, number[]>();
   for (const l of live) {
-    const why = l.closed ? "closed" : l.stopped ? "stopped" : expiredReason(l.session, nowMs);
+    const why = l.closed ? "closed" : l.stopped ? "stopped" : l.queuedTurn ? null : expiredReason(l.session, nowMs);
     if (why) (byReason.get(why) ?? byReason.set(why, []).get(why)!).push(l.session.id);
   }
   if (!byReason.size) return [];

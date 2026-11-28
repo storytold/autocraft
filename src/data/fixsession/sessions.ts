@@ -45,9 +45,27 @@ export async function loadFixSessions(db: Db, ids: readonly number[]): Promise<M
   return out;
 }
 
+/** A queued turn of the session `id` (a column reference): its call may still run. */
+const queuedTurn = (eb: kx.AnyEb, id: string) =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.fix_session_turns as qt").select(eb.lit(1).as("one")).where("qt.session_id", "=", kx.ref<number>(id)).where("qt.outcome", "=", "queued"));
+
+/**
+ * What a step reads before it continues or starts an item's session: the live session, whether it has a queued turn, and whether a
+ * person ended the item's workflow (stopped, closed or backlog; security sessions never are). 2 statements.
+ */
+export async function loadFixSessionGate(db: Db, kind: FixSessionKind, repo: string, number: number): Promise<{ live: FixSession | null; queuedTurn: boolean; stopped: boolean }> {
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom("main.fix_sessions as fs").selectAll("fs").select((eb) => queuedTurn(eb, "fs.id").as("queued_turn"))
+    .where("fs.kind", "=", kind).where("fs.repo", "=", repo).where("fs.number", "=", number).where("fs.state", "=", "live"));
+  const stopped = kind === "pr" && Number((await q.get(q.k.selectNoFrom((eb) => eb.case().when(endedByPerson(eb, eb.val(repo), eb.val(number))).then(1).else(0).end().as("stopped"))))?.stopped) === 1;
+  return { live: r ? sessionOf(r) : null, queuedTurn: !!r && Number((r as Raw).queued_turn) === 1, stopped };
+}
+
 /**
  * The item's live session, or a new one when it has none. The insert skips on the live unique index, so two writers get the same
- * row. 1 statement, 2 when the item already had a live session.
+ * row. A live session is only touched (`updated_at`), so its idle time starts again: `head`, `workspaceId` and `model` apply only to
+ * a new one, and a caller that reseeds a live one's workspace follows with updateFixSession. 1 statement, 2 when the item already had
+ * a live session.
  */
 export async function ensureFixSession(db: Db, s: NewFixSession, at: string): Promise<{ session: FixSession; created: boolean }> {
   const q = queryDb(db);
@@ -56,9 +74,10 @@ export async function ensureFixSession(db: Db, s: NewFixSession, at: string): Pr
       kind: s.kind, repo: s.repo, number: s.number, model: s.model ?? null, head: s.head ?? null, workspace_id: s.workspaceId ?? null, created_at: at, updated_at: at,
     }).onConflict((oc) => oc.columns(["kind", "repo", "number"]).where("state", "=", kx.literal("live")).doNothing()).returningAll());
     if (made) return { session: sessionOf(made), created: true };
-    const live = await loadLiveFixSession(db, s.kind, s.repo, s.number);
+    const live = await q.get(q.k.updateTable("main.fix_sessions").set({ updated_at: at })
+      .where("kind", "=", s.kind).where("repo", "=", s.repo).where("number", "=", s.number).where("state", "=", "live").returningAll());
     if (!live) throw new Error(`fix session of ${s.repo}#${s.number} (${s.kind}) neither inserted nor live`);
-    return { session: live, created: false };
+    return { session: sessionOf(live), created: false };
   });
 }
 
@@ -88,24 +107,29 @@ export async function endFixSessions(db: Db, ids: readonly number[], reason: Fix
 
 /**
  * Live sessions with what the sweep reads of each: `closed` when the PR is in the mirror and not open, `stopped` when a person ended
- * its workflow (stopped, closed or backlog; for an implementation PR also its issue's). Security sessions read neither. 1 statement.
+ * its workflow (stopped, closed or backlog; for an implementation PR also its issue's), `queuedTurn` when a turn's call may still run.
+ * Security sessions read neither closed nor stopped. 1 statement.
  */
-export async function loadLiveFixSessions(db: Db): Promise<{ session: FixSession; closed: boolean; stopped: boolean }[]> {
+export async function loadLiveFixSessions(db: Db): Promise<{ session: FixSession; closed: boolean; stopped: boolean; queuedTurn: boolean }[]> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.fix_sessions as fs").selectAll("fs").select((eb) => [
     eb.case().when("fs.kind", "<>", "pr").then(0).when(itemNotMirrored(eb, "fs.repo", "fs.number")).then(0).when(openItem(eb, "fs.repo", "fs.number")).then(0).else(1).end().as("pr_closed"),
     eb.case().when("fs.kind", "<>", "pr").then(0).when(endedByPerson(eb, "fs.repo", "fs.number")).then(1).else(0).end().as("wf_stopped"),
+    eb.case().when(queuedTurn(eb, "fs.id")).then(1).else(0).end().as("queued_turn"),
   ]).where("fs.state", "=", "live").orderBy("fs.id"));
-  return rows.map((r: Raw) => ({ session: sessionOf(r), closed: Number(r.pr_closed) === 1, stopped: Number(r.wf_stopped) === 1 }));
+  return rows.map((r: Raw) => ({ session: sessionOf(r), closed: Number(r.pr_closed) === 1, stopped: Number(r.wf_stopped) === 1, queuedTurn: Number(r.queued_turn) === 1 }));
 }
 
-/** Inserts a queued turn. 1 statement. */
+/** Inserts a queued turn and touches its session (`updated_at`), so the session's idle time starts again. 2 statements. */
 export async function addFixTurn(db: Db, t: NewFixTurn, at: string): Promise<number> {
   const q = queryDb(db);
-  const r = await db.write(async () => await q.get(q.k.insertInto("main.fix_session_turns").values({
-    session_id: t.sessionId, step: t.step, purpose: t.purpose, head: t.head ?? null, call_id: t.callId ?? null, parent_id: t.parentId ?? null, created_at: at,
-  }).returning("id")));
-  return Number(r!.id);
+  return await db.write(async () => {
+    const r = await q.get(q.k.insertInto("main.fix_session_turns").values({
+      session_id: t.sessionId, step: t.step, purpose: t.purpose, head: t.head ?? null, call_id: t.callId ?? null, parent_id: t.parentId ?? null, created_at: at,
+    }).returning("id"));
+    await q.run(q.k.updateTable("main.fix_sessions").set({ updated_at: at }).where("id", "=", t.sessionId));
+    return Number(r!.id);
+  });
 }
 
 /**
@@ -113,6 +137,7 @@ export async function addFixTurn(db: Db, t: NewFixTurn, at: string): Promise<num
  * after a restart is settled once. Returns whether it moved. 1 statement.
  */
 export async function settleFixTurn(db: Db, id: number, s: FixTurnSettle, at: string, from: readonly FixTurnOutcome[] = ["queued"]): Promise<boolean> {
+  if (!from.length) return false;
   const q = queryDb(db);
   const r = await db.write(async () => await q.get(q.k.updateTable("main.fix_session_turns").set({
     outcome: s.outcome, settled_at: at,

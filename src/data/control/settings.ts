@@ -38,7 +38,7 @@ const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is
 const MENTION = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*$/;
 const REPO_LIST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 export type FixSessionsSetting = { steps: FixStep[]; repos: string[] | null };
-const stepParallelText =(raw: string | undefined): string => {
+const stepParallelText = (raw: string | undefined): string => {
   if (raw === "none") return raw;
   const n = Number(raw);
   return Number.isInteger(n) && n >= 1 && n <= 1000 ? String(n) : "1";
