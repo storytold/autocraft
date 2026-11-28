@@ -255,6 +255,8 @@ export function atBlocker(found: Found, _review: ReviewView | null, plan: readon
       return go(t("Review the new commits, then merge."), { newCommits: true, ...(mergeEntry ? { again: "review" } : {}) });
     }
     case "failed-twice": {
+      // Jobs of the step that failed in a row at this commit, before they recorded a try: a yes goes on, and the step runs again.
+      if (typeof p.lane === "string") return go(t("Its {step} failed {n} times in a row at this commit. Run it again, then merge.", { step: String(p.step), n: Number(p.count ?? 0) }), { goes: "on" });
       if (p.step === "fix-up") {
         // Minor parts are filed as follow-ups on an approved PR, never fixed (ask.ts withoutFixes).
         const fix = planned(plan).filter((n) => !plan.find((x) => x.n === n)?.minor);

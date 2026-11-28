@@ -103,6 +103,36 @@ test("an approved PR that failed alone in a merge batch stays at its question un
   w.close();
 });
 
+test("four jobs of an approved PR's own lane that fail in a row at its head ask once, and close once one runs through; four that an outage failed ask nothing", async () => {
+  for (const error of ["stopped: ran past its deadline of 30 min", "connect ECONNRESET 10.0.0.1:443"]) {
+    const w = await approvedReview();
+    const db = w.db;
+    const job = (id: number, state: string, err: string | null) => db.run(db.k.insertInto("main.jobs").values({ id, step: "opus-review", params: JSON.stringify({ repo: "app", number: 1, lane: "approved", limit: 10, head: "sha1" }), requested_by: "pipeline", requested_at: later(), state, started_at: later(), ended_at: later(), error: err, repo: "app" }));
+    // A job queued before jobs named their head never counts.
+    await db.run(db.k.insertInto("main.jobs").values({ id: 900, step: "opus-review", params: JSON.stringify({ repo: "app", number: 1, lane: "approved", limit: 10 }), requested_by: "pipeline", requested_at: later(), state: "failed", started_at: later(), ended_at: later(), error, repo: "app" }));
+    for (const id of [901, 902, 903]) await job(id, "failed", error);
+    await advanceWorkflows(db);
+    assert.equal((await liveWorkflow(db, "app", 1))!.state, "running", `${error}: three count`);
+    await job(904, "failed", error);
+    await advanceWorkflows(db);
+    await advanceWorkflows(db);
+    const wf = (await liveWorkflow(db, "app", 1))!;
+    const blocked = (await eventsOf(db, "app", 1)).filter((e) => e.kind === "blocked").length;
+    if (error.includes("ECONNRESET")) {
+      assert.equal(wf.state, "running", "an outage is no failure of the item");
+      assert.equal(blocked, 0);
+    } else {
+      assert.deepEqual([wf.state, wf.blocker, wf.rec?.cause?.code], ["blocked", "failed-twice", "lane-failed"]);
+      assert.equal(blocked, 1, "asked once");
+      await pause();
+      await job(905, "done", null);
+      await advanceWorkflows(db);
+      assert.deepEqual([(await liveWorkflow(db, "app", 1))!.state, (await liveWorkflow(db, "app", 1))!.approvedBy], ["running", MAINT]);
+    }
+    w.close();
+  }
+});
+
 test("a merge leg a fix-up try ended stops the approved PR while that try stands; once it is superseded the question closes by itself and a new leg starts", async () => {
   const w = await approvedReview();
   const db = w.db;

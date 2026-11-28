@@ -25,11 +25,13 @@ export type ParamDef =
   | (Base & { kind: "enum"; options: string[]; default?: string })
   | (Base & { kind: "repo" })                                        // a tracked repo
   | (Base & { kind: "int"; min: number; max: number; default?: number })
-  | (Base & { kind: "run-id"; default?: string });                   // RUN_ID below
+  | (Base & { kind: "run-id"; default?: string })                    // RUN_ID below
+  | (Base & { kind: "sha" });                                         // a commit id, HEAD_SHA below
 
 export type Params = Record<string, string | number>;
 
 export const RUN_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
+const HEAD_SHA = /^[0-9a-f]{7,64}$/;
 
 /**
  * The `lane` of a job of a per-item step (Review, Pre-merge review, Fix-up, Fix) that works one PR (`number`): `approved` for a PR a
@@ -40,6 +42,8 @@ export const APPROVED_LANE = "approved";
 export const ITEM_LANE = "item";
 const LANE_PARAM: ParamDef = { name: "lane", label: "Lane", kind: "enum", options: [APPROVED_LANE, ITEM_LANE], help: "approved: the pull request (number), which a person started or approved for merge; item: the pull request, which nobody started; empty: every pull request nobody started" };
 const PR_PARAM: ParamDef = { name: "number", label: "Pull request", kind: "int", min: 1, max: 1_000_000_000, help: "only this pull request" };
+/** The PR's head when the planner queued a per-item job, so its failures count per head (src/workflow/advance.ts laneStops); the job works the head the PR has when it runs. */
+const HEAD_PARAM: ParamDef = { name: "head", label: "Head", kind: "sha", cliOnly: true, help: "the pull request's head commit when the job was queued" };
 
 /** The `number` param of a job of a per-item step: the one PR it works. */
 const onlyPr = (params: Params): { number?: number } => (typeof params.number === "number" ? { number: params.number } : {});
@@ -384,6 +388,7 @@ export const STEPS: StepDef[] = [
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 5, help: "pull requests to fix up in this job" },
       LANE_PARAM,
       PR_PARAM,
+      HEAD_PARAM,
     ],
     // No repo check: whether we may push to a PR is its own (src/core/may.ts), and the planner plans only what is approved.
     run: async (ctx) => {
@@ -705,6 +710,7 @@ export const STEPS: StepDef[] = [
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 10, help: "pull requests to review in this job" },
       LANE_PARAM,
       PR_PARAM,
+      HEAD_PARAM,
     ],
     run: async (ctx) => {
       const { runOpusReview } = await import("../review/opus.ts");
@@ -759,6 +765,7 @@ export const STEPS: StepDef[] = [
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 10, help: "pull requests to review in this job" },
       LANE_PARAM,
       PR_PARAM,
+      HEAD_PARAM,
     ],
     run: async (ctx) => {
       const { runPremerge } = await import("../premerge/review.ts");
@@ -997,6 +1004,7 @@ export const STEPS: StepDef[] = [
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 5, help: "pull requests to work on in this job" },
       LANE_PARAM,
       PR_PARAM,
+      HEAD_PARAM,
     ],
     // No repo check: whether we may push to a PR is its own (src/core/may.ts), and the planner plans only what is approved.
     run: async (ctx) => {
@@ -1181,6 +1189,10 @@ export function validateParams(step: StepDef, raw: unknown, trackedRepos: string
         break;
       case "run-id":
         if (typeof v !== "string" || !RUN_ID.test(v)) throw new ParamError(`${p.label} must be lowercase letters, digits and dashes (at most 48)`);
+        out[p.name] = v;
+        break;
+      case "sha":
+        if (typeof v !== "string" || !HEAD_SHA.test(v)) throw new ParamError(`${p.label} must be a commit id`);
         out[p.name] = v;
         break;
     }

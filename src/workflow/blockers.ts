@@ -15,6 +15,8 @@ export type BlockerFacts = {
   authorPush: { from: string | null; to: string } | null;
   /** Steps whose tries failed since `since`, with how many failed. */
   failures: readonly { step: string; count: number }[];
+  /** Jobs of the PR's own lane that failed in a row at its head, per job step (`lane`) and as the step is named; LANE_FAILS of them stop it. */
+  laneFailures?: readonly { step: string; lane: string; count: number }[];
   /** The merge leg (the pre-approved merge) stopped or was cancelled since `since`, with its reason, and its code where the row has one. */
   leg: EndedLeg | null;
 };
@@ -32,6 +34,8 @@ export const LANE_STEPS: Record<string, string> = { "opus-review": "review", pre
 
 /** A step failing this many times stops the item (blocker 3). */
 export const FAILED_TWICE = 2;
+/** Failed jobs in a row of one step of the PR's own lane at one head that stop the item (advance.ts laneFailures). */
+export const LANE_FAILS = 4;
 
 const PREMERGE_STOP = /pre-merge review found/;
 
@@ -76,10 +80,12 @@ export function legBlocker(leg: EndedLeg): Found {
  * approved comes back with its recommendation anyway, so only a failing step stops it early.
  */
 export function detectBlocker(f: BlockerFacts): Found | null {
-  const failed = f.failures.find((x) => x.count >= FAILED_TWICE);
-  if (!f.approved) return failed ? { blocker: "failed-twice", params: { step: failed.step, count: failed.count } } : null;
+  const tried = f.failures.find((x) => x.count >= FAILED_TWICE), jobs = f.laneFailures?.find((x) => x.count >= LANE_FAILS);
+  const failed: Found | null = tried ? { blocker: "failed-twice", params: { step: tried.step, count: tried.count } }
+    : jobs ? { blocker: "failed-twice", params: { step: jobs.step, count: jobs.count, lane: jobs.lane } } : null;
+  if (!f.approved) return failed;
   if (f.authorPush) return { blocker: "author-commits", params: { from: f.authorPush.from, to: f.authorPush.to } };
-  if (failed) return { blocker: "failed-twice", params: { step: failed.step, count: failed.count } };
+  if (failed) return failed;
   if (f.leg && !fixesFirst(f.leg)) return legBlocker(f.leg);
   return null;
 }

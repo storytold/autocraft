@@ -21,7 +21,7 @@ import { loadReviewRows, type PremergeRow, type ReviewRow } from "../data/review
 import { adoptLegs, fixupRequestsAt, listWorkflows, loadFixupRequests, moveFixupRequests, loadActions, loadGoOnAt, loadLegs, moveWorkflows, recordEvents, retryActions, saveWorkflows, type GoneOn, type Preapproval, type WorkflowPatch, type WorkflowRead } from "../data/workflow/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
-import { saveWorkflowFailures, type WorkflowFailure } from "../data/jobs/index.ts";
+import { CALL_WAIT_LIMIT, loadLaneRuns, RUNNER_STOPPED, saveWorkflowFailures, type LaneRun, type WorkflowFailure } from "../data/jobs/index.ts";
 import { isFenced } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
@@ -50,7 +50,7 @@ import { causeWent, fixable, itemQuestion, legStop, questionFor, type CauseNow, 
 import { asksNobody } from "./asked.ts";
 import { headKey, premergeOf, recheckRuleRow, startAutoStops } from "./auto-stop.ts";
 import { blockWorkflow } from "./block.ts";
-import { checkedOtherHead, codeOf, detectBlocker, FAILED_TWICE, fixesFirst, fixUnmade, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
+import { checkedOtherHead, codeOf, detectBlocker, FAILED_TWICE, fixesFirst, LANE_STEPS, fixUnmade, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
 import { again as fixAgain, authorAskFor, EffectError, queueAuthorAsk, type Instruction } from "./effects.ts";
 import { premergeParts } from "./premerge.ts";
 import { afterPush, atBlocker, conflictOf, droppedOf, onConflict, planOf, textFor, withoutAuthor, type ReviewView } from "./recommend.ts";
@@ -117,6 +117,8 @@ type Pass = {
   issues: Map<string, ItemFacts>;
   /** The items the questions of held reviews wait for (cause blocked-by). */
   blockers: BlockerReads;
+  /** The ended jobs of each PR's approved lane, oldest first. */
+  laneRuns: Map<string, LaneRun[]>;
   /** Tells the runner to pass again at a time a question's cause goes by itself (ms). */
   wake: (at: number) => void;
   /** The newest review row of each issue review workflow, by workflow id. */
@@ -166,16 +168,43 @@ function failures(pass: Pass, ref: string, since: string, head: string, facts: P
 }
 
 /**
+ * Lane job failures that say nothing about the item: AutoCraft's own (the runner stopped or restarted, no Task Runner took the model call
+ * in time, the GitHub write pacing held it back) and its services' (an HTTP 5xx answer, a network error). They neither count nor end a
+ * streak.
+ */
+const INFRA_ERROR = /\bHTTP\/?[\d.]* ?5\d\d\b|\b5\d\d (?:Bad Gateway|Service Unavailable|Gateway Timeout|Internal Server Error)\b|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|ENOTFOUND|EAI_AGAIN/i;
+const notTheItems = (error: string | null): boolean =>
+  !!error && (error === RUNNER_STOPPED || error === CALL_WAIT_LIMIT || error.startsWith("write paced:") || INFRA_ERROR.test(error));
+
+/**
+ * Failed jobs in a row of each step of the PR's own lane at `head` since `since` (detectBlocker stops at LANE_FAILS). Decision: a job
+ * counts only at the head its params name (steps.ts HEAD_PARAM); one queued before jobs named it counts as no head and is never counted.
+ * A stop past the job's deadline or for no progress counts, as it often comes from the item's own size; the failures of notTheItems do
+ * not. A job that ran through ends the streak.
+ */
+function laneFailures(pass: Pass, ref: string, since: string, head: string): { step: string; lane: string; count: number }[] {
+  const runs = (pass.laneRuns.get(ref) ?? []).filter((r) => r.head === head && r.endedAt > since);
+  return Object.entries(LANE_STEPS).map(([lane, step]) => {
+    let count = 0;
+    for (const r of runs) if (r.step === lane) count = r.state === "done" ? 0 : notTheItems(r.error) ? count : count + 1;
+    return { step, lane, count };
+  });
+}
+
+/**
  * Why a stop at a step that failed twice (detectBlocker) closes by itself: its tries, counted again, are fewer now (a try was superseded, or
  * was a job's failure that counts no more). Null while they still stop it, and for every other stop.
  */
 function recounted(pass: Pass, w: ItemWorkflow, ref: string, head: string, f: PrFacts): string | null {
   const p = w.blockerParams;
-  if (w.blocker !== "failed-twice" || typeof p?.step !== "string" || typeof p.count !== "number" || p.reason !== undefined) return null;
+  if (w.blocker !== "failed-twice" || typeof p?.step !== "string" || typeof p.count !== "number" || p.reason !== undefined || p.lane !== undefined) return null;
   const since = pass.goOn.get(w.id)?.since ?? w.startedAt;
   const count = failures(pass, ref, since, head, f).find((x) => x.step === p.step)?.count ?? 0;
   return count >= FAILED_TWICE ? null : t("The {step} has not failed twice since, so the work goes on.", { step: p.step });
 }
+
+/** The name under which a question's cause closes by itself at most once per head (ItemWorkflow.closedWaits): a plan wait, or a lane step's failures; null for the causes that settle for good. */
+const closeKey = (c: Recommendation["cause"]): string | null => (c?.code === "wait" ? c.wait : c?.code === "lane-failed" ? `lane:${c.lane}` : null);
 
 /** The facts as the item's plan reads them once its question closed. */
 const asRunning = (f: PrFacts): PrFacts => (f.may.workflow ? { ...f, may: { ...f.may, workflow: { ...f.may.workflow, state: "running", blocker: null } } } : f);
@@ -348,8 +377,12 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const ruleHeads = live.flatMap((w) => { const f = unansweredRuleRow(w) ? facts.get(key(w.repo, w.number)) : undefined; return f && f.head === w.recHead ? [f] : []; });
     const premerge = ruleHeads.length ? await premergeOf(db, ruleHeads) : new Map<string, PremergeRow>();
     const blockers = await loadBlockerReads(db, live.flatMap((w) => (w.rec?.cause?.code === "blocked-by" ? w.rec.cause.items : [])));
+    // The approved lane's jobs since the earliest point any workflow counts its failures from.
+    const earliest = due.map((w) => goOn.get(w.id)?.since ?? w.startedAt).sort()[0] ?? at;
+    const laneRuns = new Map<string, LaneRun[]>();
+    for (const r of await loadLaneRuns(db, prRefs, earliest, Object.keys(LANE_STEPS))) (laneRuns.get(key(r.repo, r.number)) ?? laneRuns.set(key(r.repo, r.number), []).get(key(r.repo, r.number))!).push(r);
     const pass: Pass = {
-      at, items, implement, goOn, legs, reviews, patches, moves, facts, premerge, issues: issueFacts, blockers, issueReviews, own, wake,
+      at, items, implement, goOn, legs, reviews, patches, moves, facts, premerge, issues: issueFacts, blockers, laneRuns, issueReviews, own, wake,
     };
     const writes: Writes = { workflows: [], adopt: [], stored: new Set(), closed: [], asks: [], carry: [] };
     const moved: Moved[] = [];
@@ -550,8 +583,8 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   /** The question made at `head`: one that follows another the author pushed past says so. */
   const ask = (rec: Recommendation, head: string): Recommendation => {
     // A wait whose question closed by itself at this head once comes back as a question that only an answer closes, so it cannot close and come back in a loop.
-    const c = rec.cause, closed = w.closedWaits;
-    const kept = c?.code === "wait" && closed?.head === head && closed.waits.includes(c.wait) ? (({ cause: _, ...r }) => r)(rec) : rec;
+    const k = closeKey(rec.cause), closed = w.closedWaits;
+    const kept = k !== null && closed?.head === head && closed.waits.includes(k) ? (({ cause: _, ...r }) => r)(rec) : rec;
     return w.recHead !== null && !ownChain(pass, key(w.repo, target!), w.recHead, head) ? afterPush(kept) : kept;
   };
   /** The attempt's open question, as the issue's recommendation; a stuck attempt of an approved issue is a step that failed twice. */
@@ -572,8 +605,8 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     const waiting = gone ? [...(await loadActions(db, { workflowIds: [w.id], kinds: ["merge"], states: ["waiting-permission"] })).values()].flat().filter((a) => a.by.toLowerCase() === w.approvedBy!.toLowerCase()) : [];
     retried = waiting.length > 0;
     writes.closed.push({ w, line: t("The question closed without an answer: {why} {rec}", { why, rec: w.rec!.text }), at, retry: waiting.map((a) => a.id) });
-    const c = w.rec?.cause;
-    const closedWaits = c?.code === "wait" && head !== null ? { head, waits: [...(w.closedWaits?.head === head ? w.closedWaits.waits : []), c.wait] } : w.closedWaits;
+    const k = closeKey(w.rec?.cause);
+    const closedWaits = k !== null && head !== null ? { head, waits: [...(w.closedWaits?.head === head ? w.closedWaits.waits : []), k] } : w.closedWaits;
     const on = { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, closedWaits } as const satisfies WorkflowPatch;
     Object.assign(base, on);
     w = { ...w, ...on };
@@ -669,6 +702,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
         return (questionFor(r, plan, { approved, review: null, parts: w.plan, conflict: conflictOf(r) })?.params.code as string | undefined) ?? null;
       },
       blocks: (items) => openFrom(pass.blockers, items).length > 0,
+      laneDone: (lane, at) => (pass.laneRuns.get(ref) ?? []).some((r) => r.step === lane && r.head === at && r.state === "done" && r.endedAt > (w.recAt ?? "")),
     };
     const went = head && w.recHead !== null && now?.head === head ? causeWent(w.rec?.cause, now, approved, causeNow) ?? recounted(pass, w, ref, head, now) : null;
     if (went === null) return settle(base);
@@ -801,7 +835,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   // A leg a check of an earlier head stopped says nothing about a head the workflow accepted since (a review round took in the author's
   // commits, or our pushes followed): a new leg checks this one.
   if (ended && !authorPush && checkedOtherHead(ended, head)) ended = null;
-  const found = detectBlocker({ entry: w.entry, approved, authorPush, failures: failures(pass, ref, since, head, f), leg: ended });
+  const found = detectBlocker({ entry: w.entry, approved, authorPush, failures: failures(pass, ref, since, head, f), laneFailures: laneFailures(pass, ref, since, head), leg: ended });
   if (found) {
     // A CI fix that failed twice names what fails and what it tried last.
     if (found.blocker === "failed-twice" && found.params.step === "CI fix" && f?.head === head && f.cifix) {
@@ -810,6 +844,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     }
     const shown: WorkflowPatch = impl === "theirs" ? { baseHead: head } : {};
     let rec = blockerRec(found, plan);
+    if (typeof found.params.lane === "string") rec = { ...rec, cause: { code: "lane-failed", lane: found.params.lane, head } };
     // A leg that ended on a fix-up try, or on a refused merge, comes back once that try is superseded or the refusal no longer stands.
     if (!rec.cause && ended && found.params.reason === ended.reason) {
       const tried = fixUnmade(ended) && ended.fix != null ? tryState(pass, ref, ended.fix) : null;

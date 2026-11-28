@@ -6,8 +6,8 @@ import { itemsStartedSince, limitResets } from "./cross.ts";
 import { loadHeldLeaseKeys } from "./leases.ts";
 import { RUNNER_STOPPED } from "./fragments.ts";
 import { loadLiveJobs } from "./queue.ts";
-import { nowIso, numberOf, perItemOf } from "./sql.ts";
-import type { EndedJob, FpRecord, JobState, LaneInputs, LaneStateKind, LaneStatePut, LaneStateRow, StoredLane, StoredLaneItems, StreakRow, WorkflowFailure } from "./types.ts";
+import { approvedOf, nowIso, numberOf, perItemOf } from "./sql.ts";
+import type { EndedJob, FpRecord, JobState, LaneInputs, LaneRun, LaneStateKind, LaneStatePut, LaneStateRow, StoredLane, StoredLaneItems, StreakRow, WorkflowFailure } from "./types.ts";
 
 const PIPELINE_USER = "pipeline";
 /** Pipeline jobs of the last this-many ids are looked at for failure streaks; older failures no longer delay anything. */
@@ -152,6 +152,23 @@ export async function claimMark(db: Db, name: string, nowMs: number, minGapMs: n
   const won = await q.all(q.k.insertInto("lane_state").values({ kind: "mark", step: name, repo: "", value: at, job_id: null, at })
     .onConflict((oc) => oc.columns(["kind", "step", "repo"]).doUpdateSet(kx.excluded(["value", "at"])).where("lane_state.value", "<=", threshold)).returning("step"));
   return won.length > 0;
+}
+
+/** The pipeline's ended jobs of the approved lane (one PR each) of `steps` for the PRs `refs` that ended after `since`, oldest first. Which count as the item's own failures is the workflow's call (src/workflow/advance.ts laneStops). */
+export async function loadLaneRuns(db: Db, refs: readonly { repo: string; number: number }[], since: string, steps: readonly string[]): Promise<LaneRun[]> {
+  if (!refs.length || !steps.length) return [];
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("jobs").select(["repo", "step", "id", "state", "ended_at", "error"]).select(() => [numberOf(db).as("number"), kx.jsonText(db, "params", "$.head").as("head")])
+    .where("requested_by", "=", PIPELINE_USER).where("ended_at", ">", since).where("state", "in", ["done", "failed"])
+    .where((eb) => kx.inList(db, eb.ref("step"), steps)).where((eb) => kx.inList(db, eb.ref("repo"), [...new Set(refs.map((r) => r.repo))]))
+    .where((eb) => approvedOf(db, eb))
+    .orderBy("id"));
+  const wanted = new Set(refs.map((r) => `${r.repo}#${r.number}`));
+  return rows.flatMap((r) => {
+    const number = r.number === null ? NaN : Number(r.number);
+    return r.repo !== null && r.ended_at !== null && wanted.has(`${r.repo}#${number}`)
+      ? [{ repo: r.repo, number, step: r.step, id: Number(r.id), state: r.state as LaneRun["state"], endedAt: r.ended_at, head: (r.head as string | null) ?? null, error: r.error }] : [];
+  });
 }
 
 /** The lane_state mark of the live workflows whose check keeps failing (src/workflow/advance.ts), as the runner stored them last. */

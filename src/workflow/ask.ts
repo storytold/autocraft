@@ -256,6 +256,8 @@ export type CauseNow = {
   waitNow?: () => string | null | undefined;
   /** Whether any of the items (`repo#number`) still blocks the review. */
   blocks?: (items: readonly string[]) => boolean | undefined;
+  /** Whether a job of the lane step `lane` ran through at `head` after the question was asked. */
+  laneDone?: (lane: string, head: string) => boolean | undefined;
 };
 
 /** Why a question whose cause clears without an answer closes: what the facts at its head say now. Null while the cause stands, or while they do not say. */
@@ -294,6 +296,9 @@ export function causeWent(cause: Recommendation["cause"], f: PrFacts | ItemFacts
     case "merge-refused": return !refusalStuck(f) ? t("What refused the merge changed since, so it can be tried again.") : null;
     case "conflict": return f.mergeable === "MERGEABLE" ? t("It no longer conflicts with its base branch.") : null;
     case "blocked-by": return now.blocks?.(cause.items) === false ? t("The items its review waited for no longer block it.") : null;
+    case "lane-failed":
+      if ("head" in f && f.head !== null && f.head !== cause.head) return t("It has a new commit, so the step runs there.");
+      return now.laneDone?.(cause.lane, cause.head) === true ? t("The step ran through at this commit since.") : null;
   }
 }
 

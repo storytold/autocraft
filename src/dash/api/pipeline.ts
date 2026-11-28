@@ -71,13 +71,15 @@ const wrap = async <T>(f: () => Promise<T | Promise<T>>): Promise<T> => {
 };
 
 function wireParams(s: StepDef, repos: string[]): StepParam[] {
-  return s.params.filter((p) => !p.cliOnly).map((p): StepParam => {
+  return s.params.filter((p) => !p.cliOnly).flatMap((p): StepParam[] => {
     const base = { name: p.name, label: p.label, help: p.help, required: !!p.required };
     switch (p.kind) {
-      case "enum": return { ...base, kind: "enum", options: p.options, default: p.default };
-      case "repo": return { ...base, kind: "repo", options: repos };
-      case "int": return { ...base, kind: "int", min: p.min, max: p.max, default: p.default };
-      case "run-id": return { ...base, kind: "run-id", default: p.default };
+      case "enum": return [{ ...base, kind: "enum", options: p.options, default: p.default }];
+      case "repo": return [{ ...base, kind: "repo", options: repos }];
+      case "int": return [{ ...base, kind: "int", min: p.min, max: p.max, default: p.default }];
+      case "run-id": return [{ ...base, kind: "run-id", default: p.default }];
+      // A commit id is set by the planner, never typed in the form.
+      case "sha": return [];
     }
   });
 }

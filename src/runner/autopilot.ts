@@ -444,8 +444,9 @@ async function cifixRepos(db: Db, ctx: PlanCtx, buckets: string[]): Promise<stri
 }
 
 /** A PR due the work of a per-item step (src/runner/concurrency.ts); `approved`: a person started or approved it (ownLane). */
-type LaneDue = { repo: string; number: number; approved: boolean };
-const laneDue = (p: { facts: PrFacts }): LaneDue => ({ repo: p.facts.repo, number: p.facts.number, approved: ownLane(p.facts) });
+/** `head`: the PR's head now, which the job's params name (steps.ts HEAD_PARAM). */
+type LaneDue = { repo: string; number: number; approved: boolean; head?: string | null };
+const laneDue = (p: { facts: PrFacts }): LaneDue => ({ repo: p.facts.repo, number: p.facts.number, approved: ownLane(p.facts), head: p.facts.head });
 
 /**
  * The jobs of a per-item step, one per due PR of `repos`: first those a person started or approved, in `due` order
@@ -461,7 +462,7 @@ export function laneCandidates(step: string, repos: string[], due: readonly Lane
   const turns: LaneDue[] = [];
   const queues = repos.filter((r, i) => items.has(r) && repos.indexOf(r) === i).map((r) => items.get(r)!);
   for (let k = 0; queues.some((q) => k < q.length); k++) for (const q of queues) if (k < q.length) turns.push(q[k]!);
-  const job = (d: LaneDue, lane: string): Candidate => make({ repo: d.repo, number: d.number, lane }, [{ repo: d.repo, number: d.number }]);
+  const job = (d: LaneDue, lane: string): Candidate => make({ repo: d.repo, number: d.number, lane, ...(d.head ? { head: d.head } : {}) }, [{ repo: d.repo, number: d.number }]);
   return [...approved.map((d) => job(d, APPROVED_LANE)), ...turns.map((d) => job(d, ITEM_LANE))];
 }
 
@@ -673,10 +674,11 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       // Each planned action is judged on its own PR: a person's fix-up runs whatever the repo approves.
       const due: LaneDue[] = [], failed: unknown[] = [];
       const approved = new Set(plans.prs.filter((p) => ownLane(p.facts)).map((p) => `${p.facts.repo}#${p.facts.number}`));
+      const heads = new Map(plans.prs.map((p) => [`${p.facts.repo}#${p.facts.number}`, p.facts.head] as const));
       for (const repo of ctx.tracked) {
         try {
           const sel = await selectFixups(db, repo, ctx.run, plans, "pipeline");
-          for (const c of [...sel.fix, ...sel.lint, ...sel.conflictMerge, ...sel.ask, ...sel.conflictAsk]) due.push({ repo, number: c.number, approved: approved.has(`${repo}#${c.number}`) });
+          for (const c of [...sel.fix, ...sel.lint, ...sel.conflictMerge, ...sel.ask, ...sel.conflictAsk]) due.push({ repo, number: c.number, approved: approved.has(`${repo}#${c.number}`), head: heads.get(`${repo}#${c.number}`) ?? null });
         } catch (e) {
           // A repo whose selection fails leaves the lane to the others; a failure of every repo is the lane's own.
           failed.push(e);
