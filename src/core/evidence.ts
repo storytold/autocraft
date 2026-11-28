@@ -12,8 +12,10 @@ export type PushWhat = "fix-up" | "CI fix" | "base merge" | "implementation sess
  * A recorded push. `lines`: the changed lines of the push; null when they were not recorded. `landed`: git reported the push
  * done, so the branch had its commit; one a crash came before landed as well when a head shows its commit. `small`: it changed
  * nothing of the PR that a model wrote (a base merge that left the PR's own diff the same, an autorepin), so it owes no review.
+ * `asked`: a fix-up a person asked for, which the patch check judged against their instructions: the work they approved, so on a
+ * merge-queue entry it owes no review (the review after the merge still reads it).
  */
-export type RecordedPush = OwnPush & { what: PushWhat; at: string; lines: number | null; landed: boolean; small: boolean };
+export type RecordedPush = OwnPush & { what: PushWhat; at: string; lines: number | null; landed: boolean; small: boolean; asked?: true };
 
 /** A row of `push_outcomes` that names the head it was made on. */
 export type OutcomePush = OwnPush & { action: string; at: string };
@@ -36,7 +38,8 @@ export function ownPushes(made: readonly MadePush[], edges: readonly PushEdge[],
   for (const e of edges) {
     const was = out.get(key(e));
     const small = e.kind === "conflict" && e.state === "merged" && e.ownDiff === "same";
-    if (!was || small) out.set(key(e), { from: e.from, to: e.to, what: WHAT[e.kind], at: e.at, lines: null, landed: false, small });
+    const asked = e.kind === "fixup" && e.source === "operator";
+    if (!was || small) out.set(key(e), { from: e.from, to: e.to, what: WHAT[e.kind], at: e.at, lines: null, landed: false, small, ...(asked ? { asked } : {}) });
   }
   for (const o of outcomes) {
     const was = out.get(key(o));
@@ -93,7 +96,8 @@ export type HeadReview = { head: string; at: string };
  * The review a started PR's head merges after, null when it needs none; `from`: only one made after this counts (null: any). Every entry
  * needs one but the merge entry, which needs:
  * - the one a person asked for;
- * - one at every push of ours since its start that changed more than a checked merge does, or at a later head of ours. No answer ends that.
+ * - one at every push of ours since its start that changed more than a checked merge does, or at a later head of ours, but a person's own
+ *   checked fix-up (`asked`). No answer ends that.
  *   A push under someone else's commits (its chain to the head is cut) needs one at what followed them;
  * - then what such a review says, until the person has been asked about it.
  */
@@ -104,7 +108,7 @@ export function neededReview(w: GoneOnPr, pushes: readonly RecordedPush[], head:
   let from = w.since, owed = false, reviewed = w.reviewAskedAt !== null || w.since > w.startedAt;
   const owe = (at: string): void => { owed = true; if (at > from) from = at; };
   if (w.reviewAskedAt !== null && !made.some((r) => r.at > w.reviewAskedAt!)) owe(w.reviewAskedAt);
-  for (const p of codePushes(pushes, reached, w.startedAt)) {
+  for (const p of codePushes(pushes, reached, w.startedAt).filter((x) => !x.asked)) {
     const on = reached.has(p.to);
     reviewed = true;
     // A head on the push was reviewed after it, whatever the times say; one that followed someone else's commits goes by them.

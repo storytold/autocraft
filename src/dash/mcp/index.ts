@@ -4,6 +4,7 @@
 // handlers as the token's user, so roles, repo visibility, rate limits and audit rows are the
 // same as on the dashboard: viewers read; operators and maintainers with a command token also
 // send commands, which the act rule (write access on the repo) checks as on GitHub.
+import { COMMAND_TEXT_MAX } from "../../workflow/types.ts";
 import { githubItemUrl, itemPath } from "../../../web/src/lib/links.ts";
 import { frame } from "../../itemtools/server/tools.ts";
 import * as modelQueue from "../api/model-queue.ts";
@@ -122,7 +123,7 @@ function args(raw: unknown, spec: Record<string, Kind>, required: string[] = [])
     const s = t === "repo" ? v.slice(v.lastIndexOf("/") + 1) : v;
     if (t === "repo" && !REPO.test(s)) throw new BadArgs(`"${k}" must be a repository name such as "photocraft"`);
     if ((t === "id" || t === "cursor" || t === "item") && (s.length > 300 || /[\0-\x1f]/.test(s))) throw new BadArgs(`"${k}" is not valid`);
-    if (t === "text" && s.length > 4000) throw new BadArgs(`"${k}" is longer than 4000 characters`);
+    if (t === "text" && s.length > COMMAND_TEXT_MAX) throw new BadArgs(`"${k}" is ${s.length} characters, over the ${COMMAND_TEXT_MAX} characters a command takes`);
     out[k] = s;
   }
   return out;
@@ -203,7 +204,7 @@ export const WORKFLOW_COMMAND_TOOLS = [
       type: "object", additionalProperties: false, required: ["item", "text"],
       properties: {
         item: { type: "string", description: ITEM_HELP },
-        text: { type: "string", maxLength: 4000, description: "The command in words, e.g. \"fix-up and merge\", \"urgent\", \"yes\", \"drop 2\". Send only what your user chose." },
+        text: { type: "string", maxLength: COMMAND_TEXT_MAX, description: "The command in words, e.g. \"fix-up and merge\", \"urgent\", \"yes\", \"drop 2\". Send only what your user chose." },
         asked: { type: "string", maxLength: 40, description: "With an answer to a recommendation: the workflow.open.asked that came with the recommendation your user read. An answer to one that was replaced since runs nothing." },
       },
     },

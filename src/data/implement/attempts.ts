@@ -4,6 +4,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { addAudit } from "../control/index.ts";
 import { COLUMN_TYPE, ENDED, IMPL_COLS, columnsOf, json, ofRow, type ImplRow } from "./rows.ts";
+import { COMMAND_TEXT_MAX } from "../../workflow/types.ts";
 import { reviseCopy, type AttemptGuidance, type AttemptStep, type Implementation, type ImplementationState, type RefKey, type RetryRound, type ReviseRound, type StartAttempt } from "./types.ts";
 
 const now = () => new Date().toISOString();
@@ -100,7 +101,7 @@ export async function restartAttempt(db: Db, o: { id: number; reason: string; qu
     if (!old) throw new Error(`attempt ${o.id} is not open`);
     const next = (await insertAttempts(db, [{ repo: old.repo, number: Number(old.number), queuedBy: o.queuedBy, textHash: o.textHash }], at))[0];
     if (!next) throw new Error(`${old.repo}#${old.number} has a current attempt`);
-    if (o.guidance) await q.run(q.k.insertInto("main.implementation_rounds").values({ implementation_id: next.id, kind: "guidance", call_id: null, result: json({ by: o.guidance.by, text: o.guidance.text.slice(0, 4000) }), at }));
+    if (o.guidance) await q.run(q.k.insertInto("main.implementation_rounds").values({ implementation_id: next.id, kind: "guidance", call_id: null, result: json({ by: o.guidance.by, text: o.guidance.text.slice(0, COMMAND_TEXT_MAX) }), at }));
     return next;
   });
 }
@@ -121,11 +122,11 @@ export async function retryRevision(db: Db, o: { id: number; guidance?: AttemptG
     const moved = await q.run(q.k.updateTable("main.implementations").set({ state: "revising", updated_at: at }).where("id", "=", o.id).where("state", "=", "stuck"));
     if (moved.changes !== 1) return false;
     const note = o.guidance?.text.trim();
-    const message = note ? `${was.message}\n\nA maintainer's note on this revision:\n<guidance>\n${note.slice(0, 4000).replace(/</g, "\\u003c")}\n</guidance>` : was.message;
+    const message = note ? `${was.message}\n\nA maintainer's note on this revision:\n<guidance>\n${note.slice(0, COMMAND_TEXT_MAX).replace(/</g, "\\u003c")}\n</guidance>` : was.message;
     const retry: RetryRound = { cause: "try-again", detail: null, runner: false, from: "stuck", to: "revising", reset: true, person: true, by: o.by ?? o.guidance?.by ?? null };
     await q.run(q.k.insertInto("main.implementation_rounds").values([
       { implementation_id: o.id, kind: "retry", call_id: null, result: json(retry), at },
-      ...(note ? [{ implementation_id: o.id, kind: "guidance", call_id: null, result: json({ by: o.guidance!.by, text: note.slice(0, 4000) }), at }] : []),
+      ...(note ? [{ implementation_id: o.id, kind: "guidance", call_id: null, result: json({ by: o.guidance!.by, text: note.slice(0, COMMAND_TEXT_MAX) }), at }] : []),
       { implementation_id: o.id, kind: "revise", call_id: null, result: json({ ...reviseCopy(was), message } satisfies ReviseRound), at },
     ]));
     return true;

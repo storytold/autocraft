@@ -17,6 +17,7 @@
 //   at the blocker of the code with its recommendation. A leg whose people no longer count on the repo waits; the workflow asks.
 // Every transition is a pure reaction to rows other steps write (fixups, opus_reviews, pr_checks, items, merges), evaluated by
 // advancePreapprovals on each runner tick: no timer and no wait of its own; the one time comparison (the start of the mirror's last sync against the push) is made when the tick runs anyway. Merging itself is never called from here.
+import { COMMAND_TEXT_MAX } from "../workflow/types.ts";
 import type { Preapproval } from "../../web/src/api/types.ts";
 import { systemBlock } from "../conversations/store.ts";
 import type { Params, Stop, StopCode } from "../core/codes.ts";
@@ -64,7 +65,8 @@ import { asSentence, clipText } from "../prose.ts";
 import { INPUT_TOPICS } from "../runner/autopilot.ts";
 
 const ACTOR = "pipeline";
-export const INSTRUCTIONS_MAX = 1500;
+/** The longest instructions a fix-up takes: the longest command text (COMMAND_TEXT_MAX). */
+export const INSTRUCTIONS_MAX = COMMAND_TEXT_MAX;
 const ACTIVE: readonly LegState[] = ["fixup", "review", "ci", "queued"];
 /** Plan states in which the PR gets no review, so a pre-approved merge cannot go on. A label never stops one: a live pre-approval lifts the label gate (src/core/decide.ts); a draft waits to be marked ready. */
 const NOT_REVIEWABLE = ["out-of-scope", "integration", "backlog"];

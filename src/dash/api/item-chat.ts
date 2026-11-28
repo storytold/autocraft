@@ -4,6 +4,7 @@
 // Queued jobs and model calls about the item come with the one line that says what holds each back (src/runner/why-queued.ts), and
 // the reader's Task Runner with the take or release it may send (src/core/item-runner.ts).
 // A fixed number of set-based reads per request: the stamp's wave, then the trace, the thread and the merge leg's wait.
+import { COMMAND_TEXT_MAX } from "../../workflow/types.ts";
 import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatQueued, ChatRunner, ChatShot, ChatVia, ItemChat, ItemChatState, ItemChatUnchanged, ItemConversation } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
 import { loadArtifacts } from "../../data/build/index.ts";
@@ -336,8 +337,8 @@ async function shotsOf(db: Db, c: Ctx): Promise<Map<string, ChatShot[]>> {
   return out;
 }
 
-/** Longer text is no message anyone types (the command box's limit). */
-const TEXT_MAX = 4000;
+/** The command box's limit: the longest command text any surface takes. */
+const TEXT_MAX = COMMAND_TEXT_MAX;
 
 /**
  * POST /api/items/:repo/:n/chat { conversation, text }: what a person writes in the item's chat, run as the command box runs it
@@ -353,7 +354,7 @@ export async function postChat(db: Db, req: Req): Promise<{ chat: ItemChat; line
   if (!await canTalk(db, req.user, repo)) throw new HttpError(403, "only operators, and maintainers with write access to the repository, write in the chat");
   const b = req.json && typeof req.json === "object" && !Array.isArray(req.json) ? (req.json as Record<string, unknown>) : {};
   if (typeof b.text !== "string" || !b.text.trim()) throw new HttpError(400, "text is required");
-  if (b.text.length > TEXT_MAX) throw new HttpError(400, `text is over ${TEXT_MAX} characters`);
+  if (b.text.length > TEXT_MAX) throw new HttpError(400, t("The message is {chars} characters; the most AutoCraft takes is {max}.", { chars: b.text.length.toLocaleString("en-US"), max: TEXT_MAX.toLocaleString("en-US") }));
   const text = b.text;
   if (!(await loadItems(db, [{ repo, number: n }], "ref")).has(`${repo}#${n}`)) throw new HttpError(404, `${repo}#${n} is not an item AutoCraft has read`);
   const mainId = await ensureMainConversation(db, repo, n, req.user.login);

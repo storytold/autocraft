@@ -11,6 +11,8 @@ import { textHash } from "../core/open-prs.ts";
 import { permKey, standings } from "../data/access/index.ts";
 import { loadGuidanceTurns } from "../data/conversations/index.ts";
 import { startAttempts } from "../data/implement/index.ts";
+import { COMMAND_TEXT_MAX } from "../workflow/types.ts";
+import { startGuidance } from "./start-guidance.ts";
 import { loadComments, loadItems } from "../data/mirror/index.ts";
 import { ensurePrompts } from "../data/prompts/index.ts";
 import { ghComment } from "../github/write.ts";
@@ -170,8 +172,8 @@ const cut = (s: string | null | undefined, n: number): string => (s ?? "").slice
  */
 export async function planInput(db: Db, o: { repo: string; number: number; sha: string; asked: PlanAsked[]; assume: boolean; rounds: readonly ImplementationRound[] | null }): Promise<PlanInput> {
   const ref = `${o.repo}#${o.number}` as const, key = [{ repo: o.repo, number: o.number }];
-  const [items, allComments, turns, own] = await db.together(() => Promise.all([
-    loadItems(db, key, "text"), loadComments(db, key, { order: "created", body: true }), loadGuidanceTurns(db, [ref]), ownLoginTest(db, o.repo),
+  const [items, allComments, turns, own, started] = await db.together(() => Promise.all([
+    loadItems(db, key, "text"), loadComments(db, key, { order: "created", body: true }), loadGuidanceTurns(db, [ref]), ownLoginTest(db, o.repo), startGuidance(db, o.repo, o.number),
   ]));
   const it = items.get(ref);
   if (!it) throw new Error(`${ref} is not in the mirror`);
@@ -190,10 +192,11 @@ export async function planInput(db: Db, o: { repo: string; number: number; sha: 
     if (t.kind === "maintainer" && stands.get(permKey(t.login, o.repo)) === "no") continue;
     guidance.push({ from: t.kind as PlanGuidance["from"], login: t.login, at: t.at, text: cut(t.body, PLAN_GUIDANCE_CHARS) });
   }
-  if (o.rounds !== null) {
-    for (const g of attemptGuidance(o.rounds)) guidance.push({ from: "try-again", login: g.by ?? "", at: g.at, text: cut(g.text, PLAN_GUIDANCE_CHARS) });
-    guidance.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
-  }
+  // The instructions the implementation was started with, and a Try again note, are a person's own words for it: given whole (the
+  // command's own bound); thread posts are cut.
+  if (started) guidance.push({ from: "try-again", login: started.by, at: started.at, text: cut(started.text, COMMAND_TEXT_MAX) });
+  if (o.rounds !== null) for (const g of attemptGuidance(o.rounds)) guidance.push({ from: "try-again", login: g.by ?? "", at: g.at, text: cut(g.text, COMMAND_TEXT_MAX) });
+  guidance.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
   return {
     ref, repo: o.repo, sha: o.sha, issue, guidance: guidance.slice(-PLAN_GUIDANCE_MAX), asked: o.asked, assume: o.assume, workflow: true,
   };

@@ -155,10 +155,12 @@ export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: bool
   const { db, by, item } = c;
   const merges = approved || entry === "merge";
   if (merges) await checkMerges(c);
+  // The instructions of an implement start are read from its started event (src/implement/start-guidance.ts).
   if (entry === "implement") return { write: nothing };
   // An issue's review is a request row the issue review step takes (src/issuereview).
   if (item.kind === "issue") return { write: (id) => queueIssueReviews(db, [{ workflowId: id, repo: item.repo, number: item.number, by, at: c.at, thenImplement: !!o.thenImplement }]) };
-  // A fix-up start with the person's words makes that fix first; its push is reviewed as any push of ours is, and carries the merge leg.
+  // A start with the person's words makes that fix first, and it carries the merge leg; the entry's steps follow at its head (a merge-queue
+  // entry owes the person's checked fix no review: src/core/evidence.ts neededReview).
   if (instruction && item.kind === "pr") {
     const had = merges ? await activeLeg(db, item) : null;
     const f = await loadPrFact(db, item.repo, item.number);

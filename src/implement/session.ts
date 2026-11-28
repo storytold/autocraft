@@ -3,6 +3,7 @@
 // follow-up on the same harness session (parentId, keepSession). Each turn is a round from the moment it is queued (its
 // purpose and call), settled when the call returns: the reply parsed strictly as the SessionReport, then the screenshots
 // it names copied out. A report's summary is reply-linted, with problems sent back as a lint turn of its own.
+import { startGuidance } from "./start-guidance.ts";
 import { createHash } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -102,14 +103,14 @@ export type TurnRequest = {
 export async function sessionInput(db: Db, impl: Implementation, sha: string, earlier?: SessionInput["earlier"]): Promise<SessionInput> {
   if (!impl.plan) throw new Error(`implementation ${impl.id} has no plan`);
   const ref = `${impl.repo}#${impl.number}` as const;
-  const [items, view] = await db.together(() => Promise.all([loadItems(db, [impl], "text"), loadImplementationView(db, ref)]));
+  const [items, view, started] = await db.together(() => Promise.all([loadItems(db, [impl], "text"), loadImplementationView(db, ref), startGuidance(db, impl.repo, impl.number)]));
   const it = items.get(ref);
   const p = impl.plan;
   return {
     ref: `${impl.repo}#${impl.number}`, repo: impl.repo, sha,
     issue: { title: it?.title ?? "", body: (it?.body ?? "").slice(0, ISSUE_BODY_MAX), author: it?.author ?? null },
     plan: { kind: p.kind, summary: p.summary, plan: impl.planMd ?? p.plan, acceptance: p.acceptance, tests: p.verification.tests, app: p.verification.app, risks: p.risks },
-    guidance: view?.impl.id === impl.id ? attemptGuidance(view.rounds).map((g) => g.text) : [],
+    guidance: [...(started ? [started.text] : []), ...(view?.impl.id === impl.id ? attemptGuidance(view.rounds).map((g) => g.text) : [])],
     ...(earlier && { earlier }),
   };
 }

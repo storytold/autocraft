@@ -30,7 +30,9 @@ const WORKS: [string, () => string][] = [
   ["drop the second one", () => "drop 2"],
   ["merge once CI is green", () => t("merge; it only merges on green CI anyway")],
   ["close, it's a dupe of #12", () => "close as duplicate of #12"],
-  ["fix the UV seam normals, then merge", () => t("a fix-up that does what the words say, then the merge")],
+  ["fix the UV seam normals and add a test for empty meshes", () => t("does what the words say, then merges on green CI")],
+  ["fix the UV seam normals but don't merge", () => t("does what the words say, then comes back to you")],
+  ["implement: store the setting per document", () => t("implements the issue with your words as instructions, then merges")],
 ];
 /** Phrasings that run nothing, with why. */
 const NOT_RUN: [string, () => string][] = [
@@ -209,7 +211,7 @@ function Commands() {
       </Part>
       <Part title={t("Combining")}>
         <p>
-          <Code>fix-up and merge</Code>, <Code>implement and merge</Code>, <Code>fix 1, drop 2, then merge</Code>, <Code>fix the export normals, then merge</Code>.
+          <Code>fix-up and merge</Code>, <Code>implement and merge</Code>, <Code>fix 1, drop 2, then merge</Code>, <Code>fix the export normals, then merge</Code>, <Code>review and fix the export normals</Code>.
         </p>
       </Part>
       <Part title={t("Writing normally")}>

@@ -8,6 +8,8 @@
 //   drop export dialog               a part named by words from its title (resolve.ts matches them)
 //   fix the UV seam normals, then merge  fix with words that name no part: the fix-up carries them out (resolve.ts); they run
 //   fix: weld the normals and merge  up to a comma, full stop, `and` or `then` before the next command word or a weight
+//   implement: store it per document an entry word and a colon before words that are no list of items: the same instructions
+//   fix the seams but don't merge    beside instructions, don't merge, review only or hold after end the work with the person
 //   merge: photocraft#12 #15         a list of items after a colon; a bare number takes the repo before it
 //   review photocraft#12 urgent      items written inline: repo#n, owner/repo#n, a GitHub link, or #n after one (or in an item's context)
 //   close as duplicate of #12        a close with its reason: completed, not planned, or duplicate of an item
@@ -23,7 +25,7 @@
 // Quoted lines and code are not read; inline code in a fix's words stays part of them.
 import { commentLines } from "../github/comment-lines.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
-import { WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CloseReason, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
+import { COMMAND_TEXT_MAX, WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CloseReason, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
 import { commandOf, COMMANDS, HOLD_WORDS, weightWord, YES_TRAILERS, YES_WORDS } from "./vocab.ts";
 
 export type ParseOptions = {
@@ -64,6 +66,7 @@ export function describe(parts: readonly CommandPart[], items: readonly ItemRef[
     if ("part" in p) return `${p.word} ${"text" in p && p.text ? p.text : p.part}`;
     if ("weight" in p) return weightWord(p.weight) ?? `weight ${p.weight}`;
     if (p.word === "close") return p.reason ? `close ${closeText(p.reason)}` : "close";
+    if (p.word === "no-merge") return "don't merge";
     return p.args ? `${p.word} ${p.args}` : p.word;
   }).join(", ");
   const refs = items.map((i) => `${i.repo}#${i.number}`).join(" ");
@@ -92,7 +95,11 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
   // The words for the author come out first, then a fix's own words, so no other reading (conditions, items, the list form) reaches into them.
   const author = pullAuthorWords(s);
   s = author.text;
-  const said = pullInstruction(s);
+  // Words that keep instructions from merging count only beside instructions; anywhere else they stay for the reader.
+  const back = pullBack(s);
+  const withBack = back.found ? pullInstruction(back.text) : null;
+  const said = withBack?.instruction != null ? withBack : pullInstruction(s);
+  const noMerge = said === withBack;
   s = said.text;
   const normal = normalise(s);
   s = normal.text;
@@ -123,6 +130,7 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
     if (saysHold(plain)) return { kind: "commands", items, parts: [{ word: "hold" }] };
   }
   const r = readWords(marked.text, marked.marks, code, said.instruction, author.words);
+  if (noMerge) r.parts.push({ word: "no-merge" });
   const unmet = unmetConditions(normal.conditions, r.parts);
   const guard = GUARD.exec(marked.text.replace(INSTRUCTION_RE, () => ` ${said.instruction} `).replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
   const rest = [...r.unknown, ...unmet, ...(normal.refused ? [normal.refused] : []), ...(guard && !r.unknown.some((u) => u.toLowerCase().includes(guard.toLowerCase())) ? [guard] : [])];
@@ -168,7 +176,7 @@ export const withoutMention = (text: string, slug: string | readonly string[]): 
 };
 
 /** The longest question `ask` takes (the chat's message limit). */
-export const QUESTION_MAX = 4000;
+export const QUESTION_MAX = COMMAND_TEXT_MAX;
 const ASK_RE = /^(?:(?:please|pls)\s+)?ask(?![\w-])[\s,:]*/i;
 /** `ask author`, `ask the author`: the ask-author command, never a question. */
 const AUTHOR_NEXT = /^(?:the\s+)?author(?![\w-])/i;
@@ -306,7 +314,7 @@ const FILLER_WORDS = [
   "thank you", "thanks", "thx", "please", "pls", "the pull request", "the pr", "this pull request", "this pr", "its pull request", "its pr",
   "the issue", "this issue", "this one", "the rest", "go ahead", "sounds good", "lgtm", "looks good to me", "looks good", "looks great",
   "approve", "approved", "yes", "yep", "yeah", "yup", "ok", "okay", "sure", "great", "nice", "perfect", "cool", "nice work", "great work",
-  "good work", "can you", "could you", "would you", "will you", "let's", "lets", "let us", "for now", "now", "it", "this", "that",
+  "good work", "can you", "could you", "would you", "will you", "let's", "lets", "let us", "for now", "now", "it", "this", "that", "just",
 ];
 const THANKS_FOR = String.raw`thanks?(?: you)? for (?:the |this |your )?(?:fix|pr|pull request|change|changes|work|contribution|patch|report)`;
 const FILLER = new RegExp(`(?<![\\w-])(?:${THANKS_FOR}|${FILLER_WORDS.map(escape).sort((a, b) => b.length - a.length).join("|")})(?![\\w-])`, "gi");
@@ -411,14 +419,45 @@ function namesParts(words: string): boolean {
  */
 function pullInstruction(text: string): { text: string; instruction: string | null } {
   if (EXCEPT_RE.test(text.trim())) return { text, instruction: null };
+  // "implement: store it per document", "fix-up: rename the helper too": an entry word's colon before words that are no list of items.
+  const entry = ENTRY_COLON.exec(text);
+  if (entry) {
+    const tail = text.slice(entry.index + entry[0].length);
+    const end = INSTRUCTION_END.exec(tail);
+    const words = trimInstruction(end ? tail.slice(0, end.index) : tail);
+    const items = readItems(words, undefined);
+    if (words && /[\p{L}]/u.test(words.replace(CODE_RE, "")) && (items.bad.length || !items.items.length)) {
+      return { text: `${text.slice(0, entry.index)}${entry[1]} and fix ${INSTRUCTION}${end ? tail.slice(end.index) : ""}`, instruction: words };
+    }
+  }
   for (const m of text.matchAll(/(?<![\w-])fix(?![\w-])/gi)) {
     const tail = text.slice(m.index + m[0].length);
     const end = INSTRUCTION_END.exec(tail);
-    const words = (end ? tail.slice(0, end.index) : tail).replace(/^\s*:?\s*/, "").replace(/[\s,;.!]+$/, "").replace(/(?:[\s,]+(?:thanks|thank you|thx|please|pls))+[.!]*$/i, "").trim();
+    const words = trimInstruction(end ? tail.slice(0, end.index) : tail);
     if (!words || namesParts(words)) continue;
     return { text: `${text.slice(0, m.index)}fix ${INSTRUCTION}${end ? tail.slice(end.index) : ""}`, instruction: words };
   }
   return { text, instruction: null };
+}
+
+/** An instruction's words without the colon before them and the punctuation and thanks after them. */
+const trimInstruction = (raw: string): string =>
+  raw.replace(/^\s*:?\s*/, "").replace(/[\s,;.!]+$/, "").replace(/(?:[\s,]+(?:thanks|thank you|thx|please|pls))+[.!]*$/i, "").trim();
+
+/** An entry word and a colon: what follows may be instructions (pullInstruction). */
+const ENTRY_COLON = /(?<![\w-])(review|fix-?up|fix up|implement|merge|land)\s*:(?!\/\/)/i;
+
+/**
+ * Words that end instructions with the person instead of a merge ("but don't merge", "review only", "then hold", "come back to me"),
+ * with the connector before them. They count only as a clause of their own, so the same words inside instructions stay theirs.
+ */
+const BACK_RE = /(?:^|\s*[,;.\n]\s*|\s+(?=(?:but|and|then)\s))(?:(?:but|and|then|just|please)\s+)*(?:(?:do not|don't|dont)\s+merge(?:\s+(?:it|this|that|yet))*|without\s+merging|no\s+merge|(?:review|reviewing)\s+only|only\s+review|hold(?:\s+(?:it|this))?\s+after(?:wards?|\s+that)?|then\s+hold(?:\s+(?:it|this))?|(?:then\s+)?come\s+back\s+to\s+me|(?:ask|check\s+with)\s+me\s+before\s+merging)(?=\s*(?:$|[,;.!\n]))/gi;
+
+/** The text without the words that keep instructions from merging, and whether it had any. */
+function pullBack(text: string): { text: string; found: boolean } {
+  let found = false;
+  const out = text.replace(BACK_RE, () => { found = true; return ", "; }).replace(/^[\s,]+/, "");
+  return { text: out, found };
 }
 
 /** Stands for the person's words for the author taken out of the text (pullAuthorWords). */

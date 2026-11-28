@@ -26,6 +26,12 @@ export const WEIGHT_MIN = 1;
 export const WEIGHT_MAX = 10;
 export const WEIGHT_NORMAL = 5;
 export const WEIGHT_WORDS = { urgent: 10, high: 8, low: 2 } as const;
+
+/**
+ * The longest command text any surface takes, and so the longest instructions after fix: 6,000 characters, the most Discord's slash
+ * command lets a person type into one option. Every surface uses it, so the same instructions can be sent from any of them.
+ */
+export const COMMAND_TEXT_MAX = 6000;
 export type WeightWord = keyof typeof WEIGHT_WORDS;
 
 /** A finding or a separate change, numbered from 1 in the order the review listed it. */
@@ -227,7 +233,9 @@ export type CommandPart =
   | { word: "ask-author"; args?: string }
   | { word: "close"; reason?: CloseReason }
   | { word: "drop" | "fix"; part: number | string; /** A fix's words as written, which the fix-up carries out when they name no part of the plan. */ text?: string }
-  | { word: "weight"; weight: number };
+  | { word: "weight"; weight: number }
+  /** "don't merge", "review only", "hold after": beside instructions, the work comes back to the person instead of merging. */
+  | { word: "no-merge" };
 
 /**
  * `items` is the list after a colon; empty means the item the text was written on. `understood` is the canonical text of what was

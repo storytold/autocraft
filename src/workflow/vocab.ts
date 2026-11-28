@@ -67,10 +67,10 @@ export const COMMANDS: readonly CommandDef[] = [
   },
   {
     word: "fix", usage: "fix <part or instructions>", aliases: [], entry: null, answer: true,
-    short: tk("Fix the named findings, or what your words after fix say."),
-    does: tk("Runs the fix-up on the named findings or changes, by number or by words from the title, then reviews again. Words that match no part are instructions: the fix-up does what they say, with the planned findings. With no part, fix is fix-up; if the review lists no fix, it fixes what the review found."),
-    back: tk("As the plan said before."),
-    example: "fix the export normals, then merge",
+    short: tk("Fix the named findings, or do what your words after fix say and merge."),
+    does: tk("Runs the fix-up on the named findings or changes, by number or by words from the title, then reviews again. Words that match no part are your instructions: AutoCraft does what they say, with the planned findings, in any file but the protected ones and with no limit on changed lines. Instructions approve the work they describe: once the patch check finds the change does what they ask and nothing more, AutoCraft merges on green CI and a clean pre-merge check, with no new full review. On a pull request nobody started the instructions are made first; with review or fix-up, that review follows them; on an issue the implementation gets them. Instructions can also follow review, fix-up, implement or merge after a colon: implement: store it per document. Add don't merge, review only or hold after to have the work come back to you instead. With no part, fix is fix-up; if the review lists no fix, it fixes what the review found."),
+    back: tk("With instructions: only at a blocker, or when the work is done if you said don't merge. With parts: as the plan said before."),
+    example: "fix the export normals and add a test for empty meshes",
   },
   {
     word: "ask-author", usage: "ask author [<your words for the author>]", aliases: ["ask the author"], entry: null,
