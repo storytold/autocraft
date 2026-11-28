@@ -6,8 +6,11 @@
 // words must match exactly one planned part; a weight alone needs a started item. While an implementation's question is open, its
 // options are the parts, and a reply that is only an option's number or words answers it. A fix whose words match no part is an
 // instruction the fix-up carries out, with the planned parts; a bare fix where the review lists no fix fixes its finding.
+// Instructions in a person's own words approve the work they describe: it ends in a merge unless the text says not to merge
+// (`no-merge`). On a pull request nobody started they are made first, then it goes on as the merge queue does, with no review;
+// with review or fix-up the entry's review follows them; on an issue the implementation gets them.
 import { CONDITION, describe, GUARD } from "./parse.ts";
-import { heldWork, sameQuestion, type CloseReason, type CommandPart, type Entry, type ItemKind, type ItemWorkflow, type Parsed, type PlanPart, type QuestionAnswer, type WorkflowState } from "./types.ts";
+import { COMMAND_TEXT_MAX, heldWork, sameQuestion, type CloseReason, type CommandPart, type Entry, type ItemKind, type ItemWorkflow, type Parsed, type PlanPart, type QuestionAnswer, type WorkflowState } from "./types.ts";
 
 /**
  * `held`: the item is held, and what it goes on with when it is resumed; no live workflow works on it. `closing`: a close of the item is
@@ -67,7 +70,7 @@ export type Run = {
 };
 
 export type Ambiguity =
-  | { why: "unreadable"; rest: string }
+  | { why: "unreadable"; rest: string; /** Only the end of these instructions is unclear (Parsed `ends`). */ ends?: string }
   | { why: "nothing-to-answer" }
   | { why: "no-plan" }
   | { why: "no-such-part"; part: number }
@@ -99,7 +102,11 @@ export type Refusal =
   | { why: "implement-running"; by: string; at: string }
   | { why: "already-approved"; by: string; at: string }
   /** A ready plan's part: the implementation is built from the whole plan, so a part can't be fixed or dropped on its own. */
-  | { why: "implement-part"; parts: number[] };
+  | { why: "implement-part"; parts: number[] }
+  /** The instructions are longer than any surface takes (COMMAND_TEXT_MAX). */
+  | { why: "too-long"; chars: number; max: number }
+  /** "don't merge" on an item whose merge someone approved already. */
+  | { why: "merge-approved"; by: string; at: string };
 
 export type Resolved =
   | { kind: "run"; run: Run }
@@ -140,7 +147,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
       const option = optionNamed(wf, parsed.rest);
       if (option) return pick(wf, option, {});
     }
-    return { kind: "ambiguous", understood: parsed.understood, ambiguity: { why: "unreadable", rest: parsed.rest } };
+    return { kind: "ambiguous", understood: parsed.understood, ambiguity: { why: "unreadable", rest: parsed.rest, ...(parsed.ends ? { ends: parsed.ends } : {}) } };
   }
   if (parsed.kind === "yes") {
     const understood = "yes";
@@ -163,6 +170,10 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   const repin = parts.find((p): p is Extract<CommandPart, { args?: string }> => p.word === "autorepin");
   const runner = (["take", "release"] as const).find((w) => has(w)) ?? null;
   const named = parts.filter((p): p is Extract<CommandPart, { part: unknown }> => "part" in p);
+  const noMerge = has("no-merge");
+  const long = named.find((p) => "text" in p && p.text && p.text.length > COMMAND_TEXT_MAX);
+  if (long && "text" in long) return refused({ why: "too-long", chars: long.text!.length, max: COMMAND_TEXT_MAX });
+  if (noMerge && merge) return ambiguous({ why: "conflict", words: ["merge", "don't merge"] });
 
   // An issue's review that goes on to implement when it recommends that, as a pull request's review goes on to merge.
   const chain = state.kind === "issue" && entries.length === 2 && entries.includes("review") && entries.includes("implement");
@@ -198,9 +209,19 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   if (!live) {
     // The yes would go on with what was held, the start would drop it.
     if (state.held && parsed.yes && (entry || merge)) return ambiguous({ why: "conflict", words: ["yes", ...parts.map((p) => p.word)] });
-    // Words after fix on an item nobody started name no part: the fix-up starts with them.
-    const said = named.length === 1 && named[0]!.word === "fix" && typeof named[0]!.part === "string" && "text" in named[0]! && named[0].text && !entry ? named[0].text : null;
-    if (said !== null && state.kind === "pr") return run({ start: "fixup", instruction: { text: said }, approve: merge, merges: merge, weight, how: merge ? "approved" : "started" });
+    // Words after fix on an item nobody started name no part: they are the work, and approve it unless the text says not to merge.
+    const said = named.length === 1 && named[0]!.word === "fix" && typeof named[0]!.part === "string" && "text" in named[0]! && named[0].text && !chain ? named[0].text : null;
+    // `merge: <words>` makes merge how the work starts, which an issue has not; "fix it, then merge" only names the end.
+    const mergeLed = merge && said !== null && "colon" in named[0]! && !!named[0].colon;
+    if (said !== null) {
+      const instruction = { text: said }, approve = !noMerge, how = approve ? "approved" as const : "started" as const;
+      // On an issue implement or fix starts the implementation with them; `merge:` stays no start of an issue.
+      if (state.kind === "issue" && (entry === "implement" || (entry === null && !mergeLed))) return run({ start: "implement", instruction, approve, merges: approve, weight, how });
+      if (state.kind === "pr" && (entry === "review" || entry === "fix-up")) return run({ start: ENTRY_OF[entry], instruction, approve, merges: approve, weight, how });
+      // Their fix, then the merge queue's steps; without the merge, the fix-up start: the fix, its review, a recommendation.
+      if (state.kind === "pr" && entry === null) return run({ start: approve ? "merge" : "fixup", instruction, approve, merges: approve, weight, how });
+    }
+    if (mergeLed && state.kind === "issue" && entry === null) return refused({ why: "issue-merge-queue" });
     if (named.length) return ambiguous({ why: "no-plan" });
     if (entry) return run({ start: ENTRY_OF[entry], approve: merge, merges: merge, weight, thenImplement: chain, how: merge ? "approved" : "started" });
     if (merge) {
@@ -257,6 +278,8 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
 
   const rec = wf.rec;
   const approved = !!wf.approvedBy;
+  // "Don't merge" with parts or an option named takes back no approval: the approved merge goes on unless the item is held first.
+  if (noMerge && approved) return refused({ why: "merge-approved", by: wf.approvedBy!, at: wf.approvedAt ?? "" });
   // An implement question: its options are the parts. Naming one picks it; dropping options picks the recommended one when it is
   // left, else the one option left.
   const options = optionsOf(wf);
@@ -265,7 +288,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     if (fix.length > 1) return ambiguous({ why: "pick-one", parts: fix });
     const chosen = fix.length ? options.find((p) => p.n === fix[0]) : left.find((p) => p.option === rec.answer?.option) ?? (left.length === 1 ? left[0] : undefined);
     if (!chosen?.option) return ambiguous({ why: "pick-one", parts: left.map((p) => p.n) });
-    return pick(wf, chosen, { drop, merge, weight });
+    return pick(wf, chosen, { drop, merge, noMerge, weight });
   }
   // Only drops, while a recommendation is open: the recommendation without those parts, as a yes would run it.
   if (rec && drop.length && !fix.length && !entry && !instruction) {
@@ -293,9 +316,11 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     if (!rec.finding) return ambiguous({ why: "nothing-to-fix" });
     instruction = { text: rec.finding, review: true };
   }
-  const approve = merge && !approved;
+  // A person's own instructions approve the work they describe, unless they say not to merge.
+  const merges = merge || approved || (!!instruction && !instruction.review && !noMerge);
+  const approve = merges && !approved;
   return run({
-    again, fix: fixes, drop, approve, merges: merge || approved, weight, answers: !!rec, instruction,
+    again, fix: fixes, drop, approve, merges, weight, answers: !!rec, instruction,
     how: approve ? "approved" : rec ? "answered" : null,
   });
 }
@@ -328,10 +353,10 @@ export function optionNamed(wf: ItemWorkflow, reply: string): PlanPart | null {
 }
 
 /** Answers the open question with `chosen`; `merge` also approves the merge when nobody has. */
-function pick(wf: ItemWorkflow, chosen: PlanPart, o: { drop?: number[]; merge?: boolean; weight?: number | null }): Resolved {
-  const approve = !!o.merge && !wf.approvedBy;
+function pick(wf: ItemWorkflow, chosen: PlanPart, o: { drop?: number[]; merge?: boolean; noMerge?: boolean; weight?: number | null }): Resolved {
+  const approve = !!o.merge && !o.noMerge && !wf.approvedBy;
   return run({
-    pick: { question: wf.rec!.question!, option: chosen.option!, label: chosen.title }, drop: o.drop ?? [], approve, merges: !!o.merge || !!wf.approvedBy, weight: o.weight ?? null,
+    pick: { question: wf.rec!.question!, option: chosen.option!, label: chosen.title }, drop: o.drop ?? [], approve, merges: !o.noMerge && (!!o.merge || !!wf.approvedBy), weight: o.weight ?? null,
     answers: true, how: approve ? "approved" : "answered",
   });
 }

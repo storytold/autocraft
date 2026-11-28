@@ -18,10 +18,10 @@ import { linkAskTurn, saying } from "../../workflow/said.ts";
 import { askQuestion } from "../../conversations/ask.ts";
 import { canTalk } from "./conversations.ts";
 import { t } from "../../i18n/index.ts";
-import type { ItemRef, Parsed } from "../../workflow/types.ts";
+import { COMMAND_TEXT_MAX, type ItemRef, type Parsed } from "../../workflow/types.ts";
 
-/** Longer text is no command anyone types. */
-const TEXT_MAX = 4000;
+/** The longest command text any surface takes. */
+const TEXT_MAX = COMMAND_TEXT_MAX;
 /** Items in one dashboard command. */
 const ITEMS_MAX = 100;
 
@@ -30,7 +30,7 @@ const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object"
 function textOf(req: Req): string {
   const text = obj(req.json).text;
   if (typeof text !== "string" || !text.trim()) throw new HttpError(400, "text is required");
-  if (text.length > TEXT_MAX) throw new HttpError(400, `text is over ${TEXT_MAX} characters`);
+  if (text.length > TEXT_MAX) throw new HttpError(400, t("The command is {chars} characters; the most AutoCraft takes is {max}.", { chars: text.length.toLocaleString("en-US"), max: TEXT_MAX.toLocaleString("en-US") }));
   return text;
 }
 

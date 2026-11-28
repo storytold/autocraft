@@ -71,3 +71,18 @@ test("the pre-merge review is read again after a delta review of the author's co
   const rows = await carriedPremerges(w.db, [{ repo: "app", number: 1, head: "sha1b" }, { repo: "app", number: 2, head: "sha2b" }], "run", T1);
   assert.deepEqual([...rows.keys()], ["app#2@sha2b"]);
 });
+
+test("on an approved PR our checked fix-up of a person's own words carries the review and the pre-merge review", async () => {
+  const w = (current = await (await (await world()).repo()).acting());
+  await approvedPr(w, 1);
+  await w.premerge(1, "clean");
+  await w.db.run(w.db.k.insertInto("main.operator_fixups").values({ repo: "app", number: 1, from_head: "sha1", instructions: "Keep the box centred when the window narrows.", by: OPERATOR, at: T0, state: "ended" }));
+  const [fix] = await w.rows("SELECT id FROM operator_fixups WHERE number = 1");
+  await w.db.run(w.db.k.insertInto("patch_checks").values({ kind: "fixup", repo: "app", number: 1, subject: "sha1", patch_hash: "x", round: 1, verdict: "approve", reasons: "", problems: "[]", model: "m", created_at: T0 }));
+  await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 1, from_head: "sha1", to_head: "sha1b", state: "pushed", source: "operator", operator_fix: Number(fix!.id), files: '["src/layout.rs"]', attempt: 1, created_at: T0 }));
+  await w.synced(1, "sha1b");
+  await tick(w);
+  assert.ok(!(await kinds(w, 1)).includes("review"), `${await kinds(w, 1)}`);
+  assert.equal(await runCarry(w.db, "app", quiet), 1, "the review carries with no model call");
+  assert.equal((await carriedPremerges(w.db, [{ repo: "app", number: 1, head: "sha1b" }], "run", T1)).get("app#1@sha1b")?.findings?.length, 0, "the pre-merge review carries clean");
+});

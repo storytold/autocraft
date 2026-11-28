@@ -22,6 +22,8 @@ const MAIN = HELP_COMMANDS.filter((c) => !c.more);
 const MORE = HELP_COMMANDS.filter((c) => c.more);
 const BLOCKERS: Blocker[] = ["failed-twice", "author-commits"];
 const ITEM = "photocraft#803";
+/** Commands whose example ends in the person's own words: an item written after them would be part of the words, so it goes after a colon. */
+const FREE_WORDS: ReadonlySet<string> = new Set(["fix", "ask-author"]);
 
 /** Phrasings the parser reads, with the command each one runs. */
 const WORKS: [string, () => string][] = [
@@ -30,7 +32,9 @@ const WORKS: [string, () => string][] = [
   ["drop the second one", () => "drop 2"],
   ["merge once CI is green", () => t("merge; it only merges on green CI anyway")],
   ["close, it's a dupe of #12", () => "close as duplicate of #12"],
-  ["fix the UV seam normals, then merge", () => t("a fix-up that does what the words say, then the merge")],
+  ["fix the UV seam normals and add a test for empty meshes", () => t("does what the words say, then merges on green CI")],
+  ["fix the UV seam normals but don't merge", () => t("does what the words say, then comes back to you")],
+  ["implement: store the setting per document", () => t("implements the issue with your words as instructions, then merges")],
 ];
 /** Phrasings that run nothing, with why. */
 const NOT_RUN: [string, () => string][] = [
@@ -141,7 +145,7 @@ function Surfaces({ c }: { c: HelpCommand }) {
       </dd>
       <dt className={dt}>Discord</dt>
       <dd className="min-w-0 break-words">
-        <Code>{ask ? `@AutoCraft ask ${ITEM} ${c.example.replace(/^ask\s+/, "")}` : `@AutoCraft ${c.example} ${ITEM}`}</Code>
+        <Code>{ask ? `@AutoCraft ask ${ITEM} ${c.example.replace(/^ask\s+/, "")}` : FREE_WORDS.has(c.word) ? `@AutoCraft ${c.example}: ${ITEM}` : `@AutoCraft ${c.example} ${ITEM}`}</Code>
       </dd>
       {!ask && (
         <>
@@ -209,7 +213,7 @@ function Commands() {
       </Part>
       <Part title={t("Combining")}>
         <p>
-          <Code>fix-up and merge</Code>, <Code>implement and merge</Code>, <Code>fix 1, drop 2, then merge</Code>, <Code>fix the export normals, then merge</Code>.
+          <Code>fix-up and merge</Code>, <Code>implement and merge</Code>, <Code>fix 1, drop 2, then merge</Code>, <Code>fix the export normals, then merge</Code>, <Code>review and fix the export normals</Code>.
         </p>
       </Part>
       <Part title={t("Writing normally")}>

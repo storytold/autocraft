@@ -290,8 +290,12 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   }
   const did: string[] = [];
   if (r.drop.length) did.push(t("dropping {parts}", { parts: listText(r.drop) }));
-  if (r.start === "review") did.push(t("reviewing"));
-  else if (r.start === "fixup" && r.instruction && !waits) did.push(t("fixing “{instruction}”", { instruction: clipText(r.instruction.text, INSTRUCTION_SHOWN) }), t("reviewing the fix"));
+  const said = r.instruction && !r.instruction.review ? clipText(r.instruction.text, INSTRUCTION_SHOWN) : null;
+  if (r.start === "review" && said !== null && !waits) did.push(t("fixing “{instruction}”", { instruction: said }), t("reviewing"));
+  else if (r.start === "review") did.push(t("reviewing"));
+  else if (r.start === "fixup" && said !== null && !waits) did.push(t("fixing “{instruction}”", { instruction: said }), t("reviewing the fix and fixing what the review finds"));
+  else if (r.start === "merge" && said !== null && !waits) did.push(t("fixing “{instruction}”", { instruction: said }));
+  else if (r.start === "implement" && said !== null) did.push(t("implementing with your instructions “{instruction}”, reviewing, fixing what the review finds, reviewing again", { instruction: said }));
   else if (r.start === "fixup") did.push(waits ? t("reviewing") : t("reviewing, fixing what the review finds, reviewing again"));
   else if (r.start === "implement" || r.implements) did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
@@ -307,6 +311,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   }
   const end = waits
     ? waits === "contributor" ? t("keeping the merge approved until the contributor resolves the conflict with the base branch") : t("keeping the merge approved until someone resolves the conflict with the base branch")
+    : r.start === "merge" && said !== null ? t("merging when CI is green")
     : r.start === "merge"
       ? r.replaces ? t("updating from main, then merging without the review when CI is green") : t("updating from main, then merging in the next batch when CI is green")
     : r.merges
@@ -386,6 +391,12 @@ function partHint(rest: string): string | null {
 function ambiguityText(understood: string, a: Ambiguity, mention?: string, proposed?: string): string {
   switch (a.why) {
     case "unreadable":
+      if (a.ends && !proposed) {
+        const say = (command: string) => (mention ? `@${mention} ${command}` : command);
+        return t("I understood “{understood}” but not whether the work should end in a merge (“{rest}”). Nothing runs. Reply `{merge}` to merge it when CI is green, or `{back}` to have it come back to you.", {
+          understood, rest: a.rest, merge: say(`${a.ends}, then merge`), back: say(`${a.ends}, but don't merge`),
+        });
+      }
       if (proposed) {
         const unread = understood && a.rest ? t("I understood “{understood}” but not “{rest}”.", { understood, rest: a.rest }) : a.rest ? t("I couldn't read “{rest}” as a command.", { rest: a.rest }) : null;
         return [unread, proposalLine(proposed, mention)].filter((x) => x !== null).join(" ");
@@ -435,5 +446,7 @@ function refusalText(r: Refusal, clock: Clock): string {
     case "implement-running": return t("Implement already runs, started by {login}, {time}. Send review alone to review its pull request again.", { login: r.by, time: clock(r.at) });
     case "implement-part": return t("Part {parts} belongs to the plan the implementation is built from. Fix or drop parts of its review, or hold it.", { parts: listText(r.parts) });
     case "already-approved": return t("Already approved for merge by {login}, {time}.", { login: r.by, time: clock(r.at) });
+    case "too-long": return t("The instructions are {chars} characters; the most AutoCraft takes is {max}. Nothing runs. Send them shorter.", { chars: r.chars.toLocaleString("en-US"), max: r.max.toLocaleString("en-US") });
+    case "merge-approved": return t("The merge was approved by {login}, {time}, so the work would still end in a merge. Nothing runs. Reply hold first to keep it from merging.", { login: r.by, time: clock(r.at) });
   }
 }

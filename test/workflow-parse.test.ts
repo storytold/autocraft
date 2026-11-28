@@ -151,8 +151,16 @@ describe("workflow commands", () => {
       const p = parse(text);
       assert.ok(p.kind === "commands" && p.parts.every((x) => !("text" in x) || !x.text), text);
     }
-    // Negations, hedges and questions inside the words leave the message unread.
-    for (const text of ["fix the normals so they don't split", "maybe fix the normals", "fix the normals?", "fix the normals unless it is slow"]) assert.equal(parse(text).kind, "ambiguous", text);
+    // Hedges, conditions and questions inside the words leave the message unread; a negation in them says what the code should do.
+    for (const text of ["maybe fix the normals", "fix the normals?", "fix the normals unless it is slow", "fix the normals, maybe", "don't fix the normals"]) assert.equal(parse(text).kind, "ambiguous", text);
+    for (const [text, said] of [
+      ["fix the normals so they don't split", "the normals so they don't split"],
+      ["fix the export so it does not drop normals", "the export so it does not drop normals"],
+      ["implement: add a setting; it should default to off", "add a setting; it should default to off"],
+    ] as const) {
+      const p = parse(text);
+      assert.ok(p.kind === "commands" && p.parts.some((x) => "text" in x && x.text === said), `${text}: ${JSON.stringify(p)}`);
+    }
     // A bare fix where the review lists no fix: its finding is the instruction, and without one nothing runs.
     const finding = started({ ...held, plan: [], rec: { ...rec, finding: "Exports recompute normals without welding vertices split at UV seams." } });
     const bare = run("fix it", pr(finding));
@@ -160,6 +168,93 @@ describe("workflow commands", () => {
     const none = run("fix", pr(started({ ...held, plan: [] })));
     assert.ok(none.kind === "ambiguous" && none.ambiguity.why === "nothing-to-fix");
     assert.match(replyLine(none), /nothing to fix/);
+  });
+
+  test("words after an entry word's colon are instructions only when nothing else reads them", () => {
+    // Conditions, holds, refusals, weights, parts or items in view and doubts stay unread, as they were before instructions.
+    for (const text of [
+      "merge: wait for dylan", "merge: after CI is green", "merge: if CI passes", "merge: once CI is green", "merge: hold on", "merge: no", "merge: not yet",
+      "merge: later", "merge: maybe", "merge: the rest", "merge: both", "merge: all of them", "merge: weight 7", "review: urgent", "review: these two",
+      "implement: store it per document?",
+    ]) {
+      const p = parse(text, { repo: "photocraft" });
+      assert.ok(p.kind === "ambiguous" && !p.understood.includes("fix"), `${text}: ${JSON.stringify(p)}`);
+    }
+    // Any item makes it the list form, which reports what it cannot read.
+    const list = parse("merge: #12 and #15", { repo: "photocraft" });
+    assert.ok(list.kind === "commands" && list.items.map((i) => i.number).join() === "12,15" && list.parts.map((x) => x.word).join() === "merge");
+    for (const text of ["merge: photocraft#12, photocraft#15 urgent", "merge: photocraft#12 low", "merge: photocraft #12", "implement: like in #12"]) {
+      const p = parse(text, { repo: "photocraft" });
+      assert.ok(p.kind === "ambiguous" && p.understood.includes("photocraft#12") && !p.understood.includes("fix"), `${text}: ${JSON.stringify(p)}`);
+    }
+    // A colon inside a fix's words is theirs.
+    const inside = parse("fix the importer: conflict markers left in Cargo.toml");
+    assert.ok(inside.kind === "commands" && inside.parts.length === 1 && "text" in inside.parts[0]! && inside.parts[0].text === "the importer: conflict markers left in Cargo.toml");
+    const cond = parse("merge: once dylan approves");
+    assert.ok(cond.kind === "ambiguous" && cond.rest === "once dylan approves", "a leading once is a condition, whatever follows");
+    const said = parse("implement: store it per document");
+    assert.ok(said.kind === "commands" && said.parts.some((x) => x.word === "implement") && said.parts.some((x) => "text" in x && x.text === "store it per document"));
+  });
+
+  test("don't merge beside instructions counts only as their last clause", () => {
+    for (const [text, said] of [["fix the seams but don't merge", "the seams"], ["fix the seams and don't merge it yet please", "the seams"], ["implement: store it per document. Then hold", "store it per document"]] as const) {
+      const p = parse(text);
+      assert.ok(p.kind === "commands" && p.parts.some((x) => x.word === "no-merge") && p.parts.some((x) => "text" in x && x.text === said), `${text}: ${JSON.stringify(p)}`);
+    }
+    // Inside a clause the instructions open, or before more of them, it may be about the code or the merge.
+    for (const text of ["fix the import: when two rows share an id, don't merge.", "fix the seams, don't merge, and add a test", "fix the seams and don't merge it until Friday", "don't merge, fix the seams"]) {
+      const p = parse(text);
+      assert.ok(p.kind === "ambiguous" && /merge/.test(p.rest), `${text}: ${JSON.stringify(p)}`);
+    }
+    // Inside a sentence it is part of the instructions, where a merge conflict is code.
+    const code = parse("fix the merge conflict markers so the build does not break");
+    assert.ok(code.kind === "commands" && !code.parts.some((x) => x.word === "no-merge"));
+  });
+
+  test("instructions that talk about the merge or doubt the work leave the end open: nothing runs, and the reply offers both ends", () => {
+    for (const text of [
+      "fix the typo. Do not merge this one", "fix the typo; don't ship it yet", "fix the typo but don't land it", "fix the typo, I'll merge it myself",
+      "fix the typo and leave it for me to merge", "fix the typo, keep it open", "fix the typo, but let me look before it goes in",
+      "fix the typo but I'm not convinced we want this", "fix the typo, no rush", "fix: make sure we don't merge duplicate rows",
+    ]) {
+      const p = parse(text);
+      assert.ok(p.kind === "ambiguous" && p.ends, `${text}: ${JSON.stringify(p)}`);
+      const r = resolve(p, pr());
+      assert.equal(r.kind, "ambiguous", text);
+      const line = replyLine(r as Exclude<typeof r, { kind: "run" }>);
+      assert.ok(line.includes(", then merge`") && line.includes(", but don't merge`"), line);
+    }
+    // The offer reads back as the fix with each end.
+    const p = parse("fix the typo, I'll merge it myself");
+    assert.ok(p.kind === "ambiguous" && p.ends === "fix the typo");
+    for (const [reply, merges] of [["fix the typo, then merge", true], ["fix the typo, but don't merge", false]] as const) {
+      const r = run(reply, pr());
+      assert.ok(r.kind === "run" && r.run.instruction?.text === "the typo" && r.run.merges === merges, `${reply}: ${JSON.stringify(r)}`);
+    }
+    // A negation that says what the code should do leaves the default end.
+    const keep = run("fix the export so it does not drop normals", pr());
+    assert.ok(keep.kind === "run" && keep.run.merges);
+  });
+
+  test("first fix before a start, and then merge after instructions on an issue, read as written", () => {
+    const first = run("review and merge, but first fix the typo in the README", pr());
+    assert.ok(first.kind === "run" && first.run.start === "review" && first.run.approve && first.run.instruction?.text === "the typo in the README", JSON.stringify(first));
+    const issue = run("fix the export so normals are kept, then merge", { kind: "issue", workflow: null });
+    assert.ok(issue.kind === "run" && issue.run.start === "implement" && issue.run.approve && issue.run.instruction?.text === "the export so normals are kept", JSON.stringify(issue));
+  });
+
+  test("instructions on an issue start its implementation only with implement or fix; don't merge never takes back an approved merge", () => {
+    const issue: ItemState = { kind: "issue", workflow: null };
+    for (const text of ["implement: store it per document", "fix the crash on empty files"]) {
+      const r = run(text, issue);
+      assert.ok(r.kind === "run" && r.run.start === "implement" && r.run.approve && r.run.instruction !== null, `${text}: ${JSON.stringify(r)}`);
+    }
+    const merge = run("merge: store it per document", issue);
+    assert.ok(merge.kind === "refused" && merge.refusal.why === "issue-merge-queue", JSON.stringify(merge));
+    // A part named beside don't merge on an approved item: the merge would still run, so nothing does.
+    const approved = started({ approvedBy: "mira", plan: [part(1, "UV seams")] });
+    const back = run("fix the seams, don't merge", pr(approved));
+    assert.ok(back.kind === "refused" && back.refusal.why === "merge-approved", JSON.stringify(back));
   });
 
   test("merge is the merge queue on an unstarted pull request and approval on a started item", () => {

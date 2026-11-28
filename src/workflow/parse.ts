@@ -8,6 +8,8 @@
 //   drop export dialog               a part named by words from its title (resolve.ts matches them)
 //   fix the UV seam normals, then merge  fix with words that name no part: the fix-up carries them out (resolve.ts); they run
 //   fix: weld the normals and merge  up to a comma, full stop, `and` or `then` before the next command word or a weight
+//   implement: store it per document an entry word and a colon before words that name no item and no condition, hold, weight or part: instructions
+//   fix the seams but don't merge    as the last clause after instructions, don't merge, review only or hold after end the work with the person
 //   merge: photocraft#12 #15         a list of items after a colon; a bare number takes the repo before it
 //   review photocraft#12 urgent      items written inline: repo#n, owner/repo#n, a GitHub link, or #n after one (or in an item's context)
 //   close as duplicate of #12        a close with its reason: completed, not planned, or duplicate of an item
@@ -23,7 +25,7 @@
 // Quoted lines and code are not read; inline code in a fix's words stays part of them.
 import { commentLines } from "../github/comment-lines.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
-import { WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CloseReason, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
+import { COMMAND_TEXT_MAX, WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CloseReason, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
 import { commandOf, COMMANDS, HOLD_WORDS, weightWord, YES_TRAILERS, YES_WORDS } from "./vocab.ts";
 
 export type ParseOptions = {
@@ -64,6 +66,7 @@ export function describe(parts: readonly CommandPart[], items: readonly ItemRef[
     if ("part" in p) return `${p.word} ${"text" in p && p.text ? p.text : p.part}`;
     if ("weight" in p) return weightWord(p.weight) ?? `weight ${p.weight}`;
     if (p.word === "close") return p.reason ? `close ${closeText(p.reason)}` : "close";
+    if (p.word === "no-merge") return "don't merge";
     return p.args ? `${p.word} ${p.args}` : p.word;
   }).join(", ");
   const refs = items.map((i) => `${i.repo}#${i.number}`).join(" ");
@@ -92,7 +95,19 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
   // The words for the author come out first, then a fix's own words, so no other reading (conditions, items, the list form) reaches into them.
   const author = pullAuthorWords(s);
   s = author.text;
-  const said = pullInstruction(s);
+  // Words that keep instructions from merging count only beside instructions, as their last clause: anywhere else they may be part of
+  // what the instructions ask for ("fix the import: when two rows share an id, don't merge"), and the text is not read.
+  const back = pullBack(s);
+  const withBack = back.phrase !== null ? pullInstruction(back.text) : null;
+  if (withBack?.instruction != null && (!back.final || INNER_COLON.test(withBack.instruction))) return unclearInstruction(withBack.instruction, code, back.phrase!);
+  const said = withBack?.instruction != null ? withBack : pullInstruction(s);
+  const noMerge = said === withBack;
+  const inside = said.instruction === null ? null : BACK_INSIDE.exec(said.instruction)?.[0];
+  if (inside) return unclearInstruction(said.instruction!, code, inside.replace(/^[\s,;.:]+/, ""));
+  // Instructions that talk about the merge or doubt the work in words of their own leave the end open: nothing runs, and the reply offers
+  // both ends. A model reading of the text (read.ts) gets these as it gets any ambiguous text.
+  const open = said.instruction === null ? null : endInDoubt(said.instruction);
+  if (open) return { ...unclearInstruction(said.instruction!, code, open.words), ends: endsOffer(open.keep, code) };
   s = said.text;
   const normal = normalise(s);
   s = normal.text;
@@ -123,8 +138,11 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
     if (saysHold(plain)) return { kind: "commands", items, parts: [{ word: "hold" }] };
   }
   const r = readWords(marked.text, marked.marks, code, said.instruction, author.words);
+  if (said.colon) for (const x of r.parts) if (x.word === "fix" && "text" in x && x.text) x.colon = true;
+  if (noMerge) r.parts.push({ word: "no-merge" });
   const unmet = unmetConditions(normal.conditions, r.parts);
-  const guard = GUARD.exec(marked.text.replace(INSTRUCTION_RE, () => ` ${said.instruction} `).replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
+  // The instructions say what the code should do, so their own "not" or "should" doubts nothing; the words around them are read.
+  const guard = GUARD.exec(marked.text.replace(INSTRUCTION_RE, " ").replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
   const rest = [...r.unknown, ...unmet, ...(normal.refused ? [normal.refused] : []), ...(guard && !r.unknown.some((u) => u.toLowerCase().includes(guard.toLowerCase())) ? [guard] : [])];
   if (rest.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: rest.join(", ") };
   return { kind: "commands", items, parts: r.parts, ...(r.yes ? { yes: true } : {}) };
@@ -168,7 +186,7 @@ export const withoutMention = (text: string, slug: string | readonly string[]): 
 };
 
 /** The longest question `ask` takes (the chat's message limit). */
-export const QUESTION_MAX = 4000;
+export const QUESTION_MAX = COMMAND_TEXT_MAX;
 const ASK_RE = /^(?:(?:please|pls)\s+)?ask(?![\w-])[\s,:]*/i;
 /** `ask author`, `ask the author`: the ask-author command, never a question. */
 const AUTHOR_NEXT = /^(?:the\s+)?author(?![\w-])/i;
@@ -306,7 +324,7 @@ const FILLER_WORDS = [
   "thank you", "thanks", "thx", "please", "pls", "the pull request", "the pr", "this pull request", "this pr", "its pull request", "its pr",
   "the issue", "this issue", "this one", "the rest", "go ahead", "sounds good", "lgtm", "looks good to me", "looks good", "looks great",
   "approve", "approved", "yes", "yep", "yeah", "yup", "ok", "okay", "sure", "great", "nice", "perfect", "cool", "nice work", "great work",
-  "good work", "can you", "could you", "would you", "will you", "let's", "lets", "let us", "for now", "now", "it", "this", "that",
+  "good work", "can you", "could you", "would you", "will you", "let's", "lets", "let us", "for now", "now", "it", "this", "that", "just",
 ];
 const THANKS_FOR = String.raw`thanks?(?: you)? for (?:the |this |your )?(?:fix|pr|pull request|change|changes|work|contribution|patch|report)`;
 const FILLER = new RegExp(`(?<![\\w-])(?:${THANKS_FOR}|${FILLER_WORDS.map(escape).sort((a, b) => b.length - a.length).join("|")})(?![\\w-])`, "gi");
@@ -409,17 +427,139 @@ function namesParts(words: string): boolean {
  * "fix: weld the normals"): its words up to where the next command starts come out of the text, and `fix` stays with a marker in their
  * place. Whether the words name a part by its title only the plan tells (resolve.ts). "fix all but 2" stays for normalise.
  */
-function pullInstruction(text: string): { text: string; instruction: string | null } {
+function pullInstruction(text: string): { text: string; instruction: string | null; /** The words followed an entry word's colon. */ colon?: true } {
   if (EXCEPT_RE.test(text.trim())) return { text, instruction: null };
+  // "implement: store it per document", "fix-up: rename the helper too": an entry word's colon, at the start of the command, before words
+  // that are instructions (instructionTail); anything else after it stays for the list form and the other readings.
+  const entry = ENTRY_COLON.exec(text);
+  if (entry && ENTRY_HEAD.test(text.slice(0, entry.index))) {
+    const tail = text.slice(entry.index + entry[0].length);
+    const end = INSTRUCTION_END.exec(tail);
+    const words = trimInstruction(end ? tail.slice(0, end.index) : tail);
+    if (instructionTail(words)) return { text: `${text.slice(0, entry.index)}${entry[1]} and fix ${INSTRUCTION}${end ? tail.slice(end.index) : ""}`, instruction: words, colon: true };
+  }
   for (const m of text.matchAll(/(?<![\w-])fix(?![\w-])/gi)) {
     const tail = text.slice(m.index + m[0].length);
     const end = INSTRUCTION_END.exec(tail);
-    const words = (end ? tail.slice(0, end.index) : tail).replace(/^\s*:?\s*/, "").replace(/[\s,;.!]+$/, "").replace(/(?:[\s,]+(?:thanks|thank you|thx|please|pls))+[.!]*$/i, "").trim();
-    if (!words || namesParts(words)) continue;
-    return { text: `${text.slice(0, m.index)}fix ${INSTRUCTION}${end ? tail.slice(end.index) : ""}`, instruction: words };
+    const words = trimInstruction(end ? tail.slice(0, end.index) : tail);
+    if (!words || namesParts(words) || HEDGE.test(words.replace(CODE_RE, " ")) || LEADING_CONDITION.test(words)) continue;
+    // "review and merge, but first fix the typo": the fix comes first, as it does anyway.
+    const before = text.slice(0, m.index).replace(/(?:^|[\s,;]+)(?:(?:but|and|then)\s+)?first\s*$/i, (x) => (/^[\s,;]/.test(x) ? ", " : ""));
+    return { text: `${before}fix ${INSTRUCTION}${end ? tail.slice(end.index) : ""}`, instruction: words };
   }
   return { text, instruction: null };
 }
+
+/** An instruction's words without the colon before them and the punctuation and thanks after them. */
+const trimInstruction = (raw: string): string =>
+  raw.replace(/^\s*:?\s*/, "").replace(/[\s,;.!]+$/, "").replace(/(?:[\s,]+(?:thanks|thank you|thx|please|pls))+[.!]*$/i, "").trim();
+
+/** An entry word and a colon: what follows may be instructions (pullInstruction). */
+const ENTRY_COLON = /(?<![\w-])(review|fix-?up|fix up|implement|merge|land)\s*:(?!\/\/)/i;
+/** What may stand before an entry word's colon for its words to be instructions: other command words and politeness ("review and merge:"). */
+const ENTRY_HEAD = /^(?:[\s,;.&]|(?:please|pls|ok|okay|yes|so|and|then|also|review|fix-?up|fix up|implement|merge|land)(?![\w-]))*$/i;
+/** Words that doubt or ask rather than instruct ("maybe", "should we", a question mark): instructions holding one are not read. */
+const HEDGE = /(?<![\w-])(?:maybe|perhaps|unless|not sure|unsure|i guess|i think|could we|can we|should we|would it)(?![\w-])|\?/i;
+/** Words that only refer to items or parts already in view ("these two", "the ones"), which are no instructions. */
+const REFERS = /^(?:(?:these|those|the|all|both|each)\s+)?(?:two|three|four|five|ones?|items?|prs?|pull requests?|issues?|them|these|those)$/i;
+/** Words an instruction tail may open with before what decides it ("please wait", "just once CI is green"). */
+const TAIL_LEAD = new Set(["please", "pls", "just", "only", "ok", "okay", "so", "and", "then", "also"]);
+/** A no that refuses the command it follows ("merge: no"), or a time that puts it off ("merge: later"). */
+const REFUSES = /^(?:no|nope|nah|never|later|soon|tomorrow|tonight|eventually|someday|sometime)$/;
+
+/**
+ * Whether the words after an entry word's colon are instructions: words with letters that name no item (any item reference makes it the
+ * list form, which reports what it cannot read), and are not a condition, a hold, a yes, a weight, parts or items in view, a refusal or a
+ * doubt. Those stay for the readings that know them, which leave the text ambiguous when they don't fit.
+ */
+function instructionTail(words: string): boolean {
+  const plain = words.replace(CODE_RE, " ").replace(/\s+/g, " ").trim();
+  if (!/\p{L}/u.test(plain) || namesItems(words)) return false;
+  if (namesParts(words) || REFERS.test(stripFiller(plain)) || readYes(plain) || saysHold(plain) || HEDGE.test(plain)) return false;
+  const lead = plain.toLowerCase().split(/[\s,;.!]+/).filter(Boolean);
+  while (lead.length && TAIL_LEAD.has(lead[0]!)) lead.shift();
+  const first = lead[0] ?? "";
+  if (CONDITION.test(first) || GUARD.test(first) || REFUSES.test(first) || HOLD_WORDS.includes(first) || LEADING_CONDITION.test(lead.join(" "))) return false;
+  const rest = lead.join(" ");
+  return !CONDITIONS.some(({ re }) => rest.search(re) === 0);
+}
+
+/** Words that open a condition on the command, whatever follows them ("once dylan approves", "before the release"). */
+const LEADING_CONDITION = /^(?:(?:please|pls|just|only)\s+)*(?:once|when|whenever|after|until|till|before|as\s+soon\s+as|if|unless)(?![\w-])/i;
+
+/** Words about the merge itself: instructions holding one leave open where the work ends. A merge conflict or merge commit is code. */
+const MERGE_TALK = /(?<![\w-])(?:merg(?:e|es|ed|ing)(?!\s+(?:conflicts?|markers?|commits?|base))|land(?:ed)?|ship(?:ped)?|goes\s+in|go\s+in|myself|keep\s+(?:it|this|that)\s+open|leave\s+(?:it|this|that)|no\s+rush|before\s+it\s+goes|for\s+me\s+to)(?![\w-])/i;
+/** A negation word. */
+const NEGATION = /(?<![\w-])(?:not|never|no|dont|do not|cannot|cant|wont)(?![\w-])|n't(?![\w-])/i;
+/** A clause that speaks about the work rather than the code: it opens with a negation or with a person ("I'm not sure", "let me look"). */
+const ABOUT_WORK = /^(?:(?:and|then|also|so|just|please|but)\s+)*(?:not|never|no|don't|dont|do not|i|i'm|im|i'll|i'd|i've|we|we're|we'll|we'd|you|you're|let me|let's|lets|let us)(?![\w-])/i;
+
+/**
+ * What in instructions leaves open whether the work ends in a merge, or null: a word about the merge (MERGE_TALK), or a negation or doubt
+ * in a clause about the work. A negation in the first clause, or after the subject of a later one ("it should not default to on", "so it
+ * does not drop normals"), says what the code should do.
+ */
+function endInDoubt(instruction: string): { words: string; /** The clauses with no such word, as written. */ keep: string } | null {
+  const clauses = instruction.split(/[,;.!\n]+|\s+(?=(?:but|though|although)\s)/i).map((c) => c.trim()).filter(Boolean);
+  let words: string | null = null;
+  const keep = clauses.filter((c, i) => {
+    const plain = c.replace(CODE_RE, " ");
+    const talk = MERGE_TALK.exec(plain)?.[0];
+    const person = ABOUT_WORK.exec(plain);
+    const doubt = !!person && (NEGATION.test(plain) || HEDGE.test(plain)) && (i > 0 || !NEGATION.test(person[0]));
+    if (talk || doubt) words ??= plain.replace(/^(?:but|though|although)\s+/i, "");
+    return !talk && !doubt;
+  });
+  return words === null ? null : { words, keep: keep.join("; ") };
+}
+
+/**
+ * The fix the reply offers with each end (Parsed `ends`): the clauses of the instructions that leave nothing open, when the offer reads
+ * back as exactly that fix and a merge; else the command's usage.
+ */
+function endsOffer(keep: string, code: readonly string[]): string {
+  const fix = `fix ${keep.replace(CODE_RE, (_m, i: string) => `\`${code[Number(i)] ?? ""}\``)}`;
+  const back = keep ? parse(`${fix}, then merge`) : null;
+  const ok = back?.kind === "commands" && back.parts.length === 2 && back.parts.some((x) => x.word === "merge") && back.parts.some((x) => x.word === "fix" && "text" in x && x.text === fix.slice(4));
+  return ok ? fix : "fix <instructions>";
+}
+
+/** The words name an item: `[owner/]repo#n`, a GitHub link, or `#n`. */
+const namesItems = (words: string): boolean =>
+  words.replace(/[<>`]/g, " ").split(/[\s,;]+/).some((raw) => { const tok = raw.replace(/[.)]+$/, ""); return /^#\d+$/.test(tok) || refOf(tok) !== null; });
+
+/** What says the work comes back to the person instead of merging: "don't merge", "review only", "then hold", "come back to me". */
+const BACK_BODY = String.raw`(?:(?:do not|don't|dont)\s+merge(?:\s+(?:it|this|that|yet))*|without\s+merging|no\s+merge|(?:review|reviewing)\s+only|only\s+review|hold(?:\s+(?:it|this))?\s+after(?:wards?|\s+that)?|then\s+hold(?:\s+(?:it|this))?|(?:then\s+)?come\s+back\s+to\s+me|(?:ask|check\s+with)\s+me\s+before\s+merging)`;
+/** Politeness that may follow the last clause. */
+const THANKS = String.raw`(?:please|pls|thanks|thank\s+you|thx)`;
+/**
+ * Those words as a clause of their own, with the connector before them; the same words inside a sentence ("make sure we don't merge
+ * duplicate rows") stay part of it.
+ */
+const BACK_RE = new RegExp(String.raw`(?:^|\s*[,;.\n]\s*|\s+(?=(?:but|and|then)\s))(?:(?:but|and|then|just|please)\s+)*${BACK_BODY}(?=(?:\s+${THANKS})*\s*(?:$|[,;.!\n]))`, "gi");
+/** Only punctuation and politeness: what may follow the clause for it to be the last one. */
+const TRAIL_ONLY = new RegExp(String.raw`^(?:[\s,;.!]|${THANKS}(?![\w-]))*$`, "i");
+/**
+ * Those words as a clause inside instructions, ending there or going on with when ("and don't merge it until Friday"): the person may
+ * mean either the code or the merge.
+ */
+const BACK_INSIDE = new RegExp(String.raw`(?:^|[,;.:\n]|\s(?:but|and|then|so)\s)\s*(?:(?:but|and|then|just|please)\s+)*${BACK_BODY}(?=\s*(?:$|[,;.!\n])|\s+(?:until|till|before|unless|after|when|once|if)(?![\w-]))`, "i");
+/** A colon inside instructions, which may open a clause of their own that words after it belong to. */
+const INNER_COLON = /:(?!\/\/)/;
+
+/** The text without the words that keep instructions from merging, what they were, and whether they were one last clause. */
+function pullBack(text: string): { text: string; phrase: string | null; final: boolean } {
+  const found = [...text.matchAll(BACK_RE)];
+  const last = found.at(-1);
+  if (!last) return { text, phrase: null, final: false };
+  const out = text.replace(BACK_RE, ", ").replace(/^[\s,]+/, "");
+  const phrase = found.map((m) => m[0].replace(/^[\s,;.\n]+/, "").trim()).join(", ");
+  return { text: out, phrase, final: found.length === 1 && TRAIL_ONLY.test(text.slice(last.index + last[0].length)) };
+}
+
+/** Instructions beside words that may belong to them or to the command: nothing runs, and the reply names both. */
+const unclearInstruction = (instruction: string, code: readonly string[], rest: string): Extract<Parsed, { kind: "ambiguous" }> =>
+  ({ kind: "ambiguous", understood: `fix ${instruction.replace(CODE_RE, (_m, i: string) => `\`${code[Number(i)] ?? ""}\``).replace(/\s*,(?:\s*,)+/g, ",")}`, rest });
 
 /** Stands for the person's words for the author taken out of the text (pullAuthorWords). */
 const AUTHOR_MARK = "\u0004";

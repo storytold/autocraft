@@ -9,6 +9,7 @@ import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { runText } from "../src/workflow/read.ts";
 import { eventsOf, liveWorkflow } from "../src/workflow/store.ts";
+import { startGuidance } from "../src/implement/start-guidance.ts";
 import { type World } from "./world-db.ts";
 import { actor, answer, ANSWERS, approvedReview, asked, askedReview, authorPushed, later, leg2, legState, MAINT, ownPush, pause, planned2, pushNow, review2, reviewNow, ticks } from "./workflow-advance-world.ts";
 
@@ -352,4 +353,53 @@ test("a fix with the person's words on an approved PR: the fix-up does what they
     assert.deepEqual([now.state, now.approvedBy, now.blocker], ["running", MAINT, null]);
     w.close();
   }
+});
+
+/** PR 2, nobody started: the person's instructions are pushed as their checked fix-up, sha2 to sha3, and sync sees the push with green CI. */
+async function instructed(text: string): Promise<{ w: World; line: string }> {
+  const w = await approvedReview();
+  await w.pr(2, { label: "feature" });
+  const o = await answer(w, text);
+  assert.equal(o.outcome, "run", o.line);
+  const [fix] = await w.rows("SELECT id, instructions, by FROM operator_fixups WHERE number = 2");
+  assert.deepEqual([fix?.instructions, fix?.by], ["the export normals and add a test for empty meshes", MAINT], "the fix-up gets the words as the person's own");
+  await w.db.run(w.db.k.insertInto("main.fixups").values({ repo: "app", number: 2, from_head: "sha2", to_head: "sha3", state: "pushed", files: '["src/export.rs","tests/empty.rs"]', attempt: 1, created_at: later(), source: "operator", operator_fix: fix!.id as number }));
+  await w.db.run(w.db.k.insertInto("main.push_outcomes").values({ at: later(), stage: "fixup", action: "fixup-push", repo: "app", number: 2, from_oid: "sha2", to_oid: "sha3", before_res: "green" }));
+  await w.synced(2, "sha3");
+  await pause();
+  return { w, line: o.line };
+}
+
+test("fix with instructions on a PR nobody started makes that fix, then merges on green CI with no review of it and no question", async () => {
+  const { w, line } = await instructed("fix the export normals and add a test for empty meshes");
+  assert.ok(line.includes("then merging when CI is green"), line);
+  await ticks(w);
+  await (await w.verified(2)).premerge(2, "clean");
+  await ticks(w);
+  const wf = (await liveWorkflow(w.db, "app", 2))!;
+  assert.deepEqual([wf.state, wf.approvedBy, wf.blocker, wf.rec], ["running", MAINT, null, null], "the instructions approved the merge, and nothing asks");
+  assert.equal((await leg2(w)).state, "queued", "green CI and a clean pre-merge check at the fixed head hand it to the merge queue");
+  assert.ok((await planned2(w)).includes("merge"), "it merges");
+  assert.ok(!(await planned2(w)).includes("review"), "the person's checked fix gets no review before the merge");
+});
+
+test("fix with instructions but don't merge makes the fix and comes back to the person after its review", async () => {
+  const { w, line } = await instructed("fix the export normals and add a test for empty meshes, but don't merge");
+  assert.ok(line.includes("then coming back with a recommendation"), line);
+  await reviewNow(w, "sha3", "take");
+  await ticks(w);
+  const wf = (await liveWorkflow(w.db, "app", 2))!;
+  assert.deepEqual([wf.state, wf.approvedBy], ["recommending", null], "nobody approved the merge, so it asks");
+  assert.ok(!(await planned2(w)).includes("merge"));
+});
+
+test("the instructions an implementation was started with stay its guidance after a hold and a resume", async () => {
+  const w = await approvedReview();
+  await w.issue(3);
+  assert.equal((await answer(w, "implement: store the setting per document", "dashboard", 3)).outcome, "run");
+  assert.equal((await startGuidance(w.db, "app", 3))?.text, "store the setting per document");
+  for (const text of ["hold", "resume"]) { assert.equal((await answer(w, text, "dashboard", 3)).outcome, "run", text); await pause(); }
+  const wf = (await liveWorkflow(w.db, "app", 3))!;
+  assert.equal(wf.entry, "implement");
+  assert.deepEqual([(await startGuidance(w.db, "app", 3))?.text, (await eventsOf(w.db, "app", 3)).some((e) => e.workflowId === wf.id && e.kind === "started")], ["store the setting per document", false]);
 });

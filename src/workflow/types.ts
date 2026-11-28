@@ -26,6 +26,12 @@ export const WEIGHT_MIN = 1;
 export const WEIGHT_MAX = 10;
 export const WEIGHT_NORMAL = 5;
 export const WEIGHT_WORDS = { urgent: 10, high: 8, low: 2 } as const;
+
+/**
+ * The longest command text any surface takes, and so the longest instructions after fix: 6,000 characters, the most Discord's slash
+ * command lets a person type into one option. Every surface uses it, so the same instructions can be sent from any of them.
+ */
+export const COMMAND_TEXT_MAX = 6000;
 export type WeightWord = keyof typeof WEIGHT_WORDS;
 
 /** A finding or a separate change, numbered from 1 in the order the review listed it. */
@@ -226,8 +232,13 @@ export type CommandPart =
   /** `args`: the person's own words for the author, as written. */
   | { word: "ask-author"; args?: string }
   | { word: "close"; reason?: CloseReason }
-  | { word: "drop" | "fix"; part: number | string; /** A fix's words as written, which the fix-up carries out when they name no part of the plan. */ text?: string }
-  | { word: "weight"; weight: number };
+  | {
+    word: "drop" | "fix"; part: number | string; /** A fix's words as written, which the fix-up carries out when they name no part of the plan. */ text?: string;
+    /** The words followed an entry word's colon (`merge: X`): that word says how the work starts, not where it ends. */ colon?: true;
+  }
+  | { word: "weight"; weight: number }
+  /** "don't merge", "review only", "hold after": beside instructions, the work comes back to the person instead of merging. */
+  | { word: "no-merge" };
 
 /**
  * `items` is the list after a colon; empty means the item the text was written on. `understood` is the canonical text of what was
@@ -236,7 +247,14 @@ export type CommandPart =
 export type Parsed =
   | { kind: "yes"; items?: ItemRef[]; weight?: number }
   | { kind: "commands"; items: ItemRef[]; parts: CommandPart[]; /** A yes-word stood beside the commands ("yes, merge"). */ yes?: true }
-  | { kind: "ambiguous"; understood: string; rest: string };
+  | {
+    kind: "ambiguous"; understood: string; rest: string;
+    /**
+     * Instructions that leave open whether the work ends in a merge: the fix to offer with each end, or the usage. A model reading
+     * (read.ts) may settle the end instead.
+     */
+    ends?: string;
+  };
 
 /** A registered control: a state change a panel needs that is not one of the command words. */
 export type Control = "resume-breaker" | "release-outside" | "set-automatic" | "runner-settings";

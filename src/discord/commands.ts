@@ -1,5 +1,6 @@
 // `/autocraft account` (link, unlink, alerts, optout, optin), `status` (an item, or counts), `do` and `help`. Replies are visible to the caller only. Everything
 // they say about items and counts comes from the public status layer (src/public/status.ts).
+import { COMMAND_TEXT_MAX } from "../workflow/types.ts";
 import { audit } from "./audit.ts";
 import { publicRepoNames, publicStats, publicStatus, type PublicStats, type PublicStatus } from "../public/status.ts";
 import type { Call, Interactions } from "./interactions.ts";
@@ -178,7 +179,7 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
         { type: 3, name: "item", description: "For example photocraft#123; leave out for counts", max_length: 100 },
         { type: 3, name: "repo", description: "Counts for one repo; all public repos when both options are left out", autocomplete: true },
       ] },
-      { type: 1, name: "do", description: "Send a command to AutoCraft, for example: merge: photocraft#123", options: [{ type: 3, name: "text", description: "The command, then a colon and the items: review, urgent: photocraft#123 photocraft#456", required: true, max_length: 1000 }] },
+      { type: 1, name: "do", description: "Send a command to AutoCraft, for example: merge: photocraft#123", options: [{ type: 3, name: "text", description: "The command, then a colon and the items: review, urgent: photocraft#123 photocraft#456", required: true, max_length: COMMAND_TEXT_MAX }] },
       { type: 1, name: "help", description: "What the AutoCraft bot can do" },
     ],
   };

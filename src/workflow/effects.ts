@@ -23,7 +23,7 @@ import { queueLaneActions } from "../github/user-lane.ts";
 import { t } from "../i18n/index.ts";
 import { removeFromBatch } from "../merge/controls.ts";
 import { conflictAhead } from "../core/conflict-ahead.ts";
-import { PARTS_ONLY, partLine } from "../core/evidence.ts";
+import { PARTS_ONLY, PARTS_TOO, partLine } from "../core/evidence.ts";
 import { byHand, conflictPath, fixupConflictPath, type ConflictPath } from "../core/decide.ts";
 import { loadPrFact } from "../core/facts.ts";
 import { cancelPreapproval, checkFixup, checkMergeLeg, inActiveBatch, INSTRUCTIONS_MAX, NotYet, PreapprovalRefused, type CheckedStep } from "../preapproval/index.ts";
@@ -155,10 +155,12 @@ export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: bool
   const { db, by, item } = c;
   const merges = approved || entry === "merge";
   if (merges) await checkMerges(c);
+  // The instructions of an implement start are read from its started event (src/implement/start-guidance.ts).
   if (entry === "implement") return { write: nothing };
   // An issue's review is a request row the issue review step takes (src/issuereview).
   if (item.kind === "issue") return { write: (id) => queueIssueReviews(db, [{ workflowId: id, repo: item.repo, number: item.number, by, at: c.at, thenImplement: !!o.thenImplement }]) };
-  // A fix-up start with the person's words makes that fix first; its push is reviewed as any push of ours is, and carries the merge leg.
+  // A start with the person's words makes that fix first, and it carries the merge leg; the entry's steps follow at its head (a merge-queue
+  // entry owes the person's checked fix no review: src/core/evidence.ts neededReview).
   if (instruction && item.kind === "pr") {
     const had = merges ? await activeLeg(db, item) : null;
     const f = await loadPrFact(db, item.repo, item.number);
@@ -193,7 +195,7 @@ export function fixInstructions(plan: readonly PlanPart[], fix: readonly number[
   const said = instruction ? (instruction.review ? `Fix what the latest review of this pull request found:\n${instruction.text}` : instruction.text) : null;
   if (!parts.length) return said ?? "Make the fixes the latest review of this pull request lists.";
   // A request of parts alone is one the review carries over once its check passed (src/review/carry.ts reads it with askedParts).
-  let out = said ? `${said}\n\nAlso fix these findings of the review:` : PARTS_ONLY;
+  let out = said ? `${said}\n\n${PARTS_TOO}` : PARTS_ONLY;
   for (const p of parts) {
     const line = `\n${partLine(p)}`;
     if (out.length + line.length > INSTRUCTIONS_MAX) break;
