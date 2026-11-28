@@ -213,11 +213,13 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     const said = named.length === 1 && named[0]!.word === "fix" && typeof named[0]!.part === "string" && "text" in named[0]! && named[0].text && !chain ? named[0].text : null;
     if (said !== null) {
       const instruction = { text: said }, approve = !noMerge, how = approve ? "approved" as const : "started" as const;
-      if (state.kind === "issue" && (entry === null || entry === "implement")) return run({ start: "implement", instruction, approve, merges: approve, weight, how });
+      // On an issue only implement or fix starts the implementation with them; merge alone stays no start of an issue.
+      if (state.kind === "issue" && (entry === "implement" || (entry === null && !merge))) return run({ start: "implement", instruction, approve, merges: approve, weight, how });
       if (state.kind === "pr" && (entry === "review" || entry === "fix-up")) return run({ start: ENTRY_OF[entry], instruction, approve, merges: approve, weight, how });
       // Their fix, then the merge queue's steps; without the merge, the fix-up start: the fix, its review, a recommendation.
       if (state.kind === "pr" && entry === null) return run({ start: approve ? "merge" : "fixup", instruction, approve, merges: approve, weight, how });
     }
+    if (said !== null && state.kind === "issue" && entry === null && merge) return refused({ why: "issue-merge-queue" });
     if (named.length) return ambiguous({ why: "no-plan" });
     if (entry) return run({ start: ENTRY_OF[entry], approve: merge, merges: merge, weight, thenImplement: chain, how: merge ? "approved" : "started" });
     if (merge) {
@@ -274,6 +276,8 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
 
   const rec = wf.rec;
   const approved = !!wf.approvedBy;
+  // "Don't merge" with parts or an option named takes back no approval: the approved merge goes on unless the item is held first.
+  if (noMerge && approved) return refused({ why: "merge-approved", by: wf.approvedBy!, at: wf.approvedAt ?? "" });
   // An implement question: its options are the parts. Naming one picks it; dropping options picks the recommended one when it is
   // left, else the one option left.
   const options = optionsOf(wf);
@@ -282,7 +286,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     if (fix.length > 1) return ambiguous({ why: "pick-one", parts: fix });
     const chosen = fix.length ? options.find((p) => p.n === fix[0]) : left.find((p) => p.option === rec.answer?.option) ?? (left.length === 1 ? left[0] : undefined);
     if (!chosen?.option) return ambiguous({ why: "pick-one", parts: left.map((p) => p.n) });
-    return pick(wf, chosen, { drop, merge, weight });
+    return pick(wf, chosen, { drop, merge, noMerge, weight });
   }
   // Only drops, while a recommendation is open: the recommendation without those parts, as a yes would run it.
   if (rec && drop.length && !fix.length && !entry && !instruction) {
@@ -312,7 +316,6 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   }
   // A person's own instructions approve the work they describe, unless they say not to merge.
   const merges = merge || approved || (!!instruction && !instruction.review && !noMerge);
-  if (noMerge && approved) return refused({ why: "merge-approved", by: wf.approvedBy!, at: wf.approvedAt ?? "" });
   const approve = merges && !approved;
   return run({
     again, fix: fixes, drop, approve, merges, weight, answers: !!rec, instruction,
@@ -348,10 +351,10 @@ export function optionNamed(wf: ItemWorkflow, reply: string): PlanPart | null {
 }
 
 /** Answers the open question with `chosen`; `merge` also approves the merge when nobody has. */
-function pick(wf: ItemWorkflow, chosen: PlanPart, o: { drop?: number[]; merge?: boolean; weight?: number | null }): Resolved {
-  const approve = !!o.merge && !wf.approvedBy;
+function pick(wf: ItemWorkflow, chosen: PlanPart, o: { drop?: number[]; merge?: boolean; noMerge?: boolean; weight?: number | null }): Resolved {
+  const approve = !!o.merge && !o.noMerge && !wf.approvedBy;
   return run({
-    pick: { question: wf.rec!.question!, option: chosen.option!, label: chosen.title }, drop: o.drop ?? [], approve, merges: !!o.merge || !!wf.approvedBy, weight: o.weight ?? null,
+    pick: { question: wf.rec!.question!, option: chosen.option!, label: chosen.title }, drop: o.drop ?? [], approve, merges: !o.noMerge && (!!o.merge || !!wf.approvedBy), weight: o.weight ?? null,
     answers: true, how: approve ? "approved" : "answered",
   });
 }

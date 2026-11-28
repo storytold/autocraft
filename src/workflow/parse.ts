@@ -8,8 +8,8 @@
 //   drop export dialog               a part named by words from its title (resolve.ts matches them)
 //   fix the UV seam normals, then merge  fix with words that name no part: the fix-up carries them out (resolve.ts); they run
 //   fix: weld the normals and merge  up to a comma, full stop, `and` or `then` before the next command word or a weight
-//   implement: store it per document an entry word and a colon before words that are no list of items: the same instructions
-//   fix the seams but don't merge    beside instructions, don't merge, review only or hold after end the work with the person
+//   implement: store it per document an entry word and a colon before words that name no item and no condition, hold, weight or part: instructions
+//   fix the seams but don't merge    as the last clause after instructions, don't merge, review only or hold after end the work with the person
 //   merge: photocraft#12 #15         a list of items after a colon; a bare number takes the repo before it
 //   review photocraft#12 urgent      items written inline: repo#n, owner/repo#n, a GitHub link, or #n after one (or in an item's context)
 //   close as duplicate of #12        a close with its reason: completed, not planned, or duplicate of an item
@@ -96,10 +96,15 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
   const author = pullAuthorWords(s);
   s = author.text;
   // Words that keep instructions from merging count only beside instructions; anywhere else they stay for the reader.
+  // Such words count as the last clause after instructions only: anywhere else they may be part of what the instructions ask for
+  // ("fix the import: when two rows share an id, don't merge"), and the text is not read.
   const back = pullBack(s);
-  const withBack = back.found ? pullInstruction(back.text) : null;
+  const withBack = back.phrase !== null ? pullInstruction(back.text) : null;
+  if (withBack?.instruction != null && (!back.final || INNER_COLON.test(withBack.instruction))) return unclearInstruction(withBack.instruction, code, back.phrase!);
   const said = withBack?.instruction != null ? withBack : pullInstruction(s);
   const noMerge = said === withBack;
+  const inside = said.instruction === null ? null : BACK_INSIDE.exec(said.instruction)?.[0];
+  if (inside) return unclearInstruction(said.instruction!, code, inside.replace(/^[\s,;.:]+/, ""));
   s = said.text;
   const normal = normalise(s);
   s = normal.text;
@@ -132,7 +137,8 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
   const r = readWords(marked.text, marked.marks, code, said.instruction, author.words);
   if (noMerge) r.parts.push({ word: "no-merge" });
   const unmet = unmetConditions(normal.conditions, r.parts);
-  const guard = GUARD.exec(marked.text.replace(INSTRUCTION_RE, () => ` ${said.instruction} `).replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
+  // The instructions say what the code should do, so their own "not" or "should" doubts nothing; the words around them are read.
+  const guard = GUARD.exec(marked.text.replace(INSTRUCTION_RE, " ").replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
   const rest = [...r.unknown, ...unmet, ...(normal.refused ? [normal.refused] : []), ...(guard && !r.unknown.some((u) => u.toLowerCase().includes(guard.toLowerCase())) ? [guard] : [])];
   if (rest.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: rest.join(", ") };
   return { kind: "commands", items, parts: r.parts, ...(r.yes ? { yes: true } : {}) };
@@ -419,22 +425,20 @@ function namesParts(words: string): boolean {
  */
 function pullInstruction(text: string): { text: string; instruction: string | null } {
   if (EXCEPT_RE.test(text.trim())) return { text, instruction: null };
-  // "implement: store it per document", "fix-up: rename the helper too": an entry word's colon before words that are no list of items.
+  // "implement: store it per document", "fix-up: rename the helper too": an entry word's colon, at the start of the command, before words
+  // that are instructions (instructionTail); anything else after it stays for the list form and the other readings.
   const entry = ENTRY_COLON.exec(text);
-  if (entry) {
+  if (entry && ENTRY_HEAD.test(text.slice(0, entry.index))) {
     const tail = text.slice(entry.index + entry[0].length);
     const end = INSTRUCTION_END.exec(tail);
     const words = trimInstruction(end ? tail.slice(0, end.index) : tail);
-    const items = readItems(words, undefined);
-    if (words && /[\p{L}]/u.test(words.replace(CODE_RE, "")) && (items.bad.length || !items.items.length)) {
-      return { text: `${text.slice(0, entry.index)}${entry[1]} and fix ${INSTRUCTION}${end ? tail.slice(end.index) : ""}`, instruction: words };
-    }
+    if (instructionTail(words)) return { text: `${text.slice(0, entry.index)}${entry[1]} and fix ${INSTRUCTION}${end ? tail.slice(end.index) : ""}`, instruction: words };
   }
   for (const m of text.matchAll(/(?<![\w-])fix(?![\w-])/gi)) {
     const tail = text.slice(m.index + m[0].length);
     const end = INSTRUCTION_END.exec(tail);
     const words = trimInstruction(end ? tail.slice(0, end.index) : tail);
-    if (!words || namesParts(words)) continue;
+    if (!words || namesParts(words) || HEDGE.test(words.replace(CODE_RE, " "))) continue;
     return { text: `${text.slice(0, m.index)}fix ${INSTRUCTION}${end ? tail.slice(end.index) : ""}`, instruction: words };
   }
   return { text, instruction: null };
@@ -446,19 +450,70 @@ const trimInstruction = (raw: string): string =>
 
 /** An entry word and a colon: what follows may be instructions (pullInstruction). */
 const ENTRY_COLON = /(?<![\w-])(review|fix-?up|fix up|implement|merge|land)\s*:(?!\/\/)/i;
+/** What may stand before an entry word's colon for its words to be instructions: other command words and politeness ("review and merge:"). */
+const ENTRY_HEAD = /^(?:[\s,;.&]|(?:please|pls|ok|okay|yes|so|and|then|also|review|fix-?up|fix up|implement|merge|land)(?![\w-]))*$/i;
+/** Words that doubt or ask rather than instruct ("maybe", "should we", a question mark): instructions holding one are not read. */
+const HEDGE = /(?<![\w-])(?:maybe|perhaps|unless|not sure|unsure|i guess|i think|could we|can we|should we|would it)(?![\w-])|\?/i;
+/** Words that only refer to items or parts already in view ("these two", "the ones"), which are no instructions. */
+const REFERS = /^(?:(?:these|those|the|all|both|each)\s+)?(?:two|three|four|five|ones?|items?|prs?|pull requests?|issues?|them|these|those)$/i;
+/** Words an instruction tail may open with before what decides it ("please wait", "just once CI is green"). */
+const TAIL_LEAD = new Set(["please", "pls", "just", "only", "ok", "okay", "so", "and", "then", "also"]);
+/** A no that refuses the command it follows ("merge: no"), or a time that puts it off ("merge: later"). */
+const REFUSES = /^(?:no|nope|nah|never|later|soon|tomorrow|tonight|eventually|someday|sometime)$/;
 
 /**
- * Words that end instructions with the person instead of a merge ("but don't merge", "review only", "then hold", "come back to me"),
- * with the connector before them. They count only as a clause of their own, so the same words inside instructions stay theirs.
+ * Whether the words after an entry word's colon are instructions: words with letters that name no item (any item reference makes it the
+ * list form, which reports what it cannot read), and are not a condition, a hold, a yes, a weight, parts or items in view, a refusal or a
+ * doubt. Those stay for the readings that know them, which leave the text ambiguous when they don't fit.
  */
-const BACK_RE = /(?:^|\s*[,;.\n]\s*|\s+(?=(?:but|and|then)\s))(?:(?:but|and|then|just|please)\s+)*(?:(?:do not|don't|dont)\s+merge(?:\s+(?:it|this|that|yet))*|without\s+merging|no\s+merge|(?:review|reviewing)\s+only|only\s+review|hold(?:\s+(?:it|this))?\s+after(?:wards?|\s+that)?|then\s+hold(?:\s+(?:it|this))?|(?:then\s+)?come\s+back\s+to\s+me|(?:ask|check\s+with)\s+me\s+before\s+merging)(?=\s*(?:$|[,;.!\n]))/gi;
-
-/** The text without the words that keep instructions from merging, and whether it had any. */
-function pullBack(text: string): { text: string; found: boolean } {
-  let found = false;
-  const out = text.replace(BACK_RE, () => { found = true; return ", "; }).replace(/^[\s,]+/, "");
-  return { text: out, found };
+function instructionTail(words: string): boolean {
+  const plain = words.replace(CODE_RE, " ").replace(/\s+/g, " ").trim();
+  if (!/\p{L}/u.test(plain) || namesItems(words)) return false;
+  if (namesParts(words) || REFERS.test(stripFiller(plain)) || readYes(plain) || saysHold(plain) || HEDGE.test(plain)) return false;
+  const lead = plain.toLowerCase().split(/[\s,;.!]+/).filter(Boolean);
+  while (lead.length && TAIL_LEAD.has(lead[0]!)) lead.shift();
+  const first = lead[0] ?? "";
+  if (CONDITION.test(first) || GUARD.test(first) || REFUSES.test(first) || HOLD_WORDS.includes(first)) return false;
+  const rest = lead.join(" ");
+  return !CONDITIONS.some(({ re }) => rest.search(re) === 0);
 }
+
+/** The words name an item: `[owner/]repo#n`, a GitHub link, or `#n`. */
+const namesItems = (words: string): boolean =>
+  words.replace(/[<>`]/g, " ").split(/[\s,;]+/).some((raw) => { const tok = raw.replace(/[.)]+$/, ""); return /^#\d+$/.test(tok) || refOf(tok) !== null; });
+
+/** What says the work comes back to the person instead of merging: "don't merge", "review only", "then hold", "come back to me". */
+const BACK_BODY = String.raw`(?:(?:do not|don't|dont)\s+merge(?:\s+(?:it|this|that|yet))*|without\s+merging|no\s+merge|(?:review|reviewing)\s+only|only\s+review|hold(?:\s+(?:it|this))?\s+after(?:wards?|\s+that)?|then\s+hold(?:\s+(?:it|this))?|(?:then\s+)?come\s+back\s+to\s+me|(?:ask|check\s+with)\s+me\s+before\s+merging)`;
+/** Politeness that may follow the last clause. */
+const THANKS = String.raw`(?:please|pls|thanks|thank\s+you|thx)`;
+/**
+ * Those words as a clause of their own, with the connector before them; the same words inside a sentence ("make sure we don't merge
+ * duplicate rows") stay part of it.
+ */
+const BACK_RE = new RegExp(String.raw`(?:^|\s*[,;.\n]\s*|\s+(?=(?:but|and|then)\s))(?:(?:but|and|then|just|please)\s+)*${BACK_BODY}(?=(?:\s+${THANKS})*\s*(?:$|[,;.!\n]))`, "gi");
+/** Only punctuation and politeness: what may follow the clause for it to be the last one. */
+const TRAIL_ONLY = new RegExp(String.raw`^(?:[\s,;.!]|${THANKS}(?![\w-]))*$`, "i");
+/**
+ * Those words as a clause inside instructions, ending there or going on with when ("and don't merge it until Friday"): the person may
+ * mean either the code or the merge.
+ */
+const BACK_INSIDE = new RegExp(String.raw`(?:^|[,;.:\n]|\s(?:but|and|then|so)\s)\s*(?:(?:but|and|then|just|please)\s+)*${BACK_BODY}(?=\s*(?:$|[,;.!\n])|\s+(?:until|till|before|unless|after|when|once|if)(?![\w-]))`, "i");
+/** A colon inside instructions, which may open a clause of their own that words after it belong to. */
+const INNER_COLON = /:(?!\/\/)/;
+
+/** The text without the words that keep instructions from merging, what they were, and whether they were one last clause. */
+function pullBack(text: string): { text: string; phrase: string | null; final: boolean } {
+  const found = [...text.matchAll(BACK_RE)];
+  const last = found.at(-1);
+  if (!last) return { text, phrase: null, final: false };
+  const out = text.replace(BACK_RE, ", ").replace(/^[\s,]+/, "");
+  const phrase = found.map((m) => m[0].replace(/^[\s,;.\n]+/, "").trim()).join(", ");
+  return { text: out, phrase, final: found.length === 1 && TRAIL_ONLY.test(text.slice(last.index + last[0].length)) };
+}
+
+/** Instructions beside words that may belong to them or to the command: nothing runs, and the reply names both. */
+const unclearInstruction = (instruction: string, code: readonly string[], rest: string): Parsed =>
+  ({ kind: "ambiguous", understood: `fix ${instruction.replace(CODE_RE, (_m, i: string) => `\`${code[Number(i)] ?? ""}\``).replace(/\s*,(?:\s*,)+/g, ",")}`, rest });
 
 /** Stands for the person's words for the author taken out of the text (pullAuthorWords). */
 const AUTHOR_MARK = "\u0004";

@@ -31,10 +31,14 @@ const pushing = (w: World, n: number, from: string, to: string) =>
 const made = (action: string) => (w: World, number: number, from_oid: string, to_oid: string) =>
   w.db.run(w.db.k.insertInto("own_pushes").values({ repo: "app", number, from_oid, to_oid, action, at: T0 }));
 
-const PUSHES: { name: string; push: (w: World, n: number, from: string, to: string) => Promise<unknown>; /** Nothing a model wrote: a PR that merges without a review needs none after it. */ small?: true }[] = [
+const PUSHES: {
+  name: string; push: (w: World, n: number, from: string, to: string) => Promise<unknown>;
+  /** Nothing a model wrote: a PR that merges without a review needs none after it. */ small?: true;
+  /** A fix-up a person asked for, which its check judged against their words: a PR that merges without a review needs none after it either. */ asked?: true;
+}[] = [
   { name: "review fix-up", push: fixup(null) },
   { name: "pre-merge fix-up", push: fixup("premerge") },
-  { name: "operator fix-up", push: fixup("operator") },
+  { name: "operator fix-up", push: fixup("operator"), asked: true },
   { name: "CI fix", push: cifix },
   { name: "CI fix left by a crash", push: pushing },
   { name: "clean base merge", push: merged("same"), small: true },
@@ -76,7 +80,7 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
   for (const c of all) {
     const label = `${c.name}, ${c.state}, ${c.entry}`;
     const wf = (await liveWorkflow(w.db, "app", c.n))!, leg = await legOf(w, c.n);
-    const unreviewed = c.entry === "merge" && !!c.small;
+    const unreviewed = c.entry === "merge" && !!(c.small || c.asked);
     assert.deepEqual([wf.state, wf.blocker, wf.baseHead, wf.approvedBy], ["running", null, `sha${c.n}b`, OPERATOR], label);
     assert.deepEqual([leg.state, leg.head, leg.fromHead], [unreviewed ? "ci" : "review", `sha${c.n}b`, `sha${c.n}`], label);
     // The next step is planned: the review (or its carry), or the pre-merge review where none is needed.
@@ -89,7 +93,7 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
 
   // Reviewed, green and clean at the new head, every one is handed over and may merge as the approver.
   for (const c of all) {
-    if (!(c.entry === "merge" && c.small)) await w.review(c.n, { sure: false });
+    if (!(c.entry === "merge" && (c.small || c.asked))) await w.review(c.n, { sure: false });
     await w.premerge(c.n, "clean");
   }
   await tick(w);

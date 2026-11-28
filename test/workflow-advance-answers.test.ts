@@ -9,6 +9,7 @@ import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { runText } from "../src/workflow/read.ts";
 import { eventsOf, liveWorkflow } from "../src/workflow/store.ts";
+import { startGuidance } from "../src/implement/start-guidance.ts";
 import { type World } from "./world-db.ts";
 import { actor, answer, ANSWERS, approvedReview, asked, askedReview, authorPushed, later, leg2, legState, MAINT, ownPush, pause, planned2, pushNow, review2, reviewNow, ticks } from "./workflow-advance-world.ts";
 
@@ -390,4 +391,15 @@ test("fix with instructions but don't merge makes the fix and comes back to the 
   const wf = (await liveWorkflow(w.db, "app", 2))!;
   assert.deepEqual([wf.state, wf.approvedBy], ["recommending", null], "nobody approved the merge, so it asks");
   assert.ok(!(await planned2(w)).includes("merge"));
+});
+
+test("the instructions an implementation was started with stay its guidance after a hold and a resume", async () => {
+  const w = await approvedReview();
+  await w.issue(3);
+  assert.equal((await answer(w, "implement: store the setting per document", "dashboard", 3)).outcome, "run");
+  assert.equal((await startGuidance(w.db, "app", 3))?.text, "store the setting per document");
+  for (const text of ["hold", "resume"]) { assert.equal((await answer(w, text, "dashboard", 3)).outcome, "run", text); await pause(); }
+  const wf = (await liveWorkflow(w.db, "app", 3))!;
+  assert.equal(wf.entry, "implement");
+  assert.deepEqual([(await startGuidance(w.db, "app", 3))?.text, (await eventsOf(w.db, "app", 3)).some((e) => e.workflowId === wf.id && e.kind === "started")], ["store the setting per document", false]);
 });

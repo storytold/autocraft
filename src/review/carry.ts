@@ -6,7 +6,7 @@ import { ourPathIn, type OurCommit } from "./ours.ts";
 import type { OpusReview, ReviewFix } from "./opus-parse.ts";
 import { reviewAfterBaseMerge } from "./own-diff.ts";
 import { mergeApprovalsIn, mergeApprovedIn } from "../core/author-round.ts";
-import { askedParts, beyondPlanned, premergeSource, type ChainReview } from "../core/evidence.ts";
+import { askedParts, beyondPlanned, partsBeside, premergeSource, type ChainReview } from "../core/evidence.ts";
 import { findingsOf } from "../premerge/store.ts";
 import { notBlocking, stoppingDefects } from "../premerge/types.ts";
 import { partTitle } from "../workflow/work.ts";
@@ -36,8 +36,9 @@ async function loadFixupFacts(db: Db, keys: { ref: string; from: string; to: str
 
 /**
  * The commit as a review carries it, or null when it owes the head a model's reading: a CI fix of ours (it writes code no patch check
- * saw), a base merge that changed the PR's own diff, a fix-up the patch check did not approve, and an operator's fix-up that worked a
- * person's own words or changed a file none of its parts names.
+ * saw), a base merge that changed the PR's own diff, a fix-up the patch check did not approve, and an operator's fix-up of parts alone
+ * that changed a file none of its parts names. An operator's fix-up of a person's own words carries: the patch check judged it against
+ * them, and it is the work they approved (which files their words reach only they know); it made the parts named beside them.
  */
 function carriable(key: string, c: OurCommit, edges: readonly PushEdge[], f: FixupFacts): Step | null {
   if (c.kind === "CI fix") return null;
@@ -48,8 +49,10 @@ function carriable(key: string, c: OurCommit, edges: readonly PushEdge[], f: Fix
   if (f.verdicts.get(`${key}@${c.from}`) !== "approve") return null;
   if (c.kind !== "operator fix-up") return { kind: c.kind };
   const row = f.pushes.get(`${key}@${c.from}>${c.sha}`);
-  const parts = row?.instructions ? askedParts(row.instructions) : null;
-  if (!row?.files.length || !parts || parts.some((p) => !p.file) || beyondPlanned(row.files, parts.map((p) => p.file!)).length) return null;
+  if (!row?.instructions) return null;
+  const parts = askedParts(row.instructions);
+  if (!parts) return { kind: c.kind, asked: partsBeside(row.instructions).map((p) => p.title.toLowerCase()) };
+  if (!row.files.length || parts.some((p) => !p.file) || beyondPlanned(row.files, parts.map((p) => p.file!)).length) return null;
   return { kind: c.kind, asked: parts.map((p) => p.title.toLowerCase()) };
 }
 
@@ -57,7 +60,7 @@ const PHRASE: Record<OurCommit["kind"], string> = {
   "fix-up": "our checked fix-up",
   "base merge": "our merge of the base branch, and the PR's own diff is unchanged",
   "pre-merge fix": "our checked fix-up of the pre-merge review's defects",
-  "operator fix-up": "our checked fix-up of the parts a person asked for",
+  "operator fix-up": "our checked fix-up of what a person asked for",
   "CI fix": "our CI fix",
 };
 

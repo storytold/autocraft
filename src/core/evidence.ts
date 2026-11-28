@@ -206,6 +206,8 @@ export const beyondPlanned = (files: readonly string[], planned: readonly string
 
 /** The first line of a fix-up request that names parts of the plan and nothing else (src/workflow/effects.ts fixInstructions). */
 export const PARTS_ONLY = "Fix these findings of the review, and nothing else:";
+/** The line before the parts a fix-up request names after a person's own words or a review's finding. */
+export const PARTS_TOO = "Also fix these findings of the review:";
 /** A part's line in a fix-up request. A title that ends in parentheses and names no file gets empty ones, so its own are not read as a file. */
 export const partLine = (p: { n: number; title: string; file?: string | null }): string => `${p.n}. ${p.title}${p.file ? ` (${p.file})` : p.title.endsWith(")") ? " ()" : ""}`;
 
@@ -216,6 +218,17 @@ export const partLine = (p: { n: number; title: string; file?: string | null }):
 export function askedParts(instructions: string): { title: string; file: string | null }[] | null {
   const [first, ...lines] = instructions.split("\n");
   if (first !== PARTS_ONLY || !lines.length) return null;
+  return partLines(lines);
+}
+
+/** The parts a fix-up request with a person's own words or a review's finding names after them (PARTS_TOO); none when it names none. */
+export function partsBeside(instructions: string): { title: string; file: string | null }[] {
+  const at = instructions.lastIndexOf(`\n\n${PARTS_TOO}\n`);
+  return at < 0 ? [] : partLines(instructions.slice(at + PARTS_TOO.length + 3).split("\n")) ?? [];
+}
+
+/** Part lines (partLine) as titles and files; null when a line is none. */
+function partLines(lines: readonly string[]): { title: string; file: string | null }[] | null {
   const out: { title: string; file: string | null }[] = [];
   for (const l of lines) {
     const m = /^\d+\. (.+?)(?: \(([^()]*)\))?$/.exec(l);
