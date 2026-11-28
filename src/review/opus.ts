@@ -79,7 +79,7 @@ export type OpusDeps = {
   semantic?: SemanticDeps;
   /** The PR's own diffs at two heads, for the review round; absent: unavailable, so the round reviews the whole diff where it fits. */
   ownDiffs?: OwnDiffReader;
-  /** Where a review can run in the PR's fix session workspace (src/fixsession/review.ts); absent: always read-only. */
+  /** Where a review can run in a workspace of its own (src/fixsession/review.ts); absent: always read-only. */
   workspace?: ReviewWorkspaceDeps | null;
 };
 export type OpusSummary = {
@@ -421,9 +421,7 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
     input.workflow = true;
     const dir = referenceDir(repo);
     const semantic = dir ? deps.semantic ?? defaultSemanticDeps(db, input.ref) : undefined;
-    // A take-fix keeps the workspace for its fix-up.
-    const fixes = (x: { ok: boolean; value?: { review: OpusReview | null } }): boolean => x.ok && x.value?.review?.verdict === "take-fix";
-    const r = await inReviewWorkspace(db, deps.workspace, c, c.head_oid, { prompt: "review.opus", fixes }, log, async (workspace) => {
+    const r = await inReviewWorkspace(db, deps.workspace, c, c.head_oid, log, async (workspace) => {
       const checkout = workspace ? undefined : (await deps.checkout?.(repo, c.number, c.head_oid)) ?? undefined;
       if (checkout) input.repo_dir = REPO_PATH;
       return await runModelStep(db, REVIEW_OPUS, input, {

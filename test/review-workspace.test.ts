@@ -1,8 +1,8 @@
-// The Opus review in the PR's fix session workspace (fix_sessions entry `review`): the call works in the PR's workspace, reseeded at
-// the head, with the tools that read, build and test but none that edit, its verdict is stored as a read-only review's is, and a
-// workspace only the review used ends afterwards. A PR whose workspace cannot be had (here: no build environment enabled) is
-// reviewed read-only instead of waiting for one. A fix turn a halted job left queued keeps the review out of the workspace, and its
-// resumed step never takes a tree reseeded after the turn was queued for the turn's work.
+// The Opus review in a workspace of its own (fix_sessions entry `review`): the call works in a workspace at the head, with the tools
+// that read, build and test but none that edit, its verdict is stored as a read-only review's is, the workspace ends afterwards, and
+// the PR's fix session workspace is left as it was. A PR whose workspace cannot be had (here: no build environment enabled) is
+// reviewed read-only instead of waiting for one. A resumed fix step never takes a tree reseeded after its turn was queued for the
+// turn's work.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -12,7 +12,6 @@ import { StoppedError } from "../src/agents/call.ts";
 import { createEnv, updateEnv } from "../src/build/envs.ts";
 import type { CallDeps } from "../src/build/session-turns.ts";
 import { getWorkspace } from "../src/build/workspaces.ts";
-import { inReviewWorkspace } from "../src/fixsession/review.ts";
 import { loadSessions } from "../src/fixsession/store.ts";
 import { setFixSessions } from "../src/fixsession/switch.ts";
 import { prStep, runStep } from "../src/fixsession/turn.ts";
@@ -48,8 +47,10 @@ test("a review with `review` on runs in the PR's workspace and stores its verdic
   await reportingTaskRunner(db);
   await createEnv(db, { id: "pods", label: "Pods", kind: "kubernetes", slots: 4, settings: { image: "autocraft:test" } }, "op");
   await setFixSessions(db, { steps: ["review"], repos: null }, "op");
-  const pod = fixPod(db, { top: join(top, "pods"), src: work, head });
+  const pod = fixPod(db, { top: join(top, "pods"), src: work, head, launch: true });
   const session = await pod.session("pr", 1);
+  // A fix step's work in progress in the PR's fix session workspace.
+  writeFileSync(join(pod.root(session.workspaceId!), "src/src/wip.rs"), "pub fn wip() {}\n");
   pod.model(() => ({}), take("app#1"));
   const deps: OpusDeps = {
     fetchDiff: async () => ({ ok: true, text: DIFF }), fetchDelta: async () => ({ ok: false, tooLarge: false, error: "unused" }), model: "opus", maxChars: 120_000,
@@ -61,15 +62,17 @@ test("a review with `review` on runs in the PR's workspace and stores its verdic
   await runOpusReview(db, { repo: "app", number: 1 }, (l) => log.push(l), deps);
   const call = pod.queued[0];
   assert.ok(call, "the review was queued as a workspace call");
-  assert.equal(call.workspaceId, session.workspaceId, "in the PR's fix session workspace");
+  assert.notEqual(call.workspaceId, session.workspaceId, "in a workspace of its own, not the fix session's");
   assert.equal(call.promptId, "review.opus");
   assert.ok(call.tools?.includes("shell") && !call.tools.includes("write") && !call.tools.includes("edit"), "it may build and test, not edit");
   assert.match(call.stdin, /\/work\/src/);
-  assert.equal(readFileSync(join(pod.root(session.workspaceId!), "repo-docs/AGENTS.txt"), "utf8"), "Test with cargo test.\n");
-  assert.equal((await loadSessions(db, [session.id])).get(session.id)?.head, head);
+  assert.equal(readFileSync(join(pod.root(call.workspaceId), "repo-docs/AGENTS.txt"), "utf8"), "Test with cargo test.\n");
   assert.deepEqual(await verdict(1), [["take", 1]]);
-  assert.ok(log.some((l) => /app#1: review in fix session \d+'s workspace/.test(l)));
-  assert.equal((await getWorkspace(db, session.workspaceId!))?.state, "ended", "a take asks for no fix-up: the workspace ends instead of parking");
+  assert.ok(log.some((l) => /app#1: review in workspace \d+ at/.test(l)));
+  assert.equal((await getWorkspace(db, call.workspaceId))?.state, "ended", "the review's workspace ends with the review");
+  assert.equal((await getWorkspace(db, session.workspaceId!))?.state, "ready", "the fix session's workspace is not touched");
+  assert.equal(readFileSync(join(pod.root(session.workspaceId!), "src/src/wip.rs"), "utf8"), "pub fn wip() {}\n", "nor its tree");
+  assert.deepEqual((await loadSessions(db, [session.id])).get(session.id), session, "nor the session");
 
   // No environment can hold PR #2's workspace: the review does not wait for one, and a Task Runner answers the read-only call.
   await updateEnv(db, "pods", { enabled: false }, "op");
@@ -83,7 +86,7 @@ test("a review with `review` on runs in the PR's workspace and stores its verdic
   w.close();
 });
 
-test("a fix turn a halted job left queued keeps the review read-only, and its resumed step redoes the turn on a tree reseeded since", async () => {
+test("a fix step resumed after a halt redoes its turn on a tree reseeded since the turn was queued", async () => {
   const LIB = "crates/app/src/lib.rs";
   const work = join(top, "resume");
   mkdirSync(join(work, "crates/app/src"), { recursive: true });
@@ -98,7 +101,7 @@ test("a fix turn a halted job left queued keeps the review read-only, and its re
 
   const db = (await world()).db;
   await createEnv(db, { id: "pods", label: "Pods", kind: "kubernetes", slots: 4, settings: { image: "autocraft:test" } }, "op");
-  await setFixSessions(db, { steps: ["fixup", "review"], repos: null }, "op");
+  await setFixSessions(db, { steps: ["fixup"], repos: null }, "op");
   const pod = fixPod(db, { top: join(top, "resume-pods"), src: work, head, repo: "lib" });
   const session = await pod.session("pr", 1);
   // Each call's edit lands once, when it is first awaited; the first one's job stops right after.
@@ -119,13 +122,7 @@ test("a fix turn a halted job left queued keeps the review read-only, and its re
   const spec = () => prStep(db, turn, () => ({ step: "fixup", allowed: [LIB], newFilesIn: ["crates/app"], packages: ["crates/app"], scripts: null }));
   await assert.rejects(runStep(env, session, spec()), StoppedError);
 
-  const log: string[] = [];
-  const ws = await inReviewWorkspace(db, { env: () => ({ api: pod.api, pollMs: 20 }), calls, docs: async () => ({}) }, { repo: "lib", number: 1 }, head,
-    { prompt: "review.opus", fixes: () => false }, (l) => log.push(l), async (w) => w);
-  assert.equal(ws, null, "the review runs read-only");
-  assert.ok(log.some((l) => /read-only review: turn \d+ of fix session \d+ is not settled yet/.test(l)), log.join("\n"));
-
-  // What a review that did not wait would have done: the tree is reseeded at the same head, the turn's edit gone.
+  // Another step reseeds the tree at the same head meanwhile: the turn's edit is gone.
   const live = (await loadSessions(db, [session.id])).get(session.id)!;
   assert.equal((await ensureWorkspace(live, head, { db, log: () => {}, api: pod.api, pollMs: 20 })).kind, "ready");
   const asked = pod.queued.length;

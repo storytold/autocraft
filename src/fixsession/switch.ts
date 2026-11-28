@@ -1,5 +1,5 @@
-// The fix_sessions setting: which fix steps work in fix sessions, and with `review` whether the Opus reviews of a PR run in its
-// fix session's workspace (src/fixsession/review.ts), optionally only in some repos. Off (no steps) by default.
+// The fix_sessions setting: which fix steps work in fix sessions, and with `review` whether the Opus reviews of a PR run in
+// workspaces of their own (src/fixsession/review.ts), optionally only in some repos. Off (no steps) by default.
 import type { Db } from "../db/index.ts";
 import { loadTrackedRepos, saveSettings, setting, SETTINGS, type FixSessionsSetting } from "../data/control/index.ts";
 import { FIX_SESSION_SWITCHES, type FixSessionSwitch } from "../data/fixsession/index.ts";
@@ -10,7 +10,7 @@ export async function fixSessionsSetting(db: Db): Promise<FixSessionsSetting> {
   return SETTINGS.fixSessions.read(await setting(db, FIX_SESSIONS_KEY));
 }
 
-/** Whether `step` works in a fix session on `repo` (`review`: whether its reviews run in the fix session's workspace). */
+/** Whether `step` works in a fix session on `repo` (`review`: whether the Opus reviews of its PRs run in workspaces of their own). */
 export async function fixSessionsOn(db: Db, step: FixSessionSwitch, repo: string): Promise<boolean> {
   const s = await fixSessionsSetting(db);
   return s.steps.includes(step) && (s.repos === null || s.repos.includes(repo));

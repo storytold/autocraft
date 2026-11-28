@@ -171,9 +171,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
       const { input } = p;
       const dir = referenceDir(repo);
       const semantic: SemanticDeps | undefined = dir ? deps.semantic ?? defaultSemanticDeps(db, ref) : undefined;
-      // Blocking defects keep the workspace for their fix-up.
-      const fixes = (x: { ok: boolean; value?: PremergeReview | null }): boolean => x.ok && !!x.value?.findings.some((f) => f.severity === "defect" && !notBlocking(f));
-      const r = await inReviewWorkspace(db, deps.workspace, e, head, { prompt: "premerge.opus", fixes }, log, async (workspace) => {
+      const r = await inReviewWorkspace(db, deps.workspace, e, head, log, async (workspace) => {
         const checkout = workspace ? undefined : (await deps.checkout?.(repo, e.number, head)) ?? undefined;
         if (checkout) input.repo_dir = REPO_PATH;
         return await runModelStep(db, PREMERGE_OPUS, input, {

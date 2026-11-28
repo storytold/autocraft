@@ -14,13 +14,11 @@ import { loadCallPrompt, loadCallUsage } from "../data/runners/index.ts";
 import { awaitTurn, queueTurn, realCalls, settleOrphan, type CallDeps, type RoundStore, type TurnResult } from "../build/session-turns.ts";
 import { resumePrompt, type WorkspaceCallRequest } from "../build/workspace-call.ts";
 import { WORK_ROOT } from "../build/workspace-tool-specs.ts";
-import { BuildError } from "../build/envs.ts";
 import { describeHeader, execWs, getWorkspace } from "../build/workspaces.ts";
 import { runChecks, statOf, workspacePod, type CheckRound, type Pod } from "../implement/checks.ts";
 import { workspaceDiff } from "../implement/diff.ts";
 import { CLAUDE_PROMPTS, claudeParts } from "../prompts/index.ts";
 import { promptTier } from "../remote/bundle.ts";
-import { withdrawCall } from "../remote/calls.ts";
 import { leaseItem } from "../runner/leases.ts";
 import { repoDocsFor } from "../sandbox/repo-docs.ts";
 import { runGate, type GateOk, type StepGate } from "./gates.ts";
@@ -40,9 +38,6 @@ export { CHECK_FOLLOW_UPS };
 export type FixPromptId = "fix.session" | "security.session";
 /** The step a turn works for, with a maintainer's `fix <instructions>` apart from the review's fixes; turns are stored under it. */
 export type GateStep = FixTurnStep;
-
-/** The error of a review's call a fix step withdrew from the session's workspace: the review then runs read-only (review.ts). */
-export const REVIEW_YIELDED = "withdrawn: a fix step needs the fix session's workspace";
 
 /** A lease lost with its Task Runner goes back to the queue once, onto the same workspace. */
 const CALL_ATTEMPTS = 2;
@@ -284,18 +279,6 @@ const historyTurn = (t: FixTurnResult, files: string[]): HistoryTurn | null =>
 export const fixSessionLease = (s: Pick<FixSession, "kind" | "repo" | "number">): string => `fixsession:${s.kind}:${s.repo}#${s.number}`;
 
 /**
- * Withdraws the call bound to the session's workspace while it is queued or leased and is not a turn of the session: a review's call
- * (review.ts), still running or left by a halted job. A fix step never waits behind a review, and its turn's bind is never refused.
- */
-async function takeWorkspaceBack(db: Db, s: Pick<FixSession, "id">, workspaceId: number, log: (line: string) => void): Promise<void> {
-  const bound = (await getWorkspace(db, workspaceId))?.remote_call_id ?? null;
-  if (bound === null) return;
-  const own = new Set((await turnsOf(db, s.id)).flatMap((t) => (t.callId === null ? [] : [t.callId])));
-  if (own.has(Number(bound))) return;
-  if (await withdrawCall(db, Number(bound), REVIEW_YIELDED)) log(`fix session ${s.id}: call ${bound} withdrawn from workspace ${workspaceId}: the step needs the workspace`);
-}
-
-/**
  * Runs one step on the session: the workspace ready at `spec.head` (a new step starts from a clean tree), the turns, AutoCraft's
  * checks (findings go back at most CHECK_FOLLOW_UPS times), the diff and the step's gates (a refusal goes back once as an undo
  * turn). A turn a job before this one queued for the same step and head is adopted on the tree it worked on. The step holds the
@@ -324,13 +307,10 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
   /** Files each turn's tree held, for a fresh session's history note. */
   const filesOf = new Map<number, string[]>();
   const history: HistoryTurn[] = [];
-  const earlier = await turnsOf(db, s.id);
-  for (const t of earlier) {
+  for (const t of await turnsOf(db, s.id)) {
     const h = historyTurn(roundOf(t).result, []);
     if (h && t.outcome !== "queued") history.push(h);
   }
-  // The commit of the session's last task: a review in the session's workspace moves the workspace, not what the session was told.
-  const toldHead = earlier.at(-1)?.head ?? null;
   const done = (o: StepResult, workspaceId: number | null): StepOutcome => ({ ...o, session: s, workspaceId, turns, checks });
   const reload = async (): Promise<boolean> => {
     const now = (await loadSessions(db, [s.id])).get(s.id);
@@ -361,8 +341,7 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
     round = queued;
     if (!await settled(round, r)) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, s.workspaceId);
   }
-  if (s.workspaceId !== null) await takeWorkspaceBack(db, s, s.workspaceId, env.log);
-  // The adopted turn's tree is kept only when nothing reseeded or restored it after the turn was queued (a review moves it).
+  // The adopted turn's tree is kept only when nothing reseeded or restored it after the turn was queued.
   const ws = await ensureWorkspace(s, spec.head, env, { keepTree: resume || !!spec.lint, ...(resume && { keptSince: pending!.createdAt }) });
   if (ws.kind === "wait") return done({ kind: "wait", reason: ws.reason, ...(ws.stuck && { stuck: true as const }) }, s.workspaceId);
   if (ws.kind === "failed") return done({ kind: "failed", reason: ws.reason, startFailed: true }, s.workspaceId);
@@ -406,7 +385,7 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
   const deps = dependencyNote(ws.dependencies);
   const opening = async (): Promise<Next> => spec.lint ? { purpose: "lint", message: spec.lint.message + deps } : ({
     purpose: "step",
-    message: spec.message({ moved: toldHead && toldHead !== spec.head ? { from: toldHead, diffStat: await env.movedStat?.(toldHead, spec.head).catch(() => "") ?? "" } : null }) + deps,
+    message: spec.message({ moved: ws.moved ? { from: ws.moved.from, diffStat: await env.movedStat?.(ws.moved.from, ws.moved.to).catch(() => "") ?? "" } : null }) + deps,
   });
   let next: Next | null = round ? null : await opening();
   let misses = 0, retryOf: number | null = null;
@@ -446,12 +425,7 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
       retryOf = null;
       const req: FixTurnRequest = { session: s, workspaceId: ws.workspaceId, step, purpose, head: spec.head, stdin, promptId: spec.promptId, items, by, ...(follow && next.message !== null && { parentId: s.lastCallId! }), ...(prompt && { prompt }) };
       await docs();
-      round = await queueTurn(db, calls, store, req).catch(async (e: unknown) => {
-        // A review bound a call to the workspace since the step took it back.
-        if (!(e instanceof BuildError && e.status === 409)) throw e;
-        await takeWorkspaceBack(db, s, ws.workspaceId, env.log);
-        return await queueTurn(db, calls, store, req);
-      });
+      round = await queueTurn(db, calls, store, req);
       sent++;
       env.log(`fix session ${s.id}: turn ${round.callId} (${purpose}, ${spec.step}) queued${req.parentId !== undefined ? ` on the session of call ${req.parentId}` : ""}`);
       await env.progress?.(`fix session ${s.id}: turn ${round.callId} (${purpose})`);

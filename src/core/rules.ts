@@ -169,7 +169,7 @@ export function unsentAsk(ats: readonly string[], nowMs: number, delays: readonl
 export const PIPELINE_LOGIN_KEY = "pipeline_login";
 
 /**
- * A review in its pull request's fix session workspace (src/fixsession/review.ts): the longest it waits for the workspace to get
+ * A review in a workspace of its own (src/fixsession/review.ts): the longest it waits for the workspace to get
  * ready, and for a workspace slot within that, before it runs read-only; and the time its call gets beyond the prompt's limit for
  * the builds and tests it runs.
  */

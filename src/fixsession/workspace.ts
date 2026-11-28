@@ -132,12 +132,10 @@ export async function fixSessionEnv(db: Db, kind: FixSessionKind): Promise<strin
  * ready, or when the session ended meanwhile. The FIX_START_FAILURES-th workspace at `at` that fails to start fails the step
  * (`failed`); after that none is made at `at` (a wait) until a kubernetes environment changes.
  */
-export async function ensureWorkspace(session: FixSession, at: string, env: FixWorkspaceEnv, o: { keepTree?: boolean; keptSince?: string; patience?: ReadyPatience } = {}): Promise<WorkspaceReady | WorkspaceWait | WorkspaceFailed> {
+export async function ensureWorkspace(session: FixSession, at: string, env: FixWorkspaceEnv, o: { keepTree?: boolean; keptSince?: string } = {}): Promise<WorkspaceReady | WorkspaceWait | WorkspaceFailed> {
   if (!SHA.test(at)) throw new Error(`not a commit: ${at}`);
   const db = env.db;
   const now = env.now ?? Date.now;
-  // A caller's patience is one deadline for every pass below: a workspace made again does not start the wait anew.
-  const until: ReadyDeadline | undefined = o.patience && { all: now() + o.patience.limitMs, slot: now() + o.patience.slotMs };
   const moved = session.head && session.head !== at ? { from: session.head, to: at } : null;
   const gone = () => new WorkspaceUnavailable(`fix session ${session.id} ended meanwhile`, false);
   let id = session.workspaceId;
@@ -189,7 +187,7 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
 
   let row: WorkspaceRow;
   for (;;) {
-    const ready = await readyRow(env, id!, until);
+    const ready = await readyRow(env, id!);
     if ("pending" in ready) return pending(ready.pending);
     if ("lost" in ready) {
       if (made) {
@@ -239,10 +237,11 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
   return { kind: "ready", workspaceId: id!, baseCommit, how, why, moved, dependencies, ended, treeLost };
 }
 
-/** How long a caller waits for its workspace: in all (`limitMs`), and for a workspace slot (state requested) (`slotMs`). */
-export type ReadyPatience = { limitMs: number; slotMs: number };
-/** A ReadyPatience as times (ms): when the wait ends in all, and while the workspace still waits for a slot. */
-type ReadyDeadline = { all: number; slot: number };
+/** When a caller's wait for its workspace ends (ms): in all, and while the workspace still waits for a slot (state requested). */
+export type ReadyDeadline = { all: number; slot: number };
+
+/** The ready row of workspace `id` (resumed when parked), waited for until `until`: one deadline however often the caller asks. */
+export const waitReady = (env: FixWorkspaceEnv, id: number, until: ReadyDeadline): ReturnType<typeof readyRow> => readyRow(env, id, until);
 
 /**
  * The ready row of workspace `id`, resuming it when parked. `lost`: it will not be ready (gone, failed or ended, or parked and out of
@@ -279,7 +278,7 @@ async function readyRow(env: FixWorkspaceEnv, id: number, until?: ReadyDeadline)
  * from (with no warm version, whenever it has any), through the environment's crate mirror. A fetch that fails does not fail the
  * step: the opening message says so (turn.ts dependencyNote), and the lint task, which can fetch, stays the gate.
  */
-async function fetchIfNeeded(env: FixWorkspaceEnv, w: WorkspaceRow, at: string): Promise<DependencyFetch> {
+export async function fetchIfNeeded(env: FixWorkspaceEnv, w: WorkspaceRow, at: string): Promise<DependencyFetch> {
   const db = env.db;
   const now = env.now ?? Date.now;
   if (!await cargoLocksDiffer(w.repo, w.warm_commit, at)) return { state: "unchanged" };

@@ -48,6 +48,15 @@ export const isSecurityWorkspace = (w: { owner: string | null }): boolean => w.o
 export const FIX_SESSION_WORKSPACE_OWNER = "fix session";
 /** A fix session's workspace, PR or security: the work its steps keep is stored with them, so its volume is only a warm cache. */
 export const isFixSessionWorkspace = (w: { owner: string | null }): boolean => isSecurityWorkspace(w) || w.owner?.startsWith(`${FIX_SESSION_WORKSPACE_OWNER} `) === true;
+/** The owner prefix of a review's own workspace (`<prefix> <job id or -> <repo>#<n>`, src/fixsession/review.ts). */
+export const REVIEW_WORKSPACE_OWNER = "review";
+/** A review workspace's owner: the job that made it (`-` outside a job) and the PR it reviews. */
+export const reviewWorkspaceOwner = (jobId: number | null, ref: string): string => `${REVIEW_WORKSPACE_OWNER} ${jobId ?? "-"} ${ref}`;
+/** The job of a review's workspace: its id, null when made outside a job, undefined when the workspace is not a review's. */
+export function reviewWorkspaceJob(w: { owner: string | null }): number | null | undefined {
+  const m = /^review (\d+|-) \S+$/.exec(w.owner ?? "");
+  return m ? (m[1] === "-" ? null : Number(m[1])) : undefined;
+}
 
 export type TaskState = "queued" | "claimed" | "running" | "done" | "failed" | "cancelled" | "lost";
 export type Warm = { key: string; role: "use" | "build" };

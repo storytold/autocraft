@@ -99,7 +99,7 @@ export const SETTINGS = {
   planShadow: reg<"on" | "off">("plan_shadow", "text", "off", { owner: "planner" }, (r) => (r === "on" ? "on" : "off")),
   /** The tracked repo the hourly self-evaluation reads and files its issues on (src/eval); null: the evaluation is off. */
   evalRepo: reg<string | null>("eval_repo", "text", null, { owner: "eval" }, (r) => { const v = r?.trim(); return v && REPO_LIST_NAME.test(v) ? v : null; }),
-  /** The fix steps that work in fix sessions (src/fixsession), with `review` for the reviews that run in their workspaces, and the repos they do it in (null: every repo). */
+  /** The fix steps that work in fix sessions (src/fixsession), with `review` for the Opus reviews that run in workspaces of their own, and the repos they do it in (null: every repo). */
   fixSessions: reg<FixSessionsSetting>("fix_sessions", "json", { steps: [], repos: null }, { owner: "fixup" }, (r) => {
     const v = jsonOf(r) as { steps?: unknown; repos?: unknown } | undefined;
     if (!v || typeof v !== "object") return { steps: [], repos: null };

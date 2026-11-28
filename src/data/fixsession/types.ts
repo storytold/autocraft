@@ -5,7 +5,7 @@ export type FixSessionKind = "pr" | "security";
 /** The step a turn works for: its allowed files and its stored row come from it. */
 export type FixStep = "fixup" | "cifix" | "conflict" | "security";
 export const FIX_STEPS: readonly FixStep[] = ["cifix", "fixup", "conflict", "security"];
-/** An entry of the fix_sessions setting: a fix step, or `review` (the Opus reviews of a PR borrow its fix session's workspace). */
+/** An entry of the fix_sessions setting: a fix step, or `review` (the Opus reviews of a PR run in workspaces of their own). */
 export type FixSessionSwitch = FixStep | "review";
 export const FIX_SESSION_SWITCHES: readonly FixSessionSwitch[] = [...FIX_STEPS, "review"];
 /** The step a turn was sent for: a maintainer's `fix <instructions>` runs in the fix-up step with its own gate, so its turns are apart. */

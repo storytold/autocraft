@@ -19,8 +19,11 @@ const helper = new URL("../../deploy/container/ws", import.meta.url).pathname;
 /** The id of the n-th call queued (1-based). */
 export const callId = (n: number): number => 5000 + n;
 
-/** `src`: a git directory holding `head`; `top`: where the pods' scratch trees go. The env "pods" is created on `db`. */
-export function fixPod(db: Db, o: { top: string; src: string; head: string; repo?: string }) {
+/**
+ * `src`: a git directory holding `head`; `top`: where the pods' scratch trees go. The env "pods" is created on `db`. `launch`: a
+ * workspace requested at `head` that has no pod yet gets one, seeded at the head, as the launcher would.
+ */
+export function fixPod(db: Db, o: { top: string; src: string; head: string; repo?: string; launch?: boolean }) {
   const roots = new Map<number, string>();
   const seed = (ws: number): string => {
     const root = join(o.top, `pod-${ws}`);
@@ -51,6 +54,11 @@ export function fixPod(db: Db, o: { top: string; src: string; head: string; repo
   // The launcher's part: a parked workspace that is resumed gets its pod back on the same volume, tree and base kept.
   setInterval(() => {
     for (const ws of roots.keys()) void moveWorkspace(db, ws, ["requested"], "ready", { pod: `ws-${ws}` }).catch(() => {});
+    if (o.launch) {
+      void db.all(db.k.selectFrom("main.workspaces").select("id").where("state", "=", "requested").where("base_sha", "=", o.head)).then(async (rows) => {
+        for (const r of rows) if (!roots.has(Number(r.id))) await moveWorkspace(db, Number(r.id), ["requested"], "ready", { pod: `ws-${r.id}`, base_commit: seed(Number(r.id)) });
+      }).catch(() => {});
+    }
   }, 50).unref();
 
   const queued: WorkspaceCallRequest[] = [];
