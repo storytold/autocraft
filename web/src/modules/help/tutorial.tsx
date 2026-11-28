@@ -45,7 +45,7 @@ function statusLines(): { head: string; rest: string[] } {
     id: 1, repo: REPO, number: ITEMS[0]!.number, kind: "pr", entry: "review", weight: 5, state: "running",
     startedBy: WHO, startedAt: AT, startedVia: "github", baseHead: null, acceptedHead: null,
     approvedBy: WHO, approvedAt: AT, approvedVia: "github", stoppedBy: null, stoppedAt: null, takenBy: null,
-    blocker: null, blockerParams: null, rec: null, recAt: null, recHead: null,
+    blocker: null, blockerParams: null, rec: null, recAt: null, recHead: null, closedWaits: null,
     plan: [], step: "review",
     prNumber: null, reviewAskedAt: null, legacyPreapprovalId: null, version: 3, updatedAt: AT,
   };
