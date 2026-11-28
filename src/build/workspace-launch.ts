@@ -436,13 +436,14 @@ function podFailure(pod: KPod): string {
 }
 
 /**
- * A review's own workspace (src/fixsession/review.ts) that no review will use again: parked (it went idle), or its job ended
- * without ending it (stopped, failed) and is not waiting to resume. A running or resuming job's workspace stays for that job.
+ * A review's own workspace (src/fixsession/review.ts) that no review will use again: parked with no call it resumes for (it went
+ * idle, or its resumes ran out), or its job ended without ending it (stopped, failed) and is not waiting to resume. A running or
+ * resuming job's workspace stays for that job; one parked under its call (node lost, evicted) resumes for it as any other.
  */
 async function reviewWorkspaceDone(c: Ctx, w: WorkspaceRow): Promise<boolean> {
   const job = reviewWorkspaceJob(w);
   if (job === undefined) return false;
-  if (w.state === "parked") return true;
+  if (w.state === "parked" && !resumesFor(c, w)) return true;
   if (job === null) return false;
   const j = (await loadJobs(c.d.db, [job])).get(job);
   return !j || !(j.state === "running" || (j.state === "queued" && j.resumes > 0));
@@ -452,11 +453,11 @@ async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
   const now = c.now();
   const age = now - Date.parse(w.state_at);
   if (await reviewWorkspaceDone(c, w)) {
-    if (await moveWorkspace(c.d.db, w.id, LIVE_STATES, "ended", {}, now)) c.d.log(`workspace launcher: review workspace ${w.id} ended (${w.state === "parked" ? "idle" : "its job is gone"})`);
+    if (await moveWorkspace(c.d.db, w.id, LIVE_STATES, "ended", {}, now)) c.d.log(`workspace launcher: review workspace ${w.id} ended (${w.state === "parked" && !resumesFor(c, w) ? "idle" : "its job is gone"})`);
     return;
   }
   if (w.state === "parked") {
-    const bound = w.resume_tries < RESUME_TRIES ? boundCall(c, w) : null;
+    const bound = resumesFor(c, w);
     if (bound) {
       if (await resumeWorkspace(c.d.db, w.id, now)) c.d.log(`workspace launcher: workspace ${w.id} resuming for call ${w.remote_call_id} (${bound})${w.pvc ? " on its volume" : "; rebuilding from base and checkpoint"}`);
       return;
@@ -572,6 +573,9 @@ function callRunning(c: Ctx, id: number, now: number, tool?: string): boolean {
 function boundCall(c: Ctx, w: WorkspaceRow): "queued" | "leased" | null {
   return c.pass.bound.get(w.id) ?? null;
 }
+
+/** The state of the call a parked workspace resumes for, while it has resumes left, or null. */
+const resumesFor = (c: Ctx, w: WorkspaceRow): "queued" | "leased" | null => w.resume_tries < RESUME_TRIES ? boundCall(c, w) : null;
 
 /**
  * Whether a background shell command the session started in the current pod may still run, by the session's bookkeeping
