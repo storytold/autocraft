@@ -19,7 +19,7 @@ export interface ItemStatus {
 /** Phase of every PR plan state. A new plan state fails tsc here. */
 const PR_PHASE = {
   ready: "In queue", "decision-answered-merge": "In queue", refused: "In queue", "waiting-ci": "In queue", "waiting-premerge": "In queue",
-  "batch-checking": "In queue", "in-batch": "In queue", "ci-approval": "In queue", "waiting-main-ci": "In queue", integration: "In queue",
+  "batch-checking": "In queue", "in-batch": "In queue", "ci-approval": "In queue", integration: "In queue",
   "ci-failed": "Fixing", conflict: "Fixing", "needs-fix-up": "Fixing", "verify-failed": "Fixing", "batch-failed": "Fixing", pushed: "Fixing",
   "waiting-verify": "Verifying", "verify-error": "Verifying",
   "needs-decision": "Waiting for a person", "changes-requested": "Waiting for a person", "not-started": "Waiting for a person",

@@ -102,6 +102,7 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     },
     { table: "ci_fixes", class: "item", why: "CI fix rows of one PR (cifix facts, push chain, lint)." },
     { table: "ci_run_approvals", class: "item", why: "Workflow runs waiting at one PR head; an integration PR's tip rows are its own." },
+    { table: "ci_vs_main", class: "item", why: "A PR head's failing checks compared with the red default branch's: whether its CI counts as passing." },
     {
       table: "classifications", class: "item", why: "Classifier verdicts of one item.",
       // Without a current_run row the run every item's labels come from is the newest verdict run (latestRun).

@@ -1,0 +1,79 @@
+// No new failures (src/mainci/no-new.ts): while main is red, a PR whose failing check fails only on main's failing tests merges, and one
+// whose same check fails on another test waits as red CI does.
+import assert from "node:assert/strict";
+import { afterEach, test } from "node:test";
+import { saveMainHeads } from "../src/data/mirror/index.ts";
+import { compareFailures, headFailures } from "../src/mainci/no-new.ts";
+import type { FailedStep } from "../src/cifix/types.ts";
+import { runChecks } from "../src/review/index.ts";
+import { CHECK, T0, world, type World } from "./world-db.ts";
+
+let current: World | null = null;
+afterEach(() => { current?.close(); current = null; });
+
+const MAIN = "main-red";
+/** A `gh run view --log-failed` log of the test job where `tests` panicked. */
+const log = (tests: string[]): string => tests.map((t, i) => `test\tRun cargo test\t2026-01-01T00:00:0${i}.0000000Z thread '${t}' panicked at crates/core/src/lib.rs:${10 + i}:5:`).join("\n") + "\n";
+
+test("while main is red, a PR failing only where main fails is planned to merge and one with a new failing test waits", async () => {
+  const w = current = await (await (await (await world()).repo()).pr(1, { ci: "failure" })).pr(2, { ci: "failure" });
+  for (const n of [1, 2]) { await w.review(n); await w.verified(n); await w.premerge(n, "clean"); }
+  await saveMainHeads(w.db, [{ repo: "app", sha: MAIN, branch: "main", state: "red", failing: JSON.stringify([{ name: CHECK, url: null }]), checks: "[]", committed_at: T0, headline: "Change" }], T0);
+  // Main fails tests::a; PR 1 fails tests::a too, PR 2 fails tests::b.
+  const logs: Record<string, string[]> = { [MAIN]: ["tests::a"], sha1: ["tests::a"], sha2: ["tests::a", "tests::b"] };
+  const runs: Record<string, string> = { [MAIN]: "100", sha1: "101", sha2: "102" };
+  const gh = async (args: string[]): Promise<string> => {
+    const sha = /commits\/([^/]+)\/check-runs/.exec(args[1] ?? "")?.[1];
+    if (sha) return JSON.stringify({ check_runs: [{ id: 1, name: CHECK, status: "completed", conclusion: "failure", started_at: "2026-01-03T00:00:00Z", details_url: `https://github.com/o/app/actions/runs/${runs[sha]}/job/1` }] });
+    if (/actions\/runs\/\d+$/.test(args[1] ?? "")) return JSON.stringify({ run_attempt: 1, created_at: "2026-01-03T00:00:00Z", event: "pull_request" });
+    if (args[0] === "run") return log(logs[Object.keys(runs).find((k) => runs[k] === args[2])!]!);
+    throw new Error(`unexpected gh ${args.join(" ")}`);
+  };
+  const before = await w.prPlan(1);
+  assert.equal(before.state, "waiting-ci", "a red head is compared with main's before anything else happens to it");
+  await runChecks(w.db, { repo: "app" }, () => {}, w.gh.querier, gh);
+  // Each PR's other check passed.
+  await w.db.run(w.db.k.updateTable("pr_checks").set({ checks: JSON.stringify([{ name: CHECK, state: "failure" }, { name: "gate / lint", state: "success" }]) }));
+  const [one, two] = [await w.prPlan(1), await w.prPlan(2)];
+  assert.ok(one.actions.some((a) => a.kind === "merge"), `PR 1 merges past main's failure: ${one.state} ${JSON.stringify(one.actions)}`);
+  assert.match(one.note ?? "", /fails only where main fails/);
+  assert.equal(two.state, "ci-failed");
+  assert.ok(!two.actions.some((a) => a.kind === "merge"));
+});
+
+/** One head's reading of check G with the given failed steps. */
+const head = (steps: FailedStep[]) => headFailures({ head: "h", checks: [{ name: "G", conclusion: "failure", runId: 1, startedAt: "2026-01-02T00:00:00Z", steps }] });
+const step = (step: string, lines: string[]): FailedStep => ({ job: "test", step, tail: lines.join("\n") + "\n" });
+const panic = (test: string, at = "crates/core/src/lib.rs:10:5") => `thread '${test}' panicked at ${at}:`;
+
+test("two tests that panic at one line are two failures: one main does not have is new", () => {
+  const main = head([step("cargo test", [panic("tests::a")])]);
+  const pr = head([step("cargo test", [panic("tests::a"), panic("tests::b")])]);
+  assert.equal(compareFailures(pr, main, ["G"]).state, "new");
+  assert.equal(compareFailures(head([step("cargo test", [panic("tests::a")])]), main, ["G"]).state, "not-new");
+});
+
+test("a failure the step keys cannot see is new: a failed step main's check does not have, or a summary test main's does not list", () => {
+  const main = head([step("cargo test", [panic("tests::a")])]);
+  const lint = head([step("cargo test", [panic("tests::a")]), step("cargo clippy", ["error: this could be simpler", "##[error]Process completed with exit code 1."])]);
+  assert.notEqual(compareFailures(lint, main, ["G"]).state, "not-new");
+  const summary = head([step("cargo test", [panic("tests::a"), "", "failures:", "    tests::a", "    tests::c", "", "test result: FAILED. 3 passed; 2 failed; 0 ignored"])]);
+  assert.equal(compareFailures(summary, main, ["G"]).state, "new");
+});
+
+test("a rerun, or a run created before main turned red, ran on an older merge commit: its failure is not taken as main's", () => {
+  const main = head([step("cargo test", [panic("tests::a")])]);
+  const pr = (run: { attempt: number; createdAt: string }) => { const h = head([step("cargo test", [panic("tests::a")])]); h.G!.run = run; return h; };
+  const redAt = "2026-01-01T12:00:00Z";
+  assert.equal(compareFailures(pr({ attempt: 1, createdAt: "2026-01-02T00:00:00Z" }), main, ["G"], redAt).state, "not-new");
+  assert.notEqual(compareFailures(pr({ attempt: 2, createdAt: "2026-01-01T00:00:00Z" }), main, ["G"], redAt).state, "not-new");
+  assert.notEqual(compareFailures(pr({ attempt: 1, createdAt: "2026-01-01T00:00:00Z" }), main, ["G"], redAt).state, "not-new");
+});
+
+test("a test binary that dies without a summary is a failure main's does not have", () => {
+  const main = head([step("cargo test", [panic("tests::a"), "error: test failed, to rerun pass `-p core --lib`"])]);
+  const target = head([step("cargo test", [panic("tests::a"), "error: test failed, to rerun pass `-p core --lib`", "error: test failed, to rerun pass `-p core --test render`"])]);
+  assert.equal(compareFailures(target, main, ["G"]).state, "new");
+  const died = head([step("cargo test", [panic("tests::a"), "error: test failed, to rerun pass `-p core --lib`", "thread 'main' has overflowed its stack", "fatal runtime error: stack overflow"])]);
+  assert.notEqual(compareFailures(died, main, ["G"]).state, "not-new");
+});

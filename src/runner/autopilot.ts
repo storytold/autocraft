@@ -599,8 +599,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       // A repo whose last batches could not be published starts no batch until its backoff ends (single merges go on): the planner wakes then.
       for (const at of due.size ? (await publishBackoffs(db, new Date(), [...due])).values() : []) ctx.wake?.push(at);
       const out: Candidate[] = [];
-      // No other stage refreshes a PR that waits only for CI or for GitHub to compute its mergeable state: a queue entry waiting for CI, or a PR
-      // whose approved merge waits in ci for CI the stored checks do not settle (src/preapproval). A due merge job reads only the PRs it merges,
+      // No other stage refreshes a PR that waits only for CI or for GitHub to compute its mergeable state: a queue entry waiting for CI, a PR
+      // whose approved merge waits in ci for CI the stored checks do not settle (src/preapproval), or a red head due for its comparison with a red main. A due merge job reads only the PRs it merges,
       // so these are read whatever else the repo has going on; the members of a due batch are left to its merge job, which reads them with the batch PR.
       const ciWaits = new Map<string, Set<string>>();
       const waits = (repo: string, number: number): void => {
@@ -609,6 +609,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       };
       for (const e of queue) if (e.state === "waiting-ci") waits(e.repo, e.number);
       for (const p of plans.prs) if (p.facts.ghState === "OPEN" && p.facts.operator?.ciWait) waits(p.facts.repo, p.facts.number);
+      // A red head due for its comparison with a red main (src/mainci/no-new.ts), in any queue state: the checks job makes it.
+      for (const p of plans.prs) if (p.facts.ghState === "OPEN" && p.facts.vsMain && "comparing" in p.facts.vsMain && p.facts.vsMain.at === null) waits(p.facts.repo, p.facts.number);
       // A merge job that advanced a batch runs again at once; one that only watched waits.
       const later = async (step: string, repo: string): Promise<boolean> => {
         const last = await lastJobEnd(db, step, repo);

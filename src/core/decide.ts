@@ -1,6 +1,6 @@
 // decidePr: the review-to-merge rules for one open PR, in one place. Pure: no database, no clock (facts carry `now`).
 import {
-  BATCHABLE, MAIN_RED_HELD, OFF_DEFAULT_REASON, autoEligible, PREMERGE_DEFECT_REASON, PREMERGE_UNSURE_REASON, PREMERGE_FAILED_REASON, PREMERGE_MAX_TRIES, premergeRetryAt, RETRY_AFTER_MS,
+  BATCHABLE, OFF_DEFAULT_REASON, passesNote, autoEligible, PREMERGE_DEFECT_REASON, PREMERGE_UNSURE_REASON, PREMERGE_FAILED_REASON, PREMERGE_MAX_TRIES, premergeRetryAt, RETRY_AFTER_MS,
   RULE_LABELS, RULE_SIZES, RULE_TIERS, UNSURE_REASON, VERIFY_UNAVAILABLE, ciAllows, conflictNote, verifyAllows, verifyOk,
   FIXUP_MAX_ATTEMPTS, CIFIX_FINAL_STATES, CIFIX_MAX_PUSHES_PER_PR, CIFIX_MAX_TRIES, CIFIX_MAX_TRIES_PER_PR, STATE_REFUSAL, TRANSIENT_REFUSAL,
 } from "./rules.ts";
@@ -182,8 +182,8 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
   if (open && f.mergeable === "CONFLICTING" && f.conflict) e.conflictNote = conflictNote(f.conflict.bucket, f.conflict.base);
   // A rule-path PR without a clean pre-merge review keeps its own state: a batch must not land it.
   if (f.batch && BATCHABLE.includes(e.state) && (e.path !== "rule" || e.premerge === "clean")) e.state = f.batch;
-  // A red main fails every PR's CI: ready PRs wait for it, except the PRs AutoCraft opened to fix it.
-  else if (open && f.repoFacts.mainRed && MAIN_RED_HELD.includes(e.state) && !f.mainFix) e.state = "waiting-main-ci";
+  // CI that passes only by main's failures says so where nothing else is noted.
+  if (open && !e.note && f.vsMain && "passing" in f.vsMain) e.note = passesNote(f.vsMain.passing);
   return e;
 }
 
@@ -269,7 +269,6 @@ const LEG = system("leg", "its pre-approved merge");
 /** What an item stopped at a blocker waits on. */
 const ASKS_AGAIN = person("blocked", "a maintainer's answer to the question it stopped with");
 const BATCH = system("batch", "its batch");
-const MAIN_RED = system("main-red", "a green main");
 const COMMENT_OFF = person("repo-approval", "comment approval for the repo");
 const RED_CI = person("ci-fix-failed", "a person to look at the red CI");
 const PUSH_OFF = person("repo-approval", "push approval for the repo");
@@ -279,7 +278,7 @@ const AUTHOR_FIXES = contributor("fix-contributor", "the contributor's fixes");
 
 const WAITS: Partial<Record<QueueState, Wait>> = {
   "waiting-ci": system("ci", "CI or GitHub's mergeable state"), "waiting-premerge": system("premerge", "the pre-merge review"), "waiting-verify": system("verification", "verification"),
-  "needs-decision": ANSWER, "waiting-main-ci": MAIN_RED, "in-batch": BATCH, "batch-checking": BATCH,
+  "needs-decision": ANSWER, "in-batch": BATCH, "batch-checking": BATCH,
   // Nothing puts the PR into a batch again but a person: their answer hands it over anew.
   "batch-failed": person("batch-failed", "its batch"),
   "verify-failed": person("verification-failed", "a person: verification failed"), "verify-error": person("verification-error", "a person: verification errored"),
@@ -515,9 +514,9 @@ function cifixOf(f: PrFacts): "work" | "collect" | "rerun" | "capped" | "ask" | 
 const unsentWait = (what: string, until?: number): Wait => system("ask-unsent", `${what} again ${until === undefined ? "later" : `after ${new Date(until).toISOString().slice(11, 16)}`}: the last one did not reach GitHub`);
 const unsentUntil = (u: UnsentAsk | undefined): number | undefined => (u && u !== "final" ? u.until : undefined);
 
-/** What stops a started PR whose fixes nobody approved: a conflict or red CI (not a red main's, except on the PR that fixes it). */
+/** What stops a started PR whose fixes nobody approved: a conflict or red CI (failures only where main fails do not count: src/mainci/no-new.ts). */
 export const unapprovedStop = (f: PrFacts): "conflict" | "ci" | null =>
-  !workflowOf(f) || fixAllowed(f) ? null : f.mergeable === "CONFLICTING" ? "conflict" : f.ci === "failure" && (!f.repoFacts.mainRed || f.mainFix) ? "ci" : null;
+  !workflowOf(f) || fixAllowed(f) ? null : f.mergeable === "CONFLICTING" ? "conflict" : f.ci === "failure" ? "ci" : null;
 
 /**
  * Who settles a PR's conflict with its base branch once its merge is approved: the conflict step merges the base in, and the fixes follow;
@@ -633,7 +632,7 @@ export const worksOn = (a: Action): boolean => {
 };
 
 /** Queue states on the path to merge: the PR stays assigned in them unless a stage gave it up. */
-const PROGRESS_STATES: ReadonlySet<string> = new Set(["ready", "waiting-ci", "waiting-premerge", "waiting-verify", "ci-approval", "waiting-main-ci", "decision-answered-merge", "needs-fix-up", "ci-failed", "refused"]);
+const PROGRESS_STATES: ReadonlySet<string> = new Set(["ready", "waiting-ci", "waiting-premerge", "waiting-verify", "ci-approval", "decision-answered-merge", "needs-fix-up", "ci-failed", "refused"]);
 
 /** What the merge landed still needs its review: none is stored, or the last try failed and may be repeated. */
 export const landedOpen = (pm: NonNullable<PrFacts["postmerge"]>): boolean =>
@@ -889,6 +888,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
       return stuckState() ?? system("mergeable-unknown", `GitHub's merge state, unknown since ${f.unknown.since.slice(11, 16)} (unknown for ${f.unknown.reads} checks reads in a row)`);
     }
     if (st === "ci-approval") return runsWait(f);
+    if (st === "waiting-ci" && f.vsMain && "comparing" in f.vsMain) {
+      return system("ci", `a comparison of its CI failures with the red default branch's${f.vsMain.at === null ? "" : `, read again after ${new Date(f.vsMain.at).toISOString().slice(11, 16)}`}`);
+    }
     if (st === "waiting-verify" && f.verification?.retryAt !== undefined) {
       return system("verification", `verification, run again at ${new Date(f.verification.retryAt).toISOString().slice(11, 16)} UTC after it errored`);
     }
@@ -907,8 +909,6 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     if (f.mergeWaiting && f.mergeLacksAccess && e && eligible(f, e)) return person("actor-gone", `a maintainer of ${f.repo} to approve the merge again: ${f.may.workflow?.approvedBy ?? f.may.workflow?.startedBy ?? "its approver"} has no write access there`);
     if (f.mergeWaiting && e && eligible(f, e)) return person("sign-in", "the sign-in or access of the person who approved the merge");
     if (st === "refused" && refusalStuck(f)) return person("merge-refused", `a person: the merge was refused (${excerpt(f.lastMerge!.reason!)})`);
-    // A started PR nobody approved gets no CI fix, and its red CI may be the default branch's: nobody is asked about it until that is green.
-    if (st === "ci-failed" && workflowOf(f) && !fixAllowed(f)) return MAIN_RED;
     // Nothing moves the merge of a PR that asks: its question is what it waits on.
     const asking = f.may.workflow?.state === "blocked" ? ASKS_AGAIN : f.may.workflow?.state === "recommending" ? ANSWER : null;
     if (asking && (st === "waiting-premerge" || (st === "ready" && e?.path === "maintainer"))) return asking;

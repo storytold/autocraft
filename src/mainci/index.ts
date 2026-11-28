@@ -17,25 +17,29 @@ import { loadDecidingHeads, loadRepos, loadSyncState, saveMainHeads, saveSyncSta
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { warmPass } from "../build/warm-queue.ts";
+import type { RedMain } from "./no-new.ts";
 
-/** Branch prefix of the PRs AutoCraft opens to fix a red main; the merge queue does not hold them while main is red. */
+/** Branch prefix of the PRs AutoCraft opens to fix a red main. */
 export const MAIN_FIX_BRANCH_PREFIX = "autocraft/main-ci-";
 
 /**
- * Repos whose default branch counts as red (derive()), also while its newest head's checks run after a red result, each with
+ * Repos whose default branch counts as red (derive()), also while its newest head's checks run after a red result: the settled red
+ * head and the checks that failed there, which a PR's failures are compared with (src/mainci/no-new.ts), when it was seen red, and
  * the time it stops counting as red when nothing new is read (derive()'s `until`; null: only a new result ends it).
  */
-export async function redMainHolds(db: Db, nowMs: number = Date.now()): Promise<Map<string, number | null>> {
-  const out = new Map<string, number | null>();
+export async function redMainHeads(db: Db, nowMs: number = Date.now()): Promise<Map<string, RedMain>> {
+  const out = new Map<string, RedMain>();
   for (const [repo, heads] of await loadDecidingHeads(db, [])) {
-    const d = currentHead(heads, nowMs)?.d;
-    if (d?.state === "red") out.set(repo, d.until);
+    const at = currentHead(heads, nowMs);
+    if (at?.d.state !== "red") continue;
+    let failing: string[] = [];
+    try { failing = (JSON.parse(at.settled.failing) as { name?: string }[]).map((f) => f.name ?? "").filter(Boolean); } catch { /* malformed: nothing fails by name */ }
+    // When the head was seen red: the change to red when it is red now, else (its checks rerun) when it was first seen.
+    const redAt = at.settled.state === "red" ? at.settled.state_changed_at : at.settled.first_seen_at;
+    out.set(repo, { sha: at.settled.head_sha, failing, until: at.d.until, redAt });
   }
   return out;
 }
-
-/** The repos of redMainHolds. */
-export const redMainRepos = async (db: Db, nowMs: number = Date.now()): Promise<Set<string>> => new Set((await redMainHolds(db, nowMs)).keys());
 
 /** The repo's current head and the head its state comes from among its stored ones, and what derive() says of them; null when they name none. */
 function currentHead<H extends MainHeadSummary>(heads: readonly H[], nowMs: number): { cur: H; settled: H; d: NonNullable<ReturnType<typeof derive>> } | null {

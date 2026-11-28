@@ -36,14 +36,14 @@ import { setPipelineLogin } from "../github/pipeline-account.ts";
 import { commitIdentity, type Identity } from "../github/identity.ts";
 import { branchOf, forkOf, mainHeadOf } from "../github/fork.ts";
 import type { Querier } from "../mirror.ts";
-import { refreshChecks } from "../review/checks.ts";
+import { refreshChecks, type PrChecks } from "../review/checks.ts";
 import { BatchGit } from "./batch-git.ts";
 import { ACTIVE_BATCH, BLOCKED_BY_REVIEW, CLOSED_BY_PERSON, MAX_PUBLISH_FAILURES, PUBLISH_FAILED, RUNS_WAIT_NOTE, BUILD_MAX_MS, MAX_BUILD_TRIES, admits, cancelBuild, retryDelayMs, getBatch, publishBackoffs, publishDelayMs, updateBatch, type BatchMember, type BatchView } from "./batch-store.ts";
 import { firstRefusal, mergeVerdicts } from "./approval.ts";
 import { baseRefusal, recordLiveBase } from "./base.ts";
-import { allowFailedArgs, ciNow, prInfo, mergeRun, DEFAULT_MERGE_COMMAND, type CommandResult } from "./index.ts";
+import { allowFailedArgs, ciNow, commandNote, prInfo, mergeRun, DEFAULT_MERGE_COMMAND, type CommandResult } from "./index.ts";
 import { liveGateChecked } from "../review/discussion.ts";
-import { redMainRepos } from "../mainci/index.ts";
+import { baseRed, judgeHead, vsMainStatus } from "../mainci/no-new.ts";
 import { optionalChecks } from "../optional-checks.ts";
 import { buildQueue, type QueueEntry } from "./queue.ts";
 import { planned } from "../core/select.ts";
@@ -53,7 +53,7 @@ import { jobItem } from "../runner/job-items.ts";
 import { leaseItem } from "../runner/leases.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { addAudit } from "../data/control/index.ts";
-import { loadBatchRun, loadBatchSizes, loadRunApprovals, openBatch, recordLanded as saveLanded, updateBatches } from "../data/merge/index.ts";
+import { loadBatchRun, loadBatchSizes, loadRunApprovals, loadVsMainAt, openBatch, recordLanded as saveLanded, updateBatches, type VsMainRow } from "../data/merge/index.ts";
 import type { StageRow } from "../data/merge/types.ts";
 import { loadItems, loadMainCiAt } from "../data/mirror/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
@@ -367,13 +367,14 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     }
   }
 
+  const gh = async (args: string[]): Promise<string> => {
+    const r = await d.exec("gh", args);
+    if (r.code !== 0) throw new Error(oneLine(r.stderr || r.stdout || `gh exited ${r.code}`));
+    return r.stdout;
+  };
+
   /** The failed checks of the batch tip with their log tails, or null when they cannot be read. Read-only. */
   async function readBatchFailure(b: BatchView): Promise<CiFailure | null> {
-    const gh = async (args: string[]): Promise<string> => {
-      const r = await d.exec("gh", args);
-      if (r.code !== 0) throw new Error(oneLine(r.stderr || r.stdout || `gh exited ${r.code}`));
-      return r.stdout;
-    };
     try {
       const r = await readFailure(gh, repo, b.commit_sha, await optionalChecks(db, repo));
       // A log not readable yet still names the failed checks and their runs: the batch traces nothing in it and reruns or waits.
@@ -398,11 +399,12 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
    * Upstream CI failed on the batch PR. In order: checks red on the default branch at the base too blame no PR; a
    * failure the log traces drops those PRs (tested alone); otherwise the failed runs are rerun once; then the batch fails.
    */
-  async function red(b: BatchView, members: BatchMember[], names: string[]): Promise<void> {
+  async function red(b: BatchView, members: BatchMember[], names: string[], vs: VsMainRow | null): Promise<void> {
     const optional = new Set(await optionalChecks(db, repo));
     const failing = names.filter((n) => !optional.has(n));
-    const why = `upstream CI failed on the batch PR${failing.length ? `: ${failing.join(", ")}` : ""}`;
-    const atBase = await redOnMainAt(b.base_sha);
+    const why = `upstream CI failed on the batch PR${failing.length ? `: ${vs?.state === "new" && vs.reason ? vs.reason : failing.join(", ")}` : ""}`;
+    // A failure the comparison with main's found new is some member's: the base does not excuse it.
+    const atBase = vs?.state === "new" ? null : await redOnMainAt(b.base_sha);
     if (atBase && failing.length && failing.every((n) => atBase.has(n))) {
       const head = await d.mainHead(repo, branch);
       if (head && head !== b.base_sha) return supersede(b, members, `${failing.join(", ")} failed on ${branch} at the base too; rebuilt on ${short(head)}`);
@@ -563,18 +565,28 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     log(`  ${b.branch}: merged ${members.length} PR${members.length === 1 ? "" : "s"}`);
   }
 
+  /**
+   * The batch PR's red CI against main at the batch's base (src/mainci/no-new.ts), read now when due: the comparison row, null when none
+   * applies (that head is not red with the failing checks), or "wait" while a log is read again after its backoff.
+   */
+  async function vsMain(b: BatchView, ch: PrChecks): Promise<VsMainRow | null | "wait"> {
+    const red = await baseRed(db, repo, b.base_sha);
+    const optional = await optionalChecks(db, repo);
+    const failing = ch.checks.filter((c) => c.state === "failure" && !optional.includes(c.name)).map((c) => c.name);
+    const prev = await loadVsMainAt(db, repo, ch.number, ch.head_oid);
+    const st = vsMainStatus({ failing, red, row: prev, now: d.now().getTime() });
+    if (st.skip) return null;
+    const row = st.due ? (await judgeHead(db, gh, { repo, number: ch.number, head: ch.head_oid, failing, red: red!, prev, now: d.now() })).row : st.row;
+    if (row && row.state !== "unread") log(`  ${b.branch}: CI compared with ${branch}'s at the base: ${row.state}${row.reason ? ` (${row.reason})` : ""}`);
+    return !row || row.state === "unread" ? "wait" : row;
+  }
+
   async function land(b: BatchView, members: BatchMember[], q: QueueEntry[]): Promise<void> {
     // One query for the batch PR and its members: the members must still be open at the head that was batched.
     const checks = await refreshChecks(db, d.querier, repo, [b.pr_number!, ...members.map((m) => m.number)]);
     const ch = checks.find((c) => c.number === b.pr_number);
     if (!ch) { s.waiting.push(b.branch); return; }
     if (ch.state === "MERGED") return await bookLanded(b, members, q);
-    // Main is red: the batch keeps its checks but does not merge until main is green. Main-fix PRs never join a batch (a plan merge action with singleOnly).
-    if ((await redMainRepos(db, d.now().getTime())).has(repo)) {
-      log(`  ${b.branch}: main CI is red in ${repo}; not merged`);
-      s.waiting.push(b.branch);
-      return;
-    }
     // A control (stop, remove) may have ended the batch while the checks were read; it closes the PR itself.
     if ((await getBatch(db, b.id)).state !== "open") { log(`  ${b.branch}: ended meanwhile; left alone`); return; }
     if (ch.state === "CLOSED") {
@@ -589,8 +601,16 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     }
     const live = members.filter((m) => checks.some((c) => c.number === m.number && c.state === "OPEN" && !c.is_draft && c.head_oid === m.head_oid));
     if (live.length < members.length) return supersede(b, live, "a PR in the batch was closed, merged, pushed to or turned into a draft");
-    const ci = await ciNow(db, repo, ch);
-    if (ci === "failure") return red(b, members, ch.checks.filter((c) => c.state === "failure").map((c) => c.name));
+    let ci = await ciNow(db, repo, ch, b.base_sha);
+    let vs: VsMainRow | null = null;
+    if (ci === "failure") {
+      // While main is red, the batch PR's failing checks are compared with main's: failures only where main fails let it merge.
+      const judged = await vsMain(b, ch);
+      if (judged === "wait") { s.waiting.push(b.branch); return; }
+      vs = judged;
+      if (vs?.state === "not-new") ci = await ciNow(db, repo, ch, b.base_sha);
+    }
+    if (ci === "failure") return red(b, members, ch.checks.filter((c) => c.state === "failure").map((c) => c.name), vs);
     if (ch.mergeable === "CONFLICTING") return supersede(b, members, `the batch PR conflicts with ${branch}`);
     const moved = await movedAway(b);
     if (moved) return supersede(b, members, moved);
@@ -657,14 +677,14 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       // Every member must still hold at its batched head, and the batch PR at the batch tip.
       const g = await guardBatchMerge(db, { repo, number: b.pr_number!, head: b.commit_sha }, members.map((m) => ({ number: m.number, head: m.head_oid })), by, liveRead);
       if ("refused" in g) { log(`  ${b.branch}: not merged: ${g.refused}`); s.waiting.push(b.branch); return; }
-      const r = await mergeViaCommand(w, d.run, d.mergeCommand, g, { method: "merge", extra: await allowFailedArgs(db, repo, d.mergeCommand) }, { run: runId, head: b.commit_sha, batch: b.branch }, async () => {
+      const r = await mergeViaCommand(w, d.run, d.mergeCommand, g, { method: "merge", extra: await allowFailedArgs(db, repo, d.mergeCommand, { number: b.pr_number!, head: b.commit_sha, base: b.base_sha }) }, { run: runId, head: b.commit_sha, batch: b.branch }, async () => {
         after = (await refreshChecks(db, d.querier, repo, [b.pr_number!]))[0];
         return after?.state === "MERGED";
       });
       if (r.code !== 0) {
         // The merge may have gone through although the command failed afterwards.
         if (after?.state === "MERGED") return await bookLanded(b, members, q);
-        const why = oneLine(r.stderr) || oneLine(r.stdout) || `exit code ${r.code}`;
+        const why = (oneLine(r.stderr) || oneLine(r.stdout) || `exit code ${r.code}`) + await commandNote(db, repo, d.mergeCommand, { number: b.pr_number!, head: b.commit_sha, base: b.base_sha });
         await updateBatch(db, b.id, at(), { summary: `${d.mergeCommand}: ${why}`.slice(0, 400) });
         log(`  ${b.branch}: refused: ${why}`);
         s.waiting.push(b.branch);

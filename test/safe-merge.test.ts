@@ -40,7 +40,7 @@ test("--allow-failed accepts a listed failed check only while the merge state is
   const failed: Check = { name: sonar, status: "COMPLETED", conclusion: "FAILURE" };
   const v = (o: Partial<PrView>) => view({ statusCheckRollup: [ok, failed], ...o });
   assert.equal(refuseView(v({ mergeStateStatus: "UNSTABLE" }), [], [sonar]), null);
-  assert.equal(refuseView(v({ mergeStateStatus: "BLOCKED" }), [], [sonar]), `checks not green:\n${sonar}: FAILURE`);
+  assert.equal(refuseView(v({ mergeStateStatus: "BLOCKED" }), [], [sonar]), `checks not green:\n${sonar}: FAILURE (accepted here, but GitHub's branch protection requires it)`);
   assert.equal(refuseView(v({}), [], [sonar]), `checks not green:\n${sonar}: FAILURE`);
   assert.equal(refuseView(v({ mergeStateStatus: "UNSTABLE" }), [], []), `checks not green:\n${sonar}: FAILURE`);
   const other: Check = { name: "lint", status: "COMPLETED", conclusion: "FAILURE" };

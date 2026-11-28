@@ -60,7 +60,9 @@ export function refuseView(v: PrView, allow: string[] = [], allowFailed: string[
     const name = c.name ?? c.context ?? "?";
     const done = (c.status ?? "COMPLETED") === "COMPLETED" && (c.state ?? "SUCCESS") !== "PENDING";
     const result = c.conclusion ?? c.state ?? "";
-    if (done ? !GREEN.includes(result) && !failOk.includes(name) : !allowed.includes(name)) bad.push(`${name}: ${done ? result : "not finished"}`);
+    // A failure the caller accepts (optional, or failing only where the red default branch fails) that GitHub's merge state still blocks says why.
+    const held = done && v.mergeStateStatus === "BLOCKED" && allowFailed.includes(name) ? " (accepted here, but GitHub's branch protection requires it)" : "";
+    if (done ? !GREEN.includes(result) && !failOk.includes(name) : !allowed.includes(name)) bad.push(`${name}: ${done ? result : "not finished"}${held}`);
   }
   if (bad.length) return `checks not green:\n${bad.join("\n")}`;
   if (!rollup.length) return "no checks have run";

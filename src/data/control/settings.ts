@@ -11,6 +11,7 @@ import { loadStepApprovals } from "./approvals.ts";
 import { loadStageLimits } from "./limits.ts";
 import { loadTrackedRepos } from "./repos.ts";
 import { loadTrips } from "./trips.ts";
+import { DEFAULT_OPTIONAL_CHECKS } from "../../core/rules.ts";
 import type { Config, ControlSnapshot, LiveConfig, RepoConfig, SettingDef, SettingKey, SettingPatch, SettingRow, SettingType } from "./types.ts";
 
 // ---- the registry ------------------------------------------------------------------------------------------------------
@@ -102,7 +103,7 @@ export const SETTINGS = {
 
 /** Repo-scope keys: the stored key is `<name>:<repo>` (`build_feature:<feature>:<repo>`). */
 export const REPO_SETTINGS = {
-  optionalChecks: reg<string[]>("optional_checks", "json", [], { owner: "review", scope: "repo" }, (r) => strings(jsonOf(r)).filter((x) => x !== "")),
+  optionalChecks: reg<string[]>("optional_checks", "json", [...DEFAULT_OPTIONAL_CHECKS], { owner: "review", scope: "repo" }, (r) => strings(jsonOf(r)).filter((x) => x !== "")),
   prBuildsScope: reg<"all" | "outside">("pr_builds_scope", "text", "outside", { owner: "build", scope: "repo", shown: false }, (r) => (r === "all" ? "all" : "outside")),
   batchSize: reg("batch_size", "int", 20, { owner: "merge", scope: "repo" }, (r) => intIn(r, 1, 50, 20)),
   testRepo: reg("test_repo", "bool", false, { owner: "control", scope: "repo" }, (r) => r !== undefined),

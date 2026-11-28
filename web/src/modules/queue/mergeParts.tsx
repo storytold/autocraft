@@ -15,7 +15,6 @@ export const STATE: Record<QueueState, [string, Tone, string]> = {
   "decision-answered-merge": ["Merge approved", "ok", "A maintainer approved the merge; merges on the next run"],
   refused: ["Refused", "bad", "The merge command or a pre-merge check said no; tried again next run"],
   "waiting-ci": ["Waiting for CI", "neutral", "CI is pending or hasn't run, or GitHub is still checking mergeability"],
-  "waiting-main-ci": ["Waiting: main CI red", "neutral", "The repo's default branch fails CI; ready PRs wait until main is green"],
   "ci-failed": ["CI failed", "bad", "CI fails at this head"],
   conflict: ["Conflict", "bad", "Conflicts with the base branch"],
   "needs-fix-up": ["Needs fix-up", "warn", "The review lists small fixes; a later step makes them"],

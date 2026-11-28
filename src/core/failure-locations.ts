@@ -37,9 +37,10 @@ export function failureLocations(text: string, max = Infinity): Location[] {
 
 /**
  * failureLocations with the panicking test's name (`main`, no test thread, and names that are no Rust path are null), and
- * whether more than `max` were named (`capped`).
+ * whether more than `max` were named (`capped`). `byTest`: one place per named test and per location of an unnamed one, so two
+ * tests that panic at one line are both kept (a comparison of failures needs every test; a trace needs every line once).
  */
-export function testLocations(text: string, max = Infinity): { places: TestLocation[]; capped: boolean } {
+export function testLocations(text: string, max = Infinity, byTest = false): { places: TestLocation[]; capped: boolean } {
   const out: TestLocation[] = [];
   const seen = new Set<string>();
   let capped = false;
@@ -47,7 +48,7 @@ export function testLocations(text: string, max = Infinity): { places: TestLocat
     const file = repoPath(raw);
     const n = Number(line);
     if (!file || !Number.isInteger(n) || n < 1) return;
-    const key = `${file}:${n}`;
+    const key = byTest && test ? `test ${test}` : `${file}:${n}`;
     if (seen.has(key)) return;
     if (out.length >= max) { capped = true; return; }
     seen.add(key);
@@ -66,4 +67,61 @@ export function testLocations(text: string, max = Infinity): { places: TestLocat
     if (a && sinceError <= 3) add(a[1]!, a[2]!, "error", null);
   }
   return { places: out, capped };
+}
+
+const CARGO_FAILURES = /^failures:\s*$/;
+const CARGO_NAME = /^\s+([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)\s*$/;
+const CARGO_RESULT = /^test result: FAILED\b/;
+// nextest's lines for a failed test: `FAIL [   0.004s] my-crate tests::a`, also `TRY 2 FAIL`, `SIGSEGV`, `TIMEOUT` and `(  3/120)` counters.
+const NEXTEST = /^\s*(?:TRY \d+ )?(?:FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGBUS|SIGKILL|ABORT|LEAK-FAIL)\s+\[\s*[\d.]+m?s\]\s+(?:\(\s*\d+\/\s*\d+\)\s+)?\S+\s+(\S+)\s*$/;
+
+// cargo's line for each test binary that failed (also one that crashed without a summary), and its `error: N targets failed:` list.
+const CARGO_TARGET = /^\s*error: test failed, to rerun pass `([^`\n]{1,200})`/;
+const CARGO_TARGETS = /^\s*error: \d+ targets? failed:\s*$/;
+const CARGO_LISTED = /^\s+`([^`\n]{1,200})`\s*$/;
+// A test binary that died: cargo's report of its exit, and Rust's own abort message (stack overflow and the like).
+const CRASH = /process didn't exit successfully|fatal runtime error/;
+
+/** The test targets cargo reports failed in a log (`-p core --lib`, ...), first seen first. */
+export function failedTargets(text: string): string[] {
+  const lines = text.replace(ANSI, "").split(/\r?\n/);
+  const out = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    const t = CARGO_TARGET.exec(lines[i]!);
+    if (t) { out.add(t[1]!); continue; }
+    if (!CARGO_TARGETS.test(lines[i]!)) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      const m = CARGO_LISTED.exec(lines[j]!);
+      if (!m) break;
+      out.add(m[1]!);
+    }
+  }
+  return [...out];
+}
+
+/** Whether a log reports a test binary that did not exit normally. */
+export const crashed = (text: string): boolean => text.replace(ANSI, "").split(/\r?\n/).some((l) => CRASH.test(l));
+
+/**
+ * The failing test names of a log's test summaries: cargo's `failures:` list right before `test result: FAILED`, and nextest's failed-test
+ * lines. Null when the log has neither. The log is untrusted: only names that are Rust paths are kept.
+ */
+export function summaryTests(text: string): string[] | null {
+  const lines = text.replace(ANSI, "").split(/\r?\n/);
+  const out = new Set<string>();
+  let found = false;
+  for (let i = 0; i < lines.length; i++) {
+    const n = NEXTEST.exec(lines[i]!);
+    if (n) { found = true; if (TEST_NAME.test(n[1]!)) out.add(n[1]!); continue; }
+    if (!CARGO_FAILURES.test(lines[i]!)) continue;
+    const names: string[] = [];
+    let j = i + 1;
+    for (; j < lines.length; j++) {
+      const m = CARGO_NAME.exec(lines[j]!);
+      if (m) names.push(m[1]!);
+      else if (lines[j]!.trim()) break;
+    }
+    if (names.length && j < lines.length && CARGO_RESULT.test(lines[j]!)) { found = true; for (const x of names) out.add(x); }
+  }
+  return found ? [...out] : null;
 }

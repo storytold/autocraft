@@ -29,7 +29,7 @@ export type PublicStatus = {
 //   PR plan state needs-fix-up, or view.fixup = fix,
 //     or view.cifix = cifix-queued | cifix-rerun                  -> Fix-up in progress
 //   PR plan state waiting-ci, waiting-premerge, waiting-verify,
-//     ci-approval, waiting-main-ci                                -> Waiting for CI
+//     ci-approval                                                 -> Waiting for CI
 //   PR with no item_stage row                                     -> New
 //   PR never reviewed (item_stage.reviewed = 0, no queue state)   -> Triaged
 //   PR any other (reviewed: held, refused, conflict, changes
@@ -37,7 +37,7 @@ export type PublicStatus = {
 //
 // Held and refused states are deliberately folded into "In review": the reason is not public.
 const FIXING = ["needs-fix-up"];
-const WAITING = ["waiting-ci", "waiting-premerge", "waiting-verify", "ci-approval", "waiting-main-ci"];
+const WAITING = ["waiting-ci", "waiting-premerge", "waiting-verify", "ci-approval"];
 const NEVER_REVIEWED = ["not-reviewed", "out-of-scope", "draft", "not-started"];
 
 /** True for a repo that is tracked and public. */

@@ -26,7 +26,7 @@ type StepId = "verify" | "ci" | "premerge" | "ready" | "batch";
 /** The steps before a merge, in the order a PR passes them. */
 const STEPS: { id: StepId; label: string; hint: string; dot: string; states: QueueState[] }[] = [
   { id: "verify", label: "Verify", hint: "Build and tests run at the reviewed head", dot: "bg-c1", states: ["waiting-verify"] },
-  { id: "ci", label: "CI", hint: "Upstream CI at the head, a red default branch, or CI runs waiting for approval", dot: "bg-c2", states: ["waiting-ci", "waiting-main-ci", "ci-approval"] },
+  { id: "ci", label: "CI", hint: "Upstream CI at the head, or CI runs waiting for approval", dot: "bg-c2", states: ["waiting-ci", "ci-approval"] },
   { id: "premerge", label: "Pre-merge review", hint: "Opus reviews the head commit once more before it merges", dot: "bg-c3", states: ["waiting-premerge"] },
   { id: "ready", label: "Ready", hint: "Covered by the merge rule or approved by a maintainer; merges on the next run", dot: "bg-ok", states: ["ready", "decision-answered-merge"] },
   { id: "batch", label: "In a batch", hint: "Lands with its integration batch once the batch's checks are green", dot: "bg-accent", states: ["batch-checking", "in-batch"] },

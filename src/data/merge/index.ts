@@ -1,5 +1,6 @@
 export * from "./attempts.ts";
 export * from "./batches.ts";
+export * from "./ci-vs-main.ts";
 export * from "./facts.ts";
 export * from "./keys.ts";
 export * from "./pr-builds.ts";

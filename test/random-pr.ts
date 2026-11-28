@@ -44,7 +44,7 @@ export type WorkflowRow = {
 
 export type PrRows = {
   approvals: { merge: boolean; push: boolean; comment: boolean; ci: boolean; fixissue: boolean };
-  pipelineOn: boolean; pipelineRepo: boolean; outsideHold: boolean; tripped: PrFacts["tripped"]; noCi: boolean; mainRed: boolean; implementOn: boolean; publicRepo: boolean;
+  pipelineOn: boolean; pipelineRepo: boolean; outsideHold: boolean; tripped: PrFacts["tripped"]; noCi: boolean; implementOn: boolean; publicRepo: boolean;
   /** Oldest first; the last one is the head. `at`: when an autorepin or a revision was pushed (the others have a patch row). */
   commits: { sha: string; by: CommitBy; at?: string }[];
   /** We pushed off the head and the mirror does not show it yet. */
@@ -171,7 +171,7 @@ export function randomPrRows(x: Rnd): PrRows {
   const lastBy = commits.at(-1)!.by;
   return {
     approvals: { merge: x.bool(0.6), push: x.bool(0.6), comment: x.bool(0.7), ci: x.bool(0.7), fixissue: x.bool(0.5) },
-    pipelineOn: x.bool(0.93), pipelineRepo: x.bool(0.8), outsideHold: x.bool(0.03), noCi: x.bool(0.1), mainRed: x.bool(0.06), implementOn: x.bool(0.8), publicRepo: x.bool(0.85),
+    pipelineOn: x.bool(0.93), pipelineRepo: x.bool(0.8), outsideHold: x.bool(0.03), noCi: x.bool(0.1), implementOn: x.bool(0.8), publicRepo: x.bool(0.85),
     tripped: x.bool(0.07) ? { [x.pick(["fixup", "cifix", "implement", "merge"] as const)]: "2 of the last 10 pushes broke a required check" } : {},
     commits, pushedOff: x.bool(0.03), ghState: x.pick(["OPEN", "OPEN", "OPEN", "OPEN", "OPEN", "OPEN", "OPEN", "OPEN", "MERGED", "CLOSED"] as const), draft: x.bool(0.05), gone: x.bool(0.01), ours, mainFix,
     tier: x.pick(["whitelisted", "whitelisted", "allow", "not", "deny"] as const), lines: x.pick([20, 20, 120, 900]), label: x.pick(["bugfix", "bugfix", "bugfix", "infra", "performance", null]), labelUnsure: x.bool(0.05), needsDecision: x.bool(0.05),
@@ -197,7 +197,7 @@ export function randomPrRows(x: Rnd): PrRows {
 /** A started PR that its approver's leg handed to the merge queue, with everything green, and the given rows instead. */
 export function greenRows(over: Partial<PrRows> = {}): PrRows {
   return {
-    approvals: { merge: true, push: true, comment: true, ci: true, fixissue: true }, pipelineOn: true, pipelineRepo: true, outsideHold: false, tripped: {}, noCi: false, mainRed: false, implementOn: true, publicRepo: true,
+    approvals: { merge: true, push: true, comment: true, ci: true, fixissue: true }, pipelineOn: true, pipelineRepo: true, outsideHold: false, tripped: {}, noCi: false, implementOn: true, publicRepo: true,
     commits: [{ sha: "c0", by: "author" }], pushedOff: false, ghState: "OPEN", draft: false, gone: false, ours: false, mainFix: false, tier: "whitelisted", lines: 20, label: "bugfix", labelUnsure: false, needsDecision: false,
     duplicates: false, ruledOut: false, integration: false, quiet: false, workflow: startedAs("fixup"), ended: null, endedOwn: false,
     legs: [{ state: "queued", head: "c0", fromHead: "c0", workflow: 7, updatedAt: at("10:20"), fixId: null }], request: null, mergeWaits: false, implementation: null,
@@ -261,8 +261,8 @@ export function factsOf(w: PrRows): PrFacts {
     pipelineOn: w.pipelineOn, tripped: w.tripped, ghState: w.ghState, head, draft: w.draft || w.gone, ...(w.gone ? { gone: true as const } : {}), author: w.ours ? OURS : AUTHOR, authorIsPipeline: w.ours, tier: "not", lines: w.lines, size: sizeOf(w.lines),
     label: null, needsDecisionFlag: false, inScope: w.integration ? w.pipelineRepo : inScope, ...(w.outsideHold ? { outsideHold: { reason: "limit", author: AUTHOR, kind: "pr", limit: 5 } as const } : {}),
     integration: w.integration, batchPr: w.integration, heldBacklog, quiet: w.quiet, score: 1,
-    repoFacts: { commentApproved: w.approvals.comment, ciApproved: w.approvals.ci, noCi: w.noCi, mainRed: w.mainRed, implementOn: w.implementOn },
-    review: null, post: { postable: false, posted: null }, checksHere: false, checksOpen: false, ci: "unknown", mergeable: w.mergeable, unknown: null, runs: null, lastMerge: null, runsApprovedAfterMerge: false,
+    repoFacts: { commentApproved: w.approvals.comment, ciApproved: w.approvals.ci, noCi: w.noCi, implementOn: w.implementOn },
+    review: null, post: { postable: false, posted: null }, checksHere: false, checksOpen: false, ci: "unknown", vsMain: null, mergeable: w.mergeable, unknown: null, runs: null, lastMerge: null, runsApprovedAfterMerge: false,
     verifyOverride: false, verification: null, verifyUnavailable: null, handOver: false, mergeWaiting: false, premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [],
     conflict: null, inActiveBatch: w.batch === "in-batch" || w.batch === "batch-checking", fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false,
     changesRequested: null, gateFailureNote: null,
