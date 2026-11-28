@@ -37,8 +37,9 @@ export const STEP_PLANS: Record<string, Plan> = {
   "verify-collect": { calls: [item("verify.summary")], items: 10 },
   // One threat model, then per area an audit and a verify of each finding it may report, and a scan test of each (feature scan-tests).
   "security-scan": { calls: [item("security.model"), ...Array.from({ length: AREAS_MAX }, () => item("security.area")), ...Array.from({ length: AREAS_MAX * FINDINGS_PER_AREA_MAX }, () => item("security.verify")), ...Array.from({ length: AREAS_MAX * FINDINGS_PER_AREA_MAX }, () => item("security.scantest"))], items: 1 },
-  // A job holds one round: the review of a passed build and the next patch, or one patch. The build runs between jobs.
-  "security-fix": { calls: [item("security.fix", true), item("security.fixcheck")], items: 1 },
+  // A job holds one round: the review of a passed build and the next patch, or one patch; in a fix session the round's turns (the
+  // first and its follow-ups) stand for the patch. The build runs between jobs.
+  "security-fix": { calls: [item("security.fix", true), item("security.fixcheck"), item("security.session", true)], items: 1 },
 };
 
 /** Minutes one call can take: each attempt runs the first turn and the lint follow-ups at the prompt's time limit, and a patch call adds the check tool's wall time. */

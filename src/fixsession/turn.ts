@@ -94,7 +94,9 @@ function storeOf(kind: FixSession["kind"]): RoundStore<FixTurnResult, FixRound, 
         maxAttempts: CALL_ATTEMPTS, keepSession: true, ...(follow && { parentId: t.parentId }),
       };
       const result: FixTurnResult = { purpose: t.purpose, outcome: "queued", report: null, turns: null, costUsd: null, calls: 0, shellMs: 0, step: t.step, head: t.head, ...(follow && { parentId: t.parentId }) };
-      return { call, owner: t.session.id, kind: t.purpose, result, session: { repo: t.session.repo, item: t.session.number, baseSha: t.head, requestedBy: t.by, deadlineSec: limits.timeoutSeconds } };
+      // A security fix's workspace session names the call's item (the security pseudo repo), never the finding as an item of the repo.
+      const subject = kind === "security" && t.items[0] ? t.items[0] : { repo: t.session.repo, number: t.session.number };
+      return { call, owner: t.session.id, kind: t.purpose, result, session: { repo: subject.repo, item: subject.number, baseSha: t.head, requestedBy: t.by, deadlineSec: limits.timeoutSeconds } };
     },
     async add(db, owner, round) {
       const r = round.result;
@@ -192,7 +194,7 @@ export type StepEnv = FixWorkspaceEnv & {
 
 export type StepResult =
   /** Another job holds the session's work lease (left as a skip on it), or the workspace is not ready (FIX_WORKSPACE_WAIT). */
-  | { kind: "wait"; reason: string }
+  | { kind: "wait"; reason: string; /** WorkspaceWait.stuck: no workspace starts at the commit until a kubernetes environment changes. */ stuck?: true }
   /** The session ended meanwhile (its PR closed, a person stopped the item) or a new one was refused. */
   | { kind: "ended"; reason: string }
   | { kind: "failed"; reason: string }
@@ -323,7 +325,7 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
     if (!await settled(round, r)) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, s.workspaceId);
   }
   const ws = await ensureWorkspace(s, spec.head, env, { keepTree: resume || !!spec.lint });
-  if (ws.kind === "wait") return done({ kind: "wait", reason: ws.reason }, s.workspaceId);
+  if (ws.kind === "wait") return done({ kind: "wait", reason: ws.reason, ...(ws.stuck && { stuck: true as const }) }, s.workspaceId);
   if (ws.kind === "failed") return done({ kind: "failed", reason: ws.reason }, s.workspaceId);
   if (!await reload()) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, ws.workspaceId);
   const pod = env.pod?.(ws.workspaceId) ?? workspacePod(db, ws.workspaceId, env.cancelled, env.api);

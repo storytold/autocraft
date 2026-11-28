@@ -4,7 +4,7 @@
 // lint follow-up needs again is the commit plus the stored patch (restorePatch). A session's workspace is parked as soon as its step
 // has nothing pending (parkSession) and ended with the session (endSessionWorkspaces, sweepFixSessions).
 import type { Db } from "../db/index.ts";
-import { addWorkspaceCalls, loadEnvs, markCalls, patchWorkspaces } from "../data/build/index.ts";
+import { addWorkspaceCalls, loadEnvs, markCalls, patchWorkspaces, SECURITY_WORKSPACE_OWNER } from "../data/build/index.ts";
 import type { WorkspaceRow } from "../data/build/index.ts";
 import { envSettings, listEnvs } from "../build/envs.ts";
 import type { KubeApi } from "../build/kube-api.ts";
@@ -55,7 +55,11 @@ export type FixWorkspaceEnv = {
 };
 
 /** The step waits (registry wait FIX_WORKSPACE_WAIT): no environment can hold the session's workspace now. */
-export type WorkspaceWait = { kind: "wait"; wait: typeof FIX_WORKSPACE_WAIT; reason: string };
+export type WorkspaceWait = {
+  kind: "wait"; wait: typeof FIX_WORKSPACE_WAIT; reason: string;
+  /** The session is out of starts at the commit: no workspace starts there until a kubernetes environment changes. */
+  stuck?: true;
+};
 /** The session's workspace failed to start FIX_START_FAILURES times at the commit: the step fails. */
 export type WorkspaceFailed = { kind: "failed"; reason: string };
 /**
@@ -97,11 +101,11 @@ export async function fixWorkspaceReading(db: Db): Promise<string> {
 const envsChangedAt = (k: readonly { updatedAt: string | null; createdAt: string }[]): string | null =>
   k.reduce<string | null>((m, e) => { const t = e.updatedAt ?? e.createdAt; return m === null || t > m ? t : m; }, null);
 
-/** The workspace owner of a fix session's workspaces. */
-const ownerOf = (session: Pick<FixSession, "id">): string => `fix session ${session.id}`;
+/** The workspace owner of a fix session's workspaces; a security fix session's marks its workspaces as private (isSecurityWorkspace). */
+const ownerOf = (session: Pick<FixSession, "id" | "kind">): string => `${session.kind === "security" ? SECURITY_WORKSPACE_OWNER : "fix session"} ${session.id}`;
 
 /** The session's workspaces at `at` that failed to start since a kubernetes environment last changed. */
-async function startFailures(db: Db, session: Pick<FixSession, "id">, at: string): Promise<number> {
+async function startFailures(db: Db, session: Pick<FixSession, "id" | "kind">, at: string): Promise<number> {
   return await countFixStartFailures(db, ownerOf(session), at, envsChangedAt(await loadEnvs(db, { kind: "kubernetes" })));
 }
 
@@ -143,7 +147,7 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
       env.log(`fix session ${session.id}: workspace ${cur.id} failed to start, start failure ${failures} at ${short(at)}; the step fails`);
       return { kind: "failed", reason: `the fix session's workspace failed to start ${failures} times at ${short(at)}${cur.error ? `: ${cur.error}` : ""}` };
     }
-    return pending(`the fix session's workspace failed to start ${failures} times at ${short(at)}; a new one starts on a new head or once a build environment is enabled or edited`);
+    return { ...pending(`the fix session's workspace failed to start ${failures} times at ${short(at)}; a new one starts on a new head or once a build environment is enabled or edited`), stuck: true };
   };
   const make = async (reason: string | null): Promise<WorkspaceWait | WorkspaceFailed | null> => {
     const envId = await fixSessionEnv(db, session.kind);

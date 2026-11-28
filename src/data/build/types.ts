@@ -38,6 +38,12 @@ export const WORKSPACE_STATES = ["requested", "starting", "seeding", "ready", "p
 export type WorkspaceStateName = (typeof WORKSPACE_STATES)[number];
 export const LIVE_STATES: WorkspaceStateName[] = ["requested", "starting", "seeding", "ready", "parked"];
 export const POD_STATES: WorkspaceStateName[] = ["starting", "seeding", "ready"];
+/**
+ * The owner prefix of the workspaces of security fix sessions (`<prefix> <session id>`). Such a workspace holds a private fix: the
+ * dashboard lists it under its repo's security pseudo repo, so only those who may read the repo's security findings see it.
+ */
+export const SECURITY_WORKSPACE_OWNER = "security fix session";
+export const isSecurityWorkspace = (w: { owner: string | null }): boolean => w.owner?.startsWith(`${SECURITY_WORKSPACE_OWNER} `) === true;
 
 export type TaskState = "queued" | "claimed" | "running" | "done" | "failed" | "cancelled" | "lost";
 export type Warm = { key: string; role: "use" | "build" };

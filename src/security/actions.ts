@@ -9,6 +9,9 @@ import { checkRequest, JobError, requestCancel } from "../runner/jobs.ts";
 import { securityRepo, SECURITY_STEP, REASON_MAX, MIN_VERIFY_SCORE } from "./rules.ts";
 import { activeScan, ACTIVE_STATES, advance, clearRounds, finishScan, findingKey, findingRow, moveFinding, reconcile, scanRow, toFinding, toScan, type FindingRow } from "./store.ts";
 import type { Db } from "../db/index.ts";
+import type { FixSessionsSetting } from "../data/control/index.ts";
+import { fixSessionsSetting } from "../fixsession/switch.ts";
+import { fixSessionEnv } from "../fixsession/workspace.ts";
 
 export class SecurityError extends Error {
   readonly status: number;
@@ -155,12 +158,16 @@ export async function autoFixConfirmed(db: Db, repo?: string, n?: number): Promi
 /** The longest a round's build tasks may run before the round counts as ended and its tasks are cancelled; the clock waits for a confidential environment (privateClockStart). */
 export const ROUND_BUILD_LIMIT_MS = 4 * 3_600_000;
 
-export type SecurityFixWork = { due: Awaited<ReturnType<typeof sec.loadFixesToAdvance>>; ready: number | null };
+/**
+ * `ready`: when a confidential build environment was first ready, or null. `sessions`: the fix_sessions setting; `sessionEnv`: a
+ * confidential kubernetes environment can hold a security fix session's workspace.
+ */
+export type SecurityFixWork = { due: Awaited<ReturnType<typeof sec.loadFixesToAdvance>>; ready: number | null; sessions: FixSessionsSetting; sessionEnv: boolean };
 
 /** What advanceSecurityFixes reads, in one wave. */
 export async function loadSecurityFixWork(db: Db): Promise<SecurityFixWork> {
-  const [due, ready] = await db.together(() => Promise.all([sec.loadFixesToAdvance(db), loadConfidentialReadyAt(db)]));
-  return { due, ready };
+  const [due, ready, sessions, env] = await db.together(() => Promise.all([sec.loadFixesToAdvance(db), loadConfidentialReadyAt(db), fixSessionsSetting(db), fixSessionEnv(db, "security")]));
+  return { due, ready, sessions, sessionEnv: typeof env === "string" };
 }
 
 /**
@@ -170,9 +177,11 @@ export async function loadSecurityFixWork(db: Db): Promise<SecurityFixWork> {
  * only while `pipelineOn` (read by the caller at the same time as the rows here). Returns how many jobs it queued.
  */
 export async function advanceSecurityFixes(db: Db, pipelineOn = true, work?: SecurityFixWork): Promise<number> {
-  const { due, ready } = work ?? await loadSecurityFixWork(db);
-  // A fix that waits for a confidential build environment continues once one is ready.
-  const rows = due.filter((r) => r.tasks !== null || ready !== null);
+  const { due, ready, sessions, sessionEnv } = work ?? await loadSecurityFixWork(db);
+  const inSessions = (repo: string): boolean => sessions.steps.includes("security") && (sessions.repos === null || sessions.repos.includes(repo));
+  // A fix that waits for a confidential build environment continues once one is ready; in a fix session, once a confidential
+  // kubernetes environment can hold its workspace too.
+  const rows = due.filter((r) => r.tasks !== null || (ready !== null && (sessionEnv || !inSessions(r.repo))));
   const ids = rows.flatMap((r) => (r.tasks ? [r.tasks.head, r.tasks.base] : []));
   const tasks = await loadTasks(db, ids);
   let queued = 0;
