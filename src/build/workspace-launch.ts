@@ -219,7 +219,7 @@ function background(c: Ctx, id: number, f: () => Promise<void>): void {
   c.state.busy.set(id, p);
 }
 
-/** `kind` capacity: the pod was never scheduled (no node had room, or the quota was used), which a fix session does not count as a failed start. */
+/** `kind` capacity: the pod found no room (never scheduled, or its create refused by the namespace's quota), which a fix session does not count as a failed start. */
 async function fail(c: Ctx, w: WorkspaceRow, reason: string, kind: "capacity" | null = null): Promise<void> {
   if (!await moveWorkspace(c.d.db, w.id, [w.state as WorkspaceStateName], "failed", { error: reason.slice(0, 300), fail_kind: kind }, c.now())) return;
   c.d.log(`workspace launcher: workspace ${w.id} failed: ${reason}`);
@@ -414,7 +414,8 @@ async function create(c: Ctx, row: WorkspaceRow, images: Images): Promise<boolea
     const why = `The workspace pod could not be created: ${errText(e)}`;
     c.state.backoff.set(c.env.id, c.now() + CREATE_BACKOFF_MS);
     c.d.log(`workspace launcher: workspace ${w.id}: ${why} (try ${tries} of ${CREATE_TRIES})`);
-    if (tries >= CREATE_TRIES) await giveUp(c, w, why);
+    // A ResourceQuota refuses the create with 403 Forbidden: no room in the namespace, as for a pod never scheduled.
+    if (tries >= CREATE_TRIES) await giveUp(c, w, why, e instanceof KubeError && e.status === 403 ? "capacity" : null);
     else await patchWorkspaces(db, [{ id: w.id, whereState: ["starting"], set: { error: why.slice(0, 300) } }]);
     return false;
   }
