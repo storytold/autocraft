@@ -127,6 +127,17 @@ export async function ensurePrompts(db: Db): Promise<void> {
   await (c.inflight ??= refresh(c).finally(() => { c.inflight = null; }));
 }
 
+/**
+ * Marks the rows held as out of date after this process wrote a revision, so its next ensure reads them again instead of
+ * waiting for its own notification (Postgres delivers it after the commit, asynchronously). Other processes learn of the
+ * write through the notification or the SQLite counter.
+ */
+export function invalidatePrompts(): void {
+  if (!cache) return;
+  cache.invalidations++;
+  if (cache.held) cache.held.at = 0;
+}
+
 /** The active revision of a prompt in a scope ("base", or a repo for its guidance), as last ensured. */
 export function activeRow(promptId: string, scope: string): PromptRevision | null {
   return (scope === BASE_SCOPE ? served?.base.get(promptId) : promptId === GUIDANCE_PROMPT_ID ? served?.guidance.get(scope) : undefined) ?? null;

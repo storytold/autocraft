@@ -8,6 +8,7 @@ import { checkEdit, normaliseBody, noteProblems, type ActiveRevision, type Probl
 import { BASE_SCOPE, CLAUDE_PROMPTS, GUIDANCE_PROMPT_ID, JEV_PROMPTS, bodyVersion, codeBody, codeDefault, type ClaudePromptId, type JevPromptId } from "../../prompts/index.ts";
 import { mergeEdit } from "../../prompts/locks.ts";
 import { sha256Hex } from "../../prompts/sha256.ts";
+import { invalidatePrompts } from "./active.ts";
 import { listRevisions } from "./revisions.ts";
 import type { PromptRevision, PromptRevisionKind } from "./types.ts";
 
@@ -63,13 +64,20 @@ function releaseRow(id: string, revs: PromptRevision[]): NewRow | null {
 const target = (id: string, scope: string, rev: number): string => `${id}@${scope} r${rev}`;
 const refused = (problems: Problem[]): SaveResult => ({ ok: false, problems });
 
+/** Runs one revision write; once it is committed, this process's prompt cache reads the revisions again on its next ensure. */
+async function written(db: Db, fn: () => Promise<SaveResult>): Promise<SaveResult> {
+  const r = await db.write(fn);
+  if (r.ok) invalidatePrompts();
+  return r;
+}
+
 /**
  * Stores an edit of a Claude prompt (scope "base") or of a repository's guidance (repo.guidance, scope = the repo) as the new
  * active revision. `baseRev`: the active revision the editor started from (null or 1 for a prompt that has no rows yet).
  */
 export async function saveEdit(db: Db, edit: { id: string; scope: string; body: string; note: string; by: string; baseRev: number | null }): Promise<SaveResult> {
   const o = { ...edit, body: normaliseBody(edit.body) };
-  return await db.write(async () => {
+  return await written(db, async () => {
     const revs = await listRevisions(db, o.id, o.scope);
     const active = activeOf(revs);
     if ((active?.rev ?? 1) !== (o.baseRev ?? 1)) return { ok: false, stale: true, problems: [{ where: "rev", message: `the prompt changed since revision ${o.baseRev ?? 1}: revision ${active?.rev ?? 1} is active now` }] };
@@ -89,7 +97,7 @@ export async function rollback(db: Db, o: { id: string; scope: string; rev: numb
   if (!isGuidance(o.id) && !(isBasePrompt(o.id) && o.scope === BASE_SCOPE)) return refused([{ where: "prompt", message: `${o.id} has no revisions in ${o.scope}` }]);
   const note = o.note.trim(), problems = noteProblems(note);
   if (problems.length) return refused(problems);
-  return await db.write(async () => {
+  return await written(db, async () => {
     const revs = await listRevisions(db, o.id, o.scope);
     const from = revs.find((r) => r.rev === o.rev), active = activeOf(revs);
     if (!from) return refused([{ where: "rev", message: `there is no revision ${o.rev}` }]);
@@ -111,7 +119,7 @@ export async function useRelease(db: Db, o: { id: string; by: string; note: stri
   if (!isBasePrompt(o.id)) return refused([{ where: "prompt", message: `${o.id} has no release default` }]);
   const note = o.note.trim(), problems = noteProblems(note);
   if (problems.length) return refused(problems);
-  return await db.write(async () => {
+  return await written(db, async () => {
     const revs = await listRevisions(db, o.id, BASE_SCOPE);
     const active = activeOf(revs);
     if (!active || active.follows) return refused([{ where: "prompt", message: "the prompt runs the release default already" }]);
