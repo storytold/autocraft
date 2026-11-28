@@ -166,9 +166,9 @@ export function gitFormatDiff(text: string): string {
 }
 
 const DIFF_FILE = /^diff --git a\/(\S+) b\/\S+$/gm;
-/** The files a failure's compiler errors name (failureLocations), first seen first. */
+/** The Rust files a failure's compiler errors name (failureLocations), first seen first. */
 export function errorFiles(log: string): string[] {
-  return [...new Set(failureLocations(log).filter((x) => x.what === "error").map((x) => x.file))];
+  return [...new Set(failureLocations(log).filter((x) => x.what === "error" && x.file.endsWith(".rs")).map((x) => x.file))];
 }
 
 /** The files a failure's panics name. */

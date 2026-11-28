@@ -6,9 +6,6 @@ export type Location = { file: string; line: number; what: "error" | "panic" };
 /** A location with the test whose thread panicked there (`thread '<test>' panicked at`), when the log names one. */
 export type TestLocation = Location & { test: string | null };
 
-/** Locations read from a failure; more than this many are not followed. */
-export const MAX_LOCATIONS = 10;
-
 const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g;
 const ARROW = /^\s*-->\s+(\S+?):(\d+)(?::\d+)?\s*$/;
 // `thread 'x' panicked at src/a.rs:3:5:` (Rust 1.73 on) and `panicked at 'msg', src/a.rs:3:5` (before).
@@ -33,21 +30,26 @@ export function repoPath(raw: string): string | null {
   return p;
 }
 
-/** The error and panic locations of a failure's log text, first seen first, without repeats. */
-export function failureLocations(text: string): Location[] {
-  return testLocations(text).map((l) => ({ file: l.file, line: l.line, what: l.what }));
+/** The error and panic locations of a failure's log text, first seen first, without repeats; at most `max`. */
+export function failureLocations(text: string, max = Infinity): Location[] {
+  return testLocations(text, max).places.map((l) => ({ file: l.file, line: l.line, what: l.what }));
 }
 
-/** failureLocations with the panicking test's name; `main` (no test thread) and names that are no Rust path are null. */
-export function testLocations(text: string): TestLocation[] {
+/**
+ * failureLocations with the panicking test's name (`main`, no test thread, and names that are no Rust path are null), and
+ * whether more than `max` were named (`capped`).
+ */
+export function testLocations(text: string, max = Infinity): { places: TestLocation[]; capped: boolean } {
   const out: TestLocation[] = [];
   const seen = new Set<string>();
+  let capped = false;
   const add = (raw: string, line: string, what: Location["what"], test: string | null) => {
     const file = repoPath(raw);
     const n = Number(line);
-    if (!file || !Number.isInteger(n) || n < 1 || out.length >= MAX_LOCATIONS) return;
+    if (!file || !Number.isInteger(n) || n < 1) return;
     const key = `${file}:${n}`;
     if (seen.has(key)) return;
+    if (out.length >= max) { capped = true; return; }
     seen.add(key);
     out.push({ file, line: n, what, test });
   };
@@ -63,5 +65,5 @@ export function testLocations(text: string): TestLocation[] {
     const a = ARROW.exec(line);
     if (a && sinceError <= 3) add(a[1]!, a[2]!, "error", null);
   }
-  return out;
+  return { places: out, capped };
 }

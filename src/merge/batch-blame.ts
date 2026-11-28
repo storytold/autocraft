@@ -10,6 +10,8 @@ import type { BatchMember } from "./batch-store.ts";
 
 import type { Location } from "../core/failure-locations.ts";
 
+/** Locations read from a failure; more than this many are not followed. */
+export const MAX_LOCATIONS = 10;
 /** More suspects than this is no trace: the batch is split as before. */
 export const MAX_SUSPECTS = 3;
 

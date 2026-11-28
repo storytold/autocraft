@@ -127,13 +127,17 @@ async function coveringPr(c: Ctx, checks: string[], files: string[], since: stri
   return null;
 }
 
+/** The places of one check read to judge it test-only; a log naming more is not judged. */
+const TEST_PLACES = 50;
+
 /**
  * The failing test of one check when every place its log names (compile errors and panics, testLocations) is test code at
- * `head` (isTestLine): "test X fails at file:line". Null when the log names no place, one is not test code or a file cannot be read.
+ * `head` (isTestLine): "test X fails at file:line". Null when the log names no place or more than TEST_PLACES, one is not
+ * test code or a file cannot be read.
  */
 export async function testCodeFailure(git: Git, head: string, check: CiFailure["checks"][number]): Promise<string | null> {
-  const places = testLocations(check.steps.map((s) => s.tail).join("\n"));
-  if (!places.length) return null;
+  const { places, capped } = testLocations(check.steps.map((s) => s.tail).join("\n"), TEST_PLACES);
+  if (!places.length || capped) return null;
   for (const p of places) {
     const f = await git.file(head, p.file);
     if (!f.ok || !isTestLine(p.file, f.content, p.line)) return null;
@@ -203,7 +207,8 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
         const found = await testCodeFailure(git, head, failing.get(r.check)!);
         if (!found) { failed.push(r); continue; }
         const why = scrubReason(oneLine(`${found}; ${how}, and a CI fix may not change tests`), c.fix.root);
-        await c.setState(r, "issue-opening", why, at());
+        // A stored patch of a lint round is dropped with the row's move.
+        await c.setState(r, "issue-opening", why, at(), { patch: null, files: null, lintTask: null, lintRound: null, lintState: null, session: null });
         c.log(`  ${c.repo}: ${r.check}: ${why}; opening an issue`);
         issues++;
       }
