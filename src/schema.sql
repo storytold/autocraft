@@ -1209,7 +1209,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   volume_fresh INTEGER NOT NULL DEFAULT 0, -- 1: the volume was made empty for the current start, so seeding fills it
   resume_tries INTEGER NOT NULL DEFAULT 0, -- resumes that failed since the workspace was last ready
   checkpoint_error TEXT,              -- why the last checkpoint failed; while set, the volume holds work no checkpoint has
-  restored TEXT,                      -- how the last resume brought the tree back: kept | checkpoint <checkpoint_at> | empty
+  restored TEXT,                      -- how the tree last came back: kept | checkpoint <checkpoint_at> | empty (a resume); reseed | patch (a fix session)
   restored_at TEXT,
   layout INTEGER NOT NULL DEFAULT 1,  -- 1: checkout /work/src, CARGO_HOME /work/cargo; 2: the CI paths (src/build/workspace-layout.ts)
   prepared TEXT,                      -- layout 2: JSON WorkspacePrepared, the CI gate's env at the base commit

@@ -45,17 +45,18 @@ export async function loadFixSessions(db: Db, ids: readonly number[]): Promise<M
   return out;
 }
 
-/** A queued turn of the session `id` (a column reference): its call may still run. */
-const queuedTurn = (eb: kx.AnyEb, id: string) =>
-  eb.exists(kx.schemaEb(eb).selectFrom("main.fix_session_turns as qt").select(eb.lit(1).as("one")).where("qt.session_id", "=", kx.ref<number>(id)).where("qt.outcome", "=", "queued"));
+/** A turn of the session `id` (a column reference) queued after `since`: its call may still run. */
+const queuedTurn = (eb: kx.AnyEb, id: string, since: string) =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.fix_session_turns as qt").select(eb.lit(1).as("one")).where("qt.session_id", "=", kx.ref<number>(id)).where("qt.outcome", "=", "queued")
+    .where("qt.created_at", ">", since));
 
 /**
- * What a step reads before it continues or starts an item's session: the live session, whether it has a queued turn, and whether a
- * person ended the item's workflow (stopped, closed or backlog; security sessions never are). 2 statements.
+ * What a step reads before it continues or starts an item's session: the live session, whether it has a turn queued after
+ * `queuedSince`, and whether a person ended the item's workflow (stopped, closed or backlog; security sessions never are). 2 statements.
  */
-export async function loadFixSessionGate(db: Db, kind: FixSessionKind, repo: string, number: number): Promise<{ live: FixSession | null; queuedTurn: boolean; stopped: boolean }> {
+export async function loadFixSessionGate(db: Db, kind: FixSessionKind, repo: string, number: number, queuedSince: string): Promise<{ live: FixSession | null; queuedTurn: boolean; stopped: boolean }> {
   const q = queryDb(db);
-  const r = await q.get(q.k.selectFrom("main.fix_sessions as fs").selectAll("fs").select((eb) => queuedTurn(eb, "fs.id").as("queued_turn"))
+  const r = await q.get(q.k.selectFrom("main.fix_sessions as fs").selectAll("fs").select((eb) => queuedTurn(eb, "fs.id", queuedSince).as("queued_turn"))
     .where("fs.kind", "=", kind).where("fs.repo", "=", repo).where("fs.number", "=", number).where("fs.state", "=", "live"));
   const stopped = kind === "pr" && Number((await q.get(q.k.selectNoFrom((eb) => eb.case().when(endedByPerson(eb, eb.val(repo), eb.val(number))).then(1).else(0).end().as("stopped"))))?.stopped) === 1;
   return { live: r ? sessionOf(r) : null, queuedTurn: !!r && Number((r as Raw).queued_turn) === 1, stopped };
@@ -81,7 +82,7 @@ export async function ensureFixSession(db: Db, s: NewFixSession, at: string): Pr
   });
 }
 
-/** Moves a session on: what the next follow-up continues, its workspace and head, and the turn and cost counts. 1 statement. */
+/** Moves a live session on: what the next follow-up continues, its workspace and head, and the turn and cost counts. False when it was not live. 1 statement. */
 export async function updateFixSession(db: Db, id: number, p: FixSessionPatch, at: string): Promise<boolean> {
   const q = queryDb(db);
   const r = await db.write(async () => await q.get(q.k.updateTable("main.fix_sessions").set((eb) => ({
@@ -92,30 +93,37 @@ export async function updateFixSession(db: Db, id: number, p: FixSessionPatch, a
     ...(p.model !== undefined && { model: p.model }),
     ...(p.addTurns && { turns: eb("turns", "+", p.addTurns) }),
     ...(p.addCostUsd && { cost_usd: eb("cost_usd", "+", p.addCostUsd) }),
-  })).where("id", "=", id).returning("id")));
+  })).where("id", "=", id).where("state", "=", "live").returning("id")));
   return !!r;
 }
 
-/** Ends live sessions with one reason. Returns the sessions that were live and ended. 1 statement. */
-export async function endFixSessions(db: Db, ids: readonly number[], reason: FixSessionEnd, at: string): Promise<EndedFixSession[]> {
+/** What must still hold of a session when it ends: no write since `idleBefore`, more than `maxTurns` turns, no turn queued after `queuedSince`. */
+export type EndGuard = { idleBefore?: string; maxTurns?: number; queuedSince?: string };
+
+/** Ends live sessions with one reason, those that still meet `guard`. Returns the sessions that were live and ended. 1 statement. */
+export async function endFixSessions(db: Db, ids: readonly number[], reason: FixSessionEnd, at: string, guard: EndGuard = {}): Promise<EndedFixSession[]> {
   if (!ids.length) return [];
   const q = queryDb(db);
   const rows = await db.write(async () => await q.all(q.k.updateTable("main.fix_sessions").set({ state: "ended", end_reason: reason, ended_at: at, updated_at: at })
-    .where(kx.inList(db, "id", [...ids], "bigint")).where("state", "=", "live").returning(["id", "kind", "repo", "number", "workspace_id"])));
+    .where(kx.inList(db, "id", [...ids], "bigint")).where("state", "=", "live")
+    .$if(guard.idleBefore !== undefined, (b) => b.where("updated_at", "<", guard.idleBefore!))
+    .$if(guard.maxTurns !== undefined, (b) => b.where("turns", ">", guard.maxTurns!))
+    .$if(guard.queuedSince !== undefined, (b) => b.where((eb) => eb.not(queuedTurn(eb as unknown as kx.AnyEb, "fix_sessions.id", guard.queuedSince!))))
+    .returning(["id", "kind", "repo", "number", "workspace_id"])));
   return rows.map((r) => ({ id: Number(r.id), kind: r.kind as FixSessionKind, repo: r.repo, number: Number(r.number), workspaceId: num(r.workspace_id), reason })).sort((a, b) => a.id - b.id);
 }
 
 /**
  * Live sessions with what the sweep reads of each: `closed` when the PR is in the mirror and not open, `stopped` when a person ended
- * its workflow (stopped, closed or backlog; for an implementation PR also its issue's), `queuedTurn` when a turn's call may still run.
- * Security sessions read neither closed nor stopped. 1 statement.
+ * its workflow (stopped, closed or backlog; for an implementation PR also its issue's), `queuedTurn` when a turn queued after
+ * `queuedSince` may still run. Security sessions read neither closed nor stopped. 1 statement.
  */
-export async function loadLiveFixSessions(db: Db): Promise<{ session: FixSession; closed: boolean; stopped: boolean; queuedTurn: boolean }[]> {
+export async function loadLiveFixSessions(db: Db, queuedSince: string): Promise<{ session: FixSession; closed: boolean; stopped: boolean; queuedTurn: boolean }[]> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.fix_sessions as fs").selectAll("fs").select((eb) => [
     eb.case().when("fs.kind", "<>", "pr").then(0).when(itemNotMirrored(eb, "fs.repo", "fs.number")).then(0).when(openItem(eb, "fs.repo", "fs.number")).then(0).else(1).end().as("pr_closed"),
     eb.case().when("fs.kind", "<>", "pr").then(0).when(endedByPerson(eb, "fs.repo", "fs.number")).then(1).else(0).end().as("wf_stopped"),
-    eb.case().when(queuedTurn(eb, "fs.id")).then(1).else(0).end().as("queued_turn"),
+    eb.case().when(queuedTurn(eb, "fs.id", queuedSince)).then(1).else(0).end().as("queued_turn"),
   ]).where("fs.state", "=", "live").orderBy("fs.id"));
   return rows.map((r: Raw) => ({ session: sessionOf(r), closed: Number(r.pr_closed) === 1, stopped: Number(r.wf_stopped) === 1, queuedTurn: Number(r.queued_turn) === 1 }));
 }

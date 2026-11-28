@@ -91,8 +91,8 @@ export type ReseedResult = { ok: true; baseCommit: string } | { ok: false; outda
 
 /**
  * Replaces a ready workspace's tree with `sha`'s (`ws reseed`, fed the commit's tar from `src`), dropping the tree's changes, and
- * moves the row to it: base_sha, base_commit, and no checkpoint (the old one was against the old base). Throws when the pod check
- * fails or the exec never started.
+ * moves the row to it: base_sha, base_commit, no checkpoint (the old one was against the old tree), and restored `reseed` with its
+ * time, which a checkpoint read before it compares against. Throws when the pod check fails or the exec never started.
  */
 export async function reseedWorkspace(db: Db, api: KubeApi, id: number, sha: string, src: { bytes: number; open: () => AsyncIterable<Buffer> }, timeoutMs: number, now = Date.now): Promise<ReseedResult> {
   const r = await execWs(db, api, id, ["reseed"], { tool: "seed", args: { reseed: sha, bytes: src.bytes }, stdin: src.open(), timeoutMs, touch: true }, now);
@@ -101,19 +101,20 @@ export async function reseedWorkspace(db: Db, api: KubeApi, id: number, sha: str
   const commit = h?.kind === "ok" ? h.fields[0] ?? "" : "";
   if (!/^[0-9a-f]{40}$/.test(commit)) return { ok: false, outdated: false, reason: `ws reseed: ${r.error ?? describeHeader(h)}${r.stderr ? `: ${r.stderr.trim().split("\n").pop()}` : ""}` };
   const at = new Date(now()).toISOString();
-  const moved = await patchWorkspaces(db, [{ id, whereState: ["ready"], set: { base_sha: sha, base_commit: commit, checkpoint: null, checkpoint_at: null, checkpoint_error: null, error: null, updated_at: at } }]);
+  const moved = await patchWorkspaces(db, [{ id, whereState: ["ready"], set: { base_sha: sha, base_commit: commit, checkpoint: null, checkpoint_at: null, checkpoint_error: null, error: null, restored: "reseed", restored_at: at, updated_at: at } }]);
   return moved ? { ok: true, baseCommit: commit } : { ok: false, outdated: false, reason: `workspace ${id} left ready during the reseed` };
 }
 
 /**
  * Parks a ready workspace now, without waiting for its idle time: the row goes to parked and the pod is deleted, the volume kept.
- * No checkpoint is taken: work a fix session must keep is stored with its step, and a reseed or a restore starts every step's
- * tree anew. False when it was not ready.
+ * No checkpoint is taken and the stored one is dropped: work a fix session must keep is stored with its step, so a workspace rebuilt
+ * from no volume holds the clean base commit (restored `empty`), and a reseed or a restore starts every step's tree anew. False
+ * when it was not ready.
  */
 export async function parkWorkspace(db: Db, api: KubeApi, id: number, now = Date.now()): Promise<boolean> {
   const w = await getWorkspace(db, id);
   if (w?.state !== "ready") return false;
-  if (!await moveWorkspace(db, id, ["ready"], "parked", { pod: null }, now)) return false;
+  if (!await moveWorkspace(db, id, ["ready"], "parked", { pod: null, checkpoint: null, checkpoint_at: null }, now)) return false;
   if (w.pod) {
     const env = (await loadEnvs(db, { ids: [w.env_id] }))[0];
     await api.deletePod(envSettings(env ?? { settings: null }).namespace, w.pod).catch(() => {});

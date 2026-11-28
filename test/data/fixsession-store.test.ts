@@ -19,7 +19,7 @@ test("the sweep ends sessions of closed or merged PRs, stopped workflows, idle a
   const run = async (db: Db) => {
     const k = queryDb(db).k as any;
     const pr = (number: number, state: string) => ({ repo: "app", number, kind: "pr", state, author: "a", head_oid: `h${number}` });
-    await queryDb(db).run(k.insertInto("main.items").values([pr(1, "OPEN"), pr(2, "MERGED"), pr(3, "CLOSED"), pr(4, "OPEN"), pr(5, "OPEN"), pr(6, "OPEN"), pr(8, "OPEN")]));
+    await queryDb(db).run(k.insertInto("main.items").values([pr(1, "OPEN"), pr(2, "MERGED"), pr(3, "CLOSED"), pr(4, "OPEN"), pr(5, "OPEN"), pr(6, "OPEN"), pr(8, "OPEN"), pr(9, "OPEN")]));
     const ids: Record<string, number> = {};
     const sessionOf = async (kind: "pr" | "security", number: number, nowMs: number) => {
       const r = await ensureSession(db, kind, "app", number, { nowMs });
@@ -27,13 +27,15 @@ test("the sweep ends sessions of closed or merged PRs, stopped workflows, idle a
       return r.session;
     };
     // 7 is not mirrored yet (just opened): it is not taken for closed. The security session's number is a finding, not a PR.
-    for (const [name, kind, number] of [["open", "pr", 1], ["merged", "pr", 2], ["closed", "pr", 3], ["stopped", "pr", 4], ["idle", "pr", 5], ["turns", "pr", 6], ["unmirrored", "pr", 7], ["queued", "pr", 8], ["security", "security", 2]] as const) {
-      ids[name] = (await sessionOf(kind, number, name === "idle" || name === "queued" ? NOW - SESSION_IDLE_MS - 1 : NOW)).id;
+    for (const [name, kind, number] of [["open", "pr", 1], ["merged", "pr", 2], ["closed", "pr", 3], ["stopped", "pr", 4], ["idle", "pr", 5], ["turns", "pr", 6], ["unmirrored", "pr", 7], ["queued", "pr", 8], ["leftover", "pr", 9], ["security", "security", 2]] as const) {
+      ids[name] = (await sessionOf(kind, number, name === "idle" || name === "leftover" ? NOW - SESSION_IDLE_MS - 1 : NOW)).id;
     }
     await queryDb(db).run(k.insertInto("main.item_workflows").values({ repo: "app", number: 4, kind: "pr", entry: "review", state: "stopped", started_by: "ann", started_at: T, started_via: "cli", updated_at: T }));
     await updateSession(db, ids.turns!, { addTurns: SESSION_MAX_TURNS + 1 }, NOW);
-    // A turn queued before the idle mark may still be running: its session stays.
-    await addTurn(db, { sessionId: ids.queued!, step: "cifix", purpose: "start" }, NOW - SESSION_IDLE_MS - 1);
+    // A turn queued lately may still be running: its over-turned session stays. One queued a day ago is a leftover.
+    await updateSession(db, ids.queued!, { addTurns: SESSION_MAX_TURNS + 1 }, NOW);
+    await addTurn(db, { sessionId: ids.queued!, step: "cifix", purpose: "start" }, NOW - 60_000);
+    await addTurn(db, { sessionId: ids.leftover!, step: "cifix", purpose: "start" }, NOW - SESSION_IDLE_MS - 1);
 
     // A step on an over-turned session gets a new one; a step on a session within its limits continues it.
     const again = await ensureSession(db, "pr", "app", 6, { nowMs: NOW });
@@ -51,6 +53,6 @@ test("the sweep ends sessions of closed or merged PRs, stopped workflows, idle a
     return ended.map((e) => `${byId.get(e.id) ?? "new"}:${e.reason}`).sort();
   };
   const lite = await withDb("sqlite", run);
-  assert.deepEqual(lite, ["closed:closed", "idle:idle", "merged:closed", "stopped:stopped"]);
+  assert.deepEqual(lite, ["closed:closed", "idle:idle", "leftover:idle", "merged:closed", "stopped:stopped"]);
   if (TEST_PG_URL) assert.deepEqual(await withDb("postgres", run), lite);
 });
