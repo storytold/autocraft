@@ -74,7 +74,7 @@ export { nextUtcMidnight };
 /** What the hold check of a set of PRs reads besides their review facts: one wave. */
 export async function loadHoldInputs(db: Db, keys: KeySource, nowMs: number) {
   const [runs, legs, checks] = await db.together(() => Promise.all([
-    loadReviewRunCounts(db, keys, new Date(nowMs).toISOString().slice(0, 10)), loadLegs(db, keys, { activeOnly: true }), loadChecks(db, keys, { checksOnlyIfFailing: true }),
+    loadReviewRunCounts(db, keys, new Date(nowMs).toISOString().slice(0, 10)), loadLegs(db, keys, { activeOnly: true }), loadChecks(db, keys, { checksOnlyIfNotGreen: true }),
   ]));
   return { runs, legs, checks };
 }

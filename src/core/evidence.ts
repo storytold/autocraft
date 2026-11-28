@@ -132,24 +132,25 @@ export type CiState = "success" | "failure" | "pending" | "none" | "unknown";
 type CheckLike = { name: string; state: string };
 
 /**
- * The CI state merging acts on: a failure whose failing checks are all on the optional list reads as if those
- * checks had not run (success when nothing else is pending or failing and some other check succeeded).
- * The stored `overall` and `checks` stay as GitHub reported them.
+ * The CI state merging acts on: the repo's optional checks read as if they had not run, failed or still running
+ * (success when nothing else is pending or failing and some other check succeeded). The stored `overall` and
+ * `checks` stay as GitHub reported them.
  */
 function effectiveOverall(overall: string, checks: CheckLike[], optional: readonly string[]): string {
-  if (overall !== "failure" || !optional.length) return overall;
-  const failing = checks.filter((c) => c.state === "failure");
-  if (!failing.length || failing.some((c) => !optional.includes(c.name))) return overall;
-  const rest = checks.filter((c) => c.state !== "failure").map((c) => c.state);
+  if ((overall !== "failure" && overall !== "pending") || !optional.length) return overall;
+  const opt = checks.filter((c) => optional.includes(c.name));
+  if (!opt.some((c) => c.state === overall)) return overall;
+  const rest = checks.filter((c) => !optional.includes(c.name)).map((c) => c.state);
+  if (rest.includes("failure")) return "failure";
   if (rest.includes("pending")) return "pending";
-  return rest.includes("success") ? "success" : "none";
+  return rest.includes("success") ? "success" : overall === "pending" ? "pending" : "none";
 }
 
 /** effectiveOverall with the repo's optional list and the PR's stored checks (JSON text or parsed). */
 function effectiveCiWith(optional: readonly string[], overall: string, checks: string | CheckLike[] | null | undefined): string {
-  if (overall !== "failure") return overall;
+  if (overall !== "failure" && overall !== "pending") return overall;
   let list: CheckLike[] = [];
-  try { list = typeof checks === "string" ? (JSON.parse(checks) as CheckLike[]) : checks ?? []; } catch { /* unreadable: stays failure */ }
+  try { list = typeof checks === "string" ? (JSON.parse(checks) as CheckLike[]) : checks ?? []; } catch { /* unreadable: stays as reported */ }
   return effectiveOverall(overall, list, optional);
 }
 

@@ -60,7 +60,7 @@ export async function collectPrBuilds(db: Db, repo: string, log: (line: string) 
   const [tasks, scope, checks] = pending.length ? await db.together(() => Promise.all([
     loadTasks(db, taskIds),
     on ? buildScope(db, repo, pending.map((p) => p.number)) : Promise.resolve(new Set<number>()),
-    loadChecks(db, refs, { checksOnlyIfFailing: true }),
+    loadChecks(db, refs, { checksOnlyIfNotGreen: true }),
   ])) : [new Map(), new Set<number>(), new Map()];
   for (const p of pending) {
     const release = await leaseItem(db, `pr:${p.repo}#${p.number}`, log);
