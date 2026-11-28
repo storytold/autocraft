@@ -1755,8 +1755,8 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
   seq INTEGER,                        -- position in the prompt; NULL while pending, answering or held
   claim TEXT,                         -- answering: token of the run that holds the message
   claimed_at TEXT,
-  progress TEXT,                      -- answering: JSON array of the last few progress lines, newest last
-  ended_at TEXT                       -- operator and maintainer turns: when the turn was answered or failed
+  progress TEXT                       -- answering: JSON array of the last few progress lines, newest last
+  -- Added in src/db.ts, after conversation_id: ended_at (operator and maintainer turns: when the turn was answered or failed).
 );
 CREATE INDEX IF NOT EXISTS conversation_turns_item ON conversation_turns(repo, number, id);
 CREATE INDEX IF NOT EXISTS conversation_turns_at ON conversation_turns(at);
