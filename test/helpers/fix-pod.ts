@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { Db } from "../../src/db/index.ts";
+import type { Db } from "./raw-db.ts";
 import type { KubeApi } from "../../src/build/kube-api.ts";
 import type { WorkspaceCallRequest } from "../../src/build/workspace-call.ts";
 import { WS_POD_PATH } from "../../src/build/workspace.ts";

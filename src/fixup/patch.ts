@@ -179,7 +179,11 @@ const HUNK = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/;
  * `allowed`). `deletes`: whether a regular file `canEdit` accepts, and `allowed` names when given, may be deleted; a rename
  * is a deletion and a new file (the diff is read with --no-renames).
  */
-export type PatchRules = { lineCap?: number | null; newFile?: (path: string) => boolean; deletes?: boolean };
+export type PatchRules = {
+  lineCap?: number | null; newFile?: (path: string) => boolean; deletes?: boolean;
+  /** `text` is git's own diff (a workspace's), read as it is: no fence or prose taken off, no CRLF made LF, no hunk recount. */
+  exact?: boolean;
+};
 
 /**
  * Accepts only content edits to existing regular files named in `allowed` (any file `canEdit` accepts when null), and the
@@ -188,8 +192,8 @@ export type PatchRules = { lineCap?: number | null; newFile?: (path: string) => 
  */
 export function validatePatch(text: string, allowed: string[] | null, canEdit: (path: string) => boolean = editable, rules: PatchRules = {}): PatchCheck {
   const lineCap = rules.lineCap === undefined ? MAX_CHANGED_LINES : rules.lineCap;
-  const patch = recountHunks(extractDiff(text));
-  if (!patch.startsWith("diff --git ")) return { ok: false, reason: "the reply is not a unified diff" };
+  const patch = rules.exact ? text.replace(/\n$/, "") : recountHunks(extractDiff(text));
+  if (!patch.startsWith("diff --git ")) return { ok: false, reason: rules.exact ? "the change is not a git diff" : "the reply is not a unified diff" };
   const lines = patch.split("\n");
   if (lines[lines.length - 1] === "") lines.pop();
   const files: string[] = [];

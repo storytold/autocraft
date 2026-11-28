@@ -7,6 +7,7 @@ import { assertFence } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
 import { guardedApi, inClusterApi } from "../build/kube-api.ts";
 import { cifixFiles, guardApplied, logText } from "../cifix/index.ts";
+import { loadHeldLeaseKeys } from "../data/jobs/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadReviewsAt } from "../data/review/index.ts";
 import { loadQuiet } from "../data/security/index.ts";
@@ -19,9 +20,10 @@ import { ghExec } from "../merge/safe-merge.ts";
 import { ownerOf } from "../owners.ts";
 import { cachedDiff, ghDiff } from "../review/diff.ts";
 import type { TryStep } from "./cli.ts";
-import { prCrateDirs, type StepGate } from "./gates.ts";
+import { prPackages, type StepGate } from "./gates.ts";
 import type { StepTurn } from "./messages.ts";
-import { prStep, runStep, type StepEnv } from "./turn.ts";
+import { fixSessionLease, prStep, runStep, type StepEnv, type StepOutcome } from "./turn.ts";
+import { lastTurn, loadSessions } from "./store.ts";
 import { openSession, parkSession } from "./workspace.ts";
 
 
@@ -59,9 +61,9 @@ export async function runSessionTry(db: Db, repo: string, number: number, step: 
     const fixes = parseFixes(JSON.stringify(review.fixes));
     const allowed = [...new Set(fixes.map((f) => f.file))].filter((f) => fixupEditable(f, scripts));
     if (!allowed.length) throw new Error(`the take-fix review of ${ref} names no file a fix-up may edit`);
-    const newFilesIn = await prCrateDirs(git, head, diff.text);
+    const { newFilesIn, packages } = await prPackages(git, head, diff.text);
     turn = { ...base, step: "fixup", reason: review.reason ?? "", fixes, allowed, newFilesIn, diff: diff.text };
-    gate = { step: "fixup", allowed, newFilesIn, scripts, quiet };
+    gate = { step: "fixup", allowed, newFilesIn, packages, scripts, quiet };
   } else if (step === "maintainer") {
     turn = { ...base, step: "maintainer", instructions: instructions!.trim(), diff: diff.text };
     gate = { step: "maintainer", scripts, quiet };
@@ -76,13 +78,21 @@ export async function runSessionTry(db: Db, repo: string, number: number, step: 
 
   const opened = await openSession(db, "pr", repo, number, { head });
   if ("refused" in opened) { log(`${ref}: no fix session: a person stopped the item's workflow`); return 1; }
+  // The command line holds no lease, so it stays off a session a step works on.
+  if ((await loadHeldLeaseKeys(db)).has(fixSessionLease(opened.session))) { log(`${ref}: a job works fix session ${opened.session.id} now; nothing was run`); return 1; }
+  if ((await lastTurn(db, opened.session.id))?.outcome === "queued") { log(`${ref}: fix session ${opened.session.id} has a turn queued; nothing was run`); return 1; }
   log(`${ref} at ${head.slice(0, 7)}: ${step} on fix session ${opened.session.id}${opened.created ? " (new)" : ""}`);
   const env: StepEnv = {
     db, api, log, by: "cli",
     movedStat: async (from, to) => (await git.git(["diff", "--stat", from, to])).stdout.trim().split("\n").pop() ?? "",
   };
-  const out = await runStep(env, opened.session, prStep(db, turn, () => gate));
-  if (out.session.workspaceId !== null) await parkSession(env, out.session).catch((e: unknown) => log(`parking the workspace: ${(e as Error).message}`));
+  let out: StepOutcome | undefined;
+  try {
+    out = await runStep(env, opened.session, prStep(db, turn, () => gate));
+  } finally {
+    const live = out?.session ?? (await loadSessions(db, [opened.session.id])).get(opened.session.id);
+    if (live?.workspaceId != null) await parkSession(env, live).catch((e: unknown) => log(`parking the workspace: ${(e as Error).message}`));
+  }
 
   log("\nturns:");
   for (const t of out.turns) log(`  ${t.purpose}: ${t.outcome}${t.report ? ` (${t.report.status})` : ""}${t.error ? `: ${t.error}` : ""}${t.parseError ? `; not the report: ${t.parseError}` : ""}; ${t.calls} tool calls, ${t.turns ?? "?"} model turns, $${(t.costUsd ?? 0).toFixed(2)}`);

@@ -5,7 +5,7 @@
 import { assertFence } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
 import { guardedApi, inClusterApi } from "../build/kube-api.ts";
-import { prCrateDirs, runGate, type GateResult, type StepGate } from "../fixsession/gates.ts";
+import { prPackages, runGate, type GateResult, type StepGate } from "../fixsession/gates.ts";
 import { lintMessage, type StepTurn } from "../fixsession/messages.ts";
 import { loadSessions, loadTurns, type FixSession } from "../fixsession/store.ts";
 import { prStep, runStep, type StepEnv, type StepOutcome, type StepSpec } from "../fixsession/turn.ts";
@@ -36,10 +36,10 @@ export async function sessionFixup(c: FixCandidate, o: { head: string; title: st
     return { turn: { ...base, step: "maintainer", instructions: c.operator.instructions, diff: o.prDiff }, gate: { step: "maintainer", scripts: o.scripts, quiet: o.quiet } };
   }
   const allowed = [...new Set(c.fixes.map((f) => f.file))];
-  const newFilesIn = await prCrateDirs(o.git, o.head, o.prDiff);
+  const { newFilesIn, packages } = await prPackages(o.git, o.head, o.prDiff);
   return {
     turn: { ...base, step: "fixup", reason: c.reason, fixes: c.fixes, allowed, newFilesIn, diff: o.prDiff },
-    gate: { step: "fixup", allowed, newFilesIn, scripts: o.scripts, quiet: o.quiet },
+    gate: { step: "fixup", allowed, newFilesIn, packages, scripts: o.scripts, quiet: o.quiet },
   };
 }
 
@@ -108,11 +108,8 @@ export async function sessionPatch(r: SessionRun, c: FixCandidate, t: SessionFix
       return { kind: "failed", reason: "the fix session reported done but the tree holds no change" };
     case "refused":
       return { kind: "refused", reason: out.problems.join("; ") };
-    case "ok": {
-      // The change must be on the head the fix-up applies it to.
-      const base = (out as { base?: string }).base;
-      if (base !== undefined && base !== t.turn.head) return { kind: "failed", reason: `the fix session's change was made on ${base.slice(0, 7)}, not on ${t.turn.head.slice(0, 7)}` };
+    case "ok":
+      // The diff is against the workspace's base commit, whose tree is the turn's head: the fix-up applies it on that head.
       return { kind: "ok", patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed, changes: out.report.changes, turnId: out.turnId };
-    }
   }
 }
