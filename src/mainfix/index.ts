@@ -18,7 +18,7 @@
 //   autocraft-server main-fix --repo R [--apply]
 //   autocraft-server main-fix-approval [--repo R]
 import { leaseItem } from "../runner/leases.ts";
-import { dropMainFix, loadMainFixHeads, loadMainFixes, loadMainFixDue, saveMainFixes, type MainFixRow } from "../data/changes/index.ts";
+import { dropMainFix, loadMainFixHeads, loadMainFixes, loadMainFixDue, saveMainFixes, type MainFixRow, type MainFixTry } from "../data/changes/index.ts";
 import { listAudit, loadTrackedRepos, loadStepApprovals } from "../data/control/index.ts";
 import { loadMainCiAt } from "../data/mirror/index.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
@@ -38,7 +38,6 @@ import { cleanLine } from "../review/post-template.ts";
 import { scrub } from "../runner/scrub.ts";
 import { approvedRepos, repoApproved } from "../core/repo-approvals.ts";
 import { repeatAfter } from "../core/rules.ts";
-import type { MainFixTry } from "../data/changes/main-fixes.ts";
 import { lintReadyIn, openFixPrs, type FixPrDeps } from "./pr.ts";
 import { REASON_WORDS, VERDICTS, type MainFixInput, type MainFixVerdict } from "./types.ts";
 import { slugOf } from "../owners.ts";
