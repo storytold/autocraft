@@ -5,6 +5,7 @@ import { TEST_PATH } from "../cifix/guard.ts";
 import { fixupEditable, hasMarkers, operatorEditable, editable, resolvablePath, validatePatch, type BuildScripts, type PatchRules } from "../fixup/patch.ts";
 import { validateFixPatch } from "../security/patch.ts";
 import { patchGiveaway, QUIET_PATCH_REFUSAL, quietProblem } from "../security/rules.ts";
+import type { Git } from "../fixup/git.ts";
 import type { SecurityReport } from "./report.ts";
 
 export type GateOk = { ok: true; patch: string; files: string[]; changed: number; /** A security fix: only its test file, for the base task. */ testPatch?: string };
@@ -52,6 +53,17 @@ export function crateDirsOf(changed: readonly string[], manifests: ReadonlyMap<s
     if (d !== undefined) out.add(d);
   }
   return [...out].sort();
+}
+
+/** The crate directories at `head` that hold a file the PR diff changes: where a fix-up may add files. */
+export async function prCrateDirs(git: Pick<Git, "git" | "file">, head: string, prDiff: string): Promise<string[]> {
+  const ls = await git.git(["ls-tree", "-r", "--name-only", head]);
+  const manifests = new Map<string, string>();
+  for (const f of ls.stdout.split("\n").filter((x) => x === "Cargo.toml" || x.endsWith("/Cargo.toml"))) {
+    const t = await git.file(head, f);
+    if (t.ok) manifests.set(f, t.content);
+  }
+  return crateDirsOf([...prDiff.matchAll(/^diff --git a\/(\S+) b\/\S+$/gm)].map((m) => m[1]!), manifests);
 }
 
 /** The per-file problems when there are any, else validatePatch's structure check (modes, symlinks, binaries). */

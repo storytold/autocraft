@@ -30,7 +30,7 @@ import {
   addTurn, endSession, ensureSession, lastTurn, loadSessions, SESSION_MAX_TURNS, settleTurn, turnsOf, updateSession,
   type FixSession, type FixStep, type FixTurn, type FixTurnPurpose,
 } from "./store.ts";
-import { ensureWorkspace, WORKSPACE_SESSION_KIND, type FixWorkspaceEnv } from "./workspace.ts";
+import { ensureWorkspace, restorePatch, WORKSPACE_SESSION_KIND, type FixWorkspaceEnv } from "./workspace.ts";
 
 export type FixPromptId = "fix.session" | "security.session";
 /** The step a turn works for, with a maintainer's `fix <instructions>` apart from the review's fixes. */
@@ -141,6 +141,13 @@ export type StepSpec = {
   /** The step's gates, with the workspace's pod to read files from. */
   gate(pod: Pod): StepGate;
   items?: ItemRef[];
+  /**
+   * A follow-up within the step on the change it stored (lint findings on the patch the lint task read): the tree is made the
+   * step's commit plus `patch` (restorePatch), and the first turn sends `message` on the session of call `parentId`. When that is
+   * not the session's last call (a later turn, a lost runner, a new session), a fresh harness session gets the task, which carries
+   * the findings, with the history and what the tree holds.
+   */
+  followUp?: { purpose: "lint"; patch: string; parentId: number | null; message: string };
 };
 
 /** A PR step's spec from its task turn: fix.session, with the step message on a live session. */
@@ -278,7 +285,7 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
     round = queued;
     if (!await settled(round, r)) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, s.workspaceId);
   }
-  const ws = await ensureWorkspace(s, spec.head, env, { keepTree: resume });
+  const ws = await ensureWorkspace(s, spec.head, env, { keepTree: resume || !!spec.followUp });
   if (ws.kind === "wait") return done({ kind: "wait", reason: ws.reason }, s.workspaceId);
   if (!await reload()) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, ws.workspaceId);
   const pod = env.pod?.(ws.workspaceId) ?? workspacePod(db, ws.workspaceId, env.cancelled, env.api);
@@ -287,6 +294,13 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
   const kept = resume && !ws.treeLost;
   if (!kept) {
     round = r = null;
+    if (spec.followUp) {
+      const put = await restorePatch(env, ws.workspaceId, { diff: spec.followUp.patch, head: spec.head });
+      if (!put.ok) return done({ kind: "failed", reason: `the stored change could not be put back in the workspace: ${put.reason}` }, ws.workspaceId);
+      if (s.lastCallId !== null && s.lastCallId !== spec.followUp.parentId) {
+        if (!await updateSession(db, s.id, { lastCallId: null }) || !await reload()) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, ws.workspaceId);
+      }
+    }
     const docs = await putRepoDocs(env, ws.workspaceId, await (env.agents ?? ((repo) => defaultAgents(db, repo)))(s.repo));
     if (docs) env.log(`fix session ${s.id}: the repository's AGENTS.md was not put in the workspace (${docs})`);
   }
@@ -298,12 +312,12 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
       if (t.purpose === "findings") checkTurns++;
       if (t.purpose === "undo") undone = true;
       if (t.purpose === "report") reportAsked = true;
-      if (t.purpose === "step" || t.purpose === "start") break;
+      if (t.purpose === "step" || t.purpose === "start" || t.purpose === "lint") break;
     }
   }
 
   type Next = { purpose: FixTurnPurpose; message: string | null };
-  const opening = async (): Promise<Next> => ({
+  const opening = async (): Promise<Next> => spec.followUp ? { purpose: spec.followUp.purpose, message: spec.followUp.message } : ({
     purpose: "step",
     message: spec.message({ moved: ws.moved ? { from: ws.moved.from, diffStat: await env.movedStat?.(ws.moved.from, ws.moved.to).catch(() => "") ?? "" } : null }),
   });
@@ -326,7 +340,7 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
       if (follow && next.message !== null) stdin = next.message;
       else {
         // No live harness session: a new one gets the task; one that takes over also gets the history and what the tree holds.
-        const fresh = history.length > 0;
+        const fresh = history.length > 0 || !!spec.followUp;
         let diffStat = "";
         if (fresh && next.purpose !== "step") {
           const d = await collectDiff(env, ws.workspaceId);

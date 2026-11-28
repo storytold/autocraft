@@ -78,7 +78,7 @@ export async function loadStoredPatches(db: Db, keys: KeySource, kinds?: PatchKi
   const k = queryDb(db).k as any;
   const [fixups, cifixes, conflicts] = await db.together(() => Promise.all([
     want("fixup") ? rowsOf<any>(db, k.selectFrom("main.fixups as f").innerJoin(resolveKeys(db, keys, "kk"), onKey("f"))
-      .select(["f.repo", "f.number", "f.from_head", "f.source", "f.attempt", "f.patch", "f.lint_task", "f.lint_round", "f.lint_state", "f.session", "f.operator_fix", "f.changes", kx.rowid("main.fixups", "f").as("id")])
+      .select(["f.repo", "f.number", "f.from_head", "f.source", "f.attempt", "f.patch", "f.lint_task", "f.lint_round", "f.lint_state", "f.session", "f.session_turn", "f.operator_fix", "f.changes", kx.rowid("main.fixups", "f").as("id")])
       .where("f.state", "=", "linting").where("f.patch", "is not", null).orderBy(kx.rowid("main.fixups", "f"))) : [],
     want("cifix") ? rowsOf<any>(db, k.selectFrom("main.ci_fixes as c").innerJoin(resolveKeys(db, keys, "kk"), onKey("c"))
       .select(["c.repo", "c.number", "c.head", "c.attempt", "c.patch", "c.files", "c.lint_task", "c.lint_round", "c.lint_state", "c.session", kx.rowid("main.ci_fixes", "c").as("id")])
@@ -90,7 +90,7 @@ export async function loadStoredPatches(db: Db, keys: KeySource, kinds?: PatchKi
   return [
     ...fixups.map((r): StoredPatch => ({
       kind: "fixup", id: Number(r.id), repo: r.repo, number: Number(r.number), head: r.from_head, source: (r.source ?? "review") as FixupSource, attempt: Number(r.attempt), patch: r.patch,
-      lintTask: num(r.lint_task), lintRound: r.lint_round ?? 1, lintState: r.lint_state ?? "pending", session: r.session, operatorFix: num(r.operator_fix), changes: strings(r.changes),
+      lintTask: num(r.lint_task), lintRound: r.lint_round ?? 1, lintState: r.lint_state ?? "pending", session: r.session, sessionTurn: num(r.session_turn), operatorFix: num(r.operator_fix), changes: strings(r.changes),
     })),
     ...cifixes.map((r): StoredPatch => ({
       kind: "cifix", id: Number(r.id), repo: r.repo, number: Number(r.number), head: r.head, attempt: Number(r.attempt), patch: r.patch, files: strings(r.files),

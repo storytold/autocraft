@@ -60,6 +60,9 @@ import { leaseItem } from "../runner/leases.ts";
 import { isHalt, poolRoom, takersCut, takersFirst } from "../agents/call.ts";
 import { pushesAreUnsettled } from "./unsettled.ts";
 import { POOL_MAX, pool } from "../classify/run.ts";
+import { diffFiles, type DiffFile } from "../fixsession/gates.ts";
+import { fixSessionsOn } from "../fixsession/switch.ts";
+import { defaultSessionDeps, sessionFixup, sessionPatch, storedSessionPatch, type FixSessionDeps } from "./session.ts";
 
 export { MAX_ATTEMPTS, type FixCandidate, type FixSelection } from "./candidates.ts";
 export { selectFixups } from "./select.ts";
@@ -91,6 +94,8 @@ export type FixupDeps = {
   root: string;
   /** Stands in for the app lane's token and client (tests). */
   lane?: Pick<Writer, "mint" | "appClient">;
+  /** What fix sessions run on (setting fix_sessions); null when this runner cannot reach a workspace. Absent: the cluster this runner is in. */
+  fixSession?: (db: Db) => FixSessionDeps | null;
 };
 
 export function defaultDeps(): FixupDeps {
@@ -188,8 +193,8 @@ class Recorder {
   }
 
   /** The model patch waits for its lint task: a first row, or the same row with the next round's patch and task. */
-  async linting(c: FixCandidate, patch: string, files: string[], task: number, lintState: "pending" | "requeued", round: number, session: string | null, changes: string[] = []): Promise<void> {
-    await storePatch(this.db, { kind: "fixup", storedId: c.lint?.rowid, repo: c.repo, number: c.number, head: c.head, patch, files, lintTask: task, lintRound: round, lintState, session, changes, source: c.source, operatorFix: c.operator?.id ?? null, attempt: c.attempt, at: this.at() });
+  async linting(c: FixCandidate, patch: string, files: string[], task: number, lintState: "pending" | "requeued", round: number, session: string | null, changes: string[] = [], sessionTurn: number | null = null): Promise<void> {
+    await storePatch(this.db, { kind: "fixup", storedId: c.lint?.rowid, repo: c.repo, number: c.number, head: c.head, patch, files, lintTask: task, lintRound: round, lintState, session, sessionTurn, changes, source: c.source, operatorFix: c.operator?.id ?? null, attempt: c.attempt, at: this.at() });
   }
 
   /** Stored patches whose Plan no longer lists the push (head moved, a Hold or Close answer, approval revoked) are dropped. */
@@ -402,10 +407,14 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       if (c.operator) {
         files = [...new Set([...diff.text.matchAll(DIFF_FILE)].map((m) => m[1]!))].filter((p) => operatorEditable(p, scripts));
       }
+      // In a fix session the model edits the workspace's tree: no files are shown, and the checkout serves the patch check alone.
+      const sessions = await fixSessionsOn(db, "fixup", repo);
+      const sessionDeps = sessions ? (d.fixSession ?? defaultSessionDeps)(db) : null;
+      if (sessions && !sessionDeps) { log(`  ${ref}: skipped: this runner is not in the cluster, so it cannot reach the fix session's workspace; tried again later`); return; }
       // With a sandbox checkout the model reads the files itself, so they are listed by path and no size limit applies,
       // and a diff over the cap is shown as the named files' sections plus the other files by path.
       const checkout = (await d.checkout?.(repo, c.number, head)) ?? undefined;
-      if (!checkout && diff.text.length > DIFF_CAP) {
+      if (!sessions && !checkout && diff.text.length > DIFF_CAP) {
         // A checkout that could not be made this time holds nothing: the next run tries again.
         if (d.checkout) { log(`  ${ref}: skipped: the PR diff is over the ${DIFF_CAP} character limit and there is no checkout; tried again later`); return; }
         await hold("too-large", `the PR diff is over the ${DIFF_CAP} character limit`);
@@ -417,7 +426,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       const quiet = (await loadQuiet(db, [`${repo}#${c.number}`])).size > 0;
       const shown: FixupPr["files"] = [];
       let total = 0, tooBig: string | null = null, bad: string | null = null;
-      for (const path of files) {
+      for (const path of sessions ? [] : files) {
         const f = await git.file(head, path);
         if (!f.ok) { bad = f.reason; break; }
         if (checkout) { shown.push({ path }); continue; }
@@ -441,7 +450,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
           if (c.lint.state === "requeued") { await fail("failed", `lint: ${res.reason}`); return; }
           const again = await queueLintFor(db, { step: "fixup", repo, number: c.number, head, base: pr.baseRefOid ?? null, patch: c.lint.patch });
           if (again === null) { await fail("failed", `lint: ${res.reason}`); return; }
-          await rec.linting(c, c.lint.patch, files, again, "requeued", c.lint.round, c.lint.session, c.lint.changes);
+          await rec.linting(c, c.lint.patch, files, again, "requeued", c.lint.round, c.lint.session, c.lint.changes, c.lint.sessionTurn);
           log(`  ${ref}: lint task failed (${res.reason}); queued again as task ${again}`);
           return;
         }
@@ -456,20 +465,45 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
           folded = fold.patch;
         }
       }
-      // The model's patch: the stored one when it is clean, else a new answer (with the findings on the earlier patch).
-      const ses: SessionAsk = c.lint && findings.length ? sessionAsk(c.lint.session, "", findings, new Date(at())) : {};
-      if (folded !== null) dropSessions(c.lint!.session);
-      const raw = folded !== null ? c.lint!.patch : await d.ask(db, [{ ref, title: titleOf(c), fixes: c.fixes, ...(quiet ? { quiet } : {}), files: shown, diff: modelDiff, ...(c.operator ? { operator: c.operator.instructions } : {}),
-        ...(c.lint && findings.length ? { previous: { patch: c.lint.patch, findings } } : {}), ...repoDir }], checkout,
-        new CheckTool({ db, step: "fixup", repo, number: c.number, head, base: pr.baseRefOid ?? null, applies: applyCheck(git, d.root, head, (p) => refusal(c.operator ? validatePatch(splitChanges(p).diff, null, (x) => operatorEditable(x, scripts)) : validatePatch(p, files, (x) => fixupEditable(x, scripts)))) }), ses);
-      ledger.hold(ses.kept);
-      if (c.lint && folded === null) dropSessions(c.lint.session, ses.kept ? { "": ses.kept } : {});
-      if (raw === null) { await fail("failed", "the model gave no answer"); return; }
-      // An operator fix-up's reply ends with the model's list of what it changed; a stored patch keeps the list in its row.
-      const split = c.operator && folded === null ? splitChanges(raw, c.operator.instructions) : { diff: raw, changes: c.lint?.changes ?? [] };
-      const reply = split.diff;
-      const v = c.operator ? validatePatch(reply, null, (x) => operatorEditable(x, scripts)) : validatePatch(reply, files, (x) => fixupEditable(x, scripts));
-      if (!v.ok) { await fail("refused", v.reason); return; }
+      let ses: SessionAsk = {};
+      let split: { diff: string; changes: string[] };
+      let v: { patch: string; files: string[]; changed: number };
+      let sessionTurn: number | null = null;
+      if (sessionDeps) {
+        // The fix session's change: the stored one when it is clean, else a turn (a follow-up with the findings on the stored change).
+        if (c.lint?.session) dropSessions(c.lint.session);
+        const task = await sessionFixup(c, { head, title: titleOf(c), quiet, scripts, prDiff: diff.text, git });
+        if (folded !== null) {
+          const g = await storedSessionPatch(task, c.lint!.patch);
+          if (!g.ok) { await fail("refused", g.problems.join("; ")); return; }
+          v = g;
+          split = { diff: c.lint!.patch, changes: c.lint!.changes };
+          sessionTurn = c.lint!.sessionTurn;
+        } else {
+          const got = await sessionPatch({ db, deps: sessionDeps, git, log, by: params.by === undefined || params.by === "pipeline" ? "pipeline" : params.by.operator, ...(c.lint && findings.length && { lint: { findings, patch: c.lint.patch, sessionTurn: c.lint.sessionTurn } }) }, c, task);
+          if (got.kind === "skip") { log(`  ${ref}: skipped: ${got.reason}; tried again later`); return; }
+          if (got.kind !== "ok") { await fail(got.kind, got.reason); return; }
+          v = got;
+          split = { diff: got.patch, changes: got.changes };
+          sessionTurn = got.turnId;
+        }
+      } else {
+        // The model's patch: the stored one when it is clean, else a new answer (with the findings on the earlier patch).
+        ses = c.lint && findings.length ? sessionAsk(c.lint.session, "", findings, new Date(at())) : {};
+        if (folded !== null) dropSessions(c.lint!.session);
+        const raw = folded !== null ? c.lint!.patch : await d.ask(db, [{ ref, title: titleOf(c), fixes: c.fixes, ...(quiet ? { quiet } : {}), files: shown, diff: modelDiff, ...(c.operator ? { operator: c.operator.instructions } : {}),
+          ...(c.lint && findings.length ? { previous: { patch: c.lint.patch, findings } } : {}), ...repoDir }], checkout,
+          new CheckTool({ db, step: "fixup", repo, number: c.number, head, base: pr.baseRefOid ?? null, applies: applyCheck(git, d.root, head, (p) => refusal(c.operator ? validatePatch(splitChanges(p).diff, null, (x) => operatorEditable(x, scripts)) : validatePatch(p, files, (x) => fixupEditable(x, scripts)))) }), ses);
+        ledger.hold(ses.kept);
+        if (c.lint && folded === null) dropSessions(c.lint.session, ses.kept ? { "": ses.kept } : {});
+        if (raw === null) { await fail("failed", "the model gave no answer"); return; }
+        // An operator fix-up's reply ends with the model's list of what it changed; a stored patch keeps the list in its row.
+        split = c.operator && folded === null ? splitChanges(raw, c.operator.instructions) : { diff: raw, changes: c.lint?.changes ?? [] };
+        const reply = split.diff;
+        const checked = c.operator ? validatePatch(reply, null, (x) => operatorEditable(x, scripts)) : validatePatch(reply, files, (x) => fixupEditable(x, scripts));
+        if (!checked.ok) { await fail("refused", checked.reason); return; }
+        v = checked;
+      }
       const word = quiet ? patchGiveaway(v.patch) : null;
       if (word) { await fail("refused", QUIET_PATCH_REFUSAL); return; }
 
@@ -484,7 +518,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       const commit = await git.commit(applied.tree, head, commitMessage(v.files, !!c.operator), { name: who.login, email: who.email });
       const changes = await git.rawChanges(head, commit);
       const touched = changes.map((x) => x[3]!).sort().join("\n");
-      if (changes.some((x) => x[2] !== "M" || x[0] !== x[1] || (x[0] !== "100644" && x[0] !== "100755")) || touched !== [...v.files].sort().join("\n")) {
+      if ((sessionDeps ? !sameChanges(changes, diffFiles(v.patch)) : changes.some((x) => x[2] !== "M" || x[0] !== x[1] || (x[0] !== "100644" && x[0] !== "100755"))) || touched !== [...v.files].sort().join("\n")) {
         await fail("refused", "the commit would change files or modes outside the validated diff");
         return;
       }
@@ -518,7 +552,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
         const round = c.lint ? c.lint.round + 1 : 1;
         const task = await queueLintFor(db, { step: "fixup", repo, number: c.number, head, base: now.baseRefOid ?? null, patch: v.patch });
         if (task !== null) {
-          await rec.linting(c, v.patch, v.files, task, "pending", round, ses.kept ? storeSessions({ "": ses.kept }, new Date(at())) : null, split.changes);
+          await rec.linting(c, v.patch, v.files, task, "pending", round, ses.kept ? storeSessions({ "": ses.kept }, new Date(at())) : null, split.changes, sessionTurn);
           if (ses.kept) ledger.stored({ "": ses.kept });
           await jobItem(db, repo, c.number, `patch stored; lint task ${task} queued (round ${round})`, log);
           return;
@@ -583,6 +617,21 @@ async function postableChanges(db: Db, repo: string, ref: string, changes: strin
 }
 
 const DIFF_FILE = /^diff --git a\/(\S+) b\/\S+$/gm;
+
+/**
+ * Whether a commit's raw changes (diff-tree --raw: old mode, new mode, status, path) are exactly the files of a session's change:
+ * an edit keeps its regular file mode, a new file is a plain file, a deleted one was a regular file.
+ */
+function sameChanges(changes: string[][], expected: DiffFile[]): boolean {
+  const regular = (m: string | undefined) => m === "100644" || m === "100755";
+  const want = new Map(expected.map((f) => [f.path, f.kind]));
+  return changes.length === want.size && changes.every(([from, to, status, path]) => {
+    const kind = want.get(path!);
+    return kind === "edit" ? status === "M" && from === to && regular(from)
+      : kind === "new" ? status === "A" && from === "000000" && to === "100644"
+      : kind === "deleted" ? status === "D" && to === "000000" && regular(from) : false;
+  });
+}
 
 const OWN_PUSHES = ["fixup-push", "cifix-push", "conflict-push", "fixissue-push", "batch-push"];
 
