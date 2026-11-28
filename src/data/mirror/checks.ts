@@ -9,14 +9,14 @@ import type { DiffFactsKey, DiffFactsRow, Gate, GateRead, PrChecksRow, PrChecksV
 
 const CHECK_COLUMNS = kx.cols("pr_checks", "pc");
 
-/** The stored checks row of each PR. With `checksOnlyIfFailing` the check list is read only where `overall` is "failure" (null elsewhere). */
-export async function loadChecks(db: Db, keys: KeySource, o?: { checksOnlyIfFailing?: boolean }): Promise<Map<RefKey, PrChecksView>> {
+/** The stored checks row of each PR. With `checksOnlyIfNotGreen` the check list is read only where `overall` is "failure" or "pending", where optional checks can change the reading (null elsewhere). */
+export async function loadChecks(db: Db, keys: KeySource, o?: { checksOnlyIfNotGreen?: boolean }): Promise<Map<RefKey, PrChecksView>> {
   const q = queryDb(db);
   const cols = (CHECK_COLUMNS as readonly string[]).filter((c) => c !== "pc.checks");
   const parts = await Promise.all(keyChunks(keys).map((k) => q.all(
     (joinKeys(db, q.k.selectFrom("pr_checks as pc"), k, "pc") as AnyQ).select((eb: kx.AnyEb) => [
       ...cols.map((c) => eb.ref(c).as(c.slice(3))),
-      (o?.checksOnlyIfFailing ? eb.case().when("pc.overall", "=", "failure").then(eb.ref("pc.checks")).end() : eb.ref("pc.checks")).as("checks"),
+      (o?.checksOnlyIfNotGreen ? eb.case().when("pc.overall", "in", ["failure", "pending"]).then(eb.ref("pc.checks")).end() : eb.ref("pc.checks")).as("checks"),
     ] as never), { label: "mirror.loadChecks" })));
   const out = new Map<RefKey, PrChecksView>();
   for (const rows of parts) for (const r of rows as PrChecksView[]) out.set(refKey(r.repo, r.number), r);

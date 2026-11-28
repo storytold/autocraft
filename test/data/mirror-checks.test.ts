@@ -20,7 +20,7 @@ both("saveChecks keeps a known mergeable at the same head when GitHub reports UN
 
 both("loadChecks can leave the check list out of rows that are not failing", async (db) => {
   await saveChecks(db, [check("app", 1, { overall: "failure" }), check("app", 2)], "t");
-  const m = await loadChecks(db, refs(2), { checksOnlyIfFailing: true });
+  const m = await loadChecks(db, refs(2), { checksOnlyIfNotGreen: true });
   assert.deepEqual([m.get("app#1")!.checks === null, m.get("app#2")!.checks === null], [false, true]);
   assert.ok((await loadChecks(db, refs(2))).get("app#2")!.checks!.includes("build"));
   return [m.get("app#1")!.checks, m.get("app#2")!.checks];

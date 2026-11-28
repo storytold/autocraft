@@ -75,7 +75,7 @@ export async function loadPrMirror(db: Db, keys: KeySource): Promise<Map<RefKey,
       .select((eb) => [
         ...qualified("i", itemCols).map((c) => eb.ref(c as "i.repo").as(`i_${c.slice(2)}`)),
         eb.ref("pc.head_oid").as("c_head_oid"), eb.ref("pc.state").as("c_state"), eb.ref("pc.is_draft").as("c_is_draft"), eb.ref("pc.overall").as("c_overall"),
-        eb.case().when("pc.overall", "=", "failure").then(eb.ref("pc.checks")).end().as("c_checks"),
+        eb.case().when("pc.overall", "in", ["failure", "pending"]).then(eb.ref("pc.checks")).end().as("c_checks"),
         eb.ref("pc.mergeable").as("c_mergeable"), eb.ref("pc.maintainer_can_modify").as("c_mcm"), eb.ref("pc.fetched_at").as("c_fetched_at"),
       ]), { label: "mirror.loadPrMirror" })));
   const out = new Map<RefKey, PrMirror>();

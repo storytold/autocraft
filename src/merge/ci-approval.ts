@@ -64,7 +64,7 @@ export async function overallAt(db: Db, repo: string, number: number, head: stri
 /** overallAt for many PRs, by `repo#number`, in one wave whatever their number. */
 export async function overallsAt(db: Db, prs: readonly { repo: string; number: number; head: string; overall: string }[]): Promise<Map<string, string>> {
   if (!prs.length) return new Map();
-  const failed = prs.filter((p) => p.overall === "failure");
+  const failed = prs.filter((p) => p.overall === "failure" || p.overall === "pending");
   const repos = [...new Set(failed.map((p) => p.repo))];
   const [checks, optional, runs] = await db.together(() => Promise.all([
     failed.length ? loadChecks(db, failed.map((p) => ({ repo: p.repo, number: p.number }))) : null,

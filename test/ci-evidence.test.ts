@@ -21,6 +21,8 @@ const ROWS: Row[] = [
   { name: "only an optional check failed", overall: "failure", checks: [[LINT, "failure"], [GATE, "success"]], want: "success" },
   { name: "an optional check failed and a required one runs", overall: "failure", checks: [[LINT, "failure"], [GATE, "pending"]], want: "pending" },
   { name: "only an optional check ran", overall: "failure", checks: [[LINT, "failure"]], want: "none" },
+  { name: "only an optional check still runs", overall: "pending", checks: [[LINT, "pending"], [GATE, "success"]], want: "success" },
+  { name: "an optional and a required check still run", overall: "pending", checks: [[LINT, "pending"], [GATE, "pending"]], want: "pending" },
   { name: "an optional and a required check failed", overall: "failure", checks: [[LINT, "failure"], [GATE, "failure"]], want: "failure" },
   { name: "green with approved runs unfinished", overall: "success", approved: "here", want: "pending" },
   { name: "red with approved runs unfinished", overall: "failure", checks: [[GATE, "failure"]], approved: "here", want: "pending" },
