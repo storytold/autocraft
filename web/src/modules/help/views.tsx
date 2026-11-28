@@ -303,7 +303,7 @@ function After() {
       <Part title={t("Merge approval")}>
         <ul className="flex list-disc flex-col gap-1 pl-5">
           <li>
-            <Code>merge</Code> {t("approves, alone or with a start command, as the merge button on GitHub would. So does a yes to a recommendation that ends in a merge.")}
+            <Code>merge</Code> {t("asks AutoCraft to get the item merged, alone or with a start command. So does a yes to a recommendation that ends in a merge.")}
           </li>
           <li>{t("An approved item merges when its steps are done, the pre-merge check is clean and CI is green, in the approver's name.")}</li>
           <li>{t("AutoCraft makes every fix the merge needs: what the review finds, a hold or close of the review, the pre-merge check's defects, a failed verification, red CI and conflicts. Findings that don't block the merge go to a follow-up issue.")}</li>
