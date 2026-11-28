@@ -1,6 +1,7 @@
 // The fix sessions of the fix-up, CI fix, conflict and security fix steps (docs/pipeline.md, Fix-up): one live model session per
 // item, kept in the item's workspace and continued turn by turn, until its PR is closed or merged, a person ends its workflow, it is
 // idle for a day, or it has had its turns. Turn writers join the caller's transaction, so a turn row goes in with its queued call.
+import { FIX_SESSION_CALL } from "./report.ts";
 import type { Db } from "../db/index.ts";
 import {
   addFixTurn, endFixSessions, ensureFixSession, loadFixSessionGate, loadFixSessions, loadFixTurns, loadFixTurnsById, loadLastFixTurn, loadLiveFixSessions,
@@ -17,9 +18,9 @@ export const SESSION_MAX_TURNS = 8;
 
 /**
  * A queued turn keeps its session from the idle and turn ends for this long after it was queued: a fix session call's time limit
- * (90 min, the fix.session prompt) plus its wait in the call queue (30 min). An older one is a leftover no job settles.
+ * (FIX_SESSION_CALL) plus its wait in the call queue (30 min). An older one is a leftover no job settles.
  */
-export const QUEUED_TURN_MS = (90 + 30) * 60_000;
+export const QUEUED_TURN_MS = FIX_SESSION_CALL.timeoutSeconds * 1000 + 30 * 60_000;
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 /** The guard an idle or turns end re-checks when it writes, so a session touched or queued meanwhile stays live. */
