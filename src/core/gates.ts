@@ -126,6 +126,8 @@ export function gatePermission(f: PrFacts | ItemFacts, a: Want, by: By): Permiss
     const asks = pr?.may.workflow?.blocker;
     return unapproved("blocked", `The workflow asks again${asks ? `: ${asks}` : ""}`, asks ? { blocker: asks } : {});
   }
+  // A PR whose workflow waits for its author's push (src/workflow/types.ts AuthorAsk) gets no work of AutoCraft's but its bookkeeping and the comment to them.
+  if (pr && pr.may.workflow?.state === "waiting" && !GOES_ON.has(a.kind)) return unapproved("author-ask", "The workflow waits for the author's push");
   // A stage that stopped itself on the item's repo (circuit breaker) writes nothing there until it is resumed, whoever asks.
   const stage = tripStageOf(a);
   const tripped = stage && f.tripped?.[stage];

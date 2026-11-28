@@ -89,7 +89,9 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
   // Quoted lines and code blocks are someone else's words; inline code only names a part (readWords).
   const code: string[] = [];
   s = commentLines(s).filter(Boolean).join("\n").replace(/`([^`\n]+)`/g, (_m, c: string) => `${CODE}${code.push(c) - 1}${CODE}`);
-  // A fix's own words come out first, so no other reading (conditions, items, the list form) reaches into them.
+  // The words for the author come out first, then a fix's own words, so no other reading (conditions, items, the list form) reaches into them.
+  const author = pullAuthorWords(s);
+  s = author.text;
   const said = pullInstruction(s);
   s = said.text;
   const normal = normalise(s);
@@ -109,7 +111,7 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
     const read = readItems(list[2]!, inline.last ?? opts.repo);
     items = addItems(items, read.items);
     if (read.bad.length || !read.items.length) {
-      const r = readWords(marked.text, marked.marks, code, said.instruction);
+      const r = readWords(marked.text, marked.marks, code, said.instruction, author.words);
       return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: [...r.unknown, ...read.bad].join(" ") };
     }
   }
@@ -120,7 +122,7 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
     if (yes) return { kind: "yes", ...(items.length ? { items } : {}), ...(yes.weight === null ? {} : { weight: yes.weight }) };
     if (saysHold(plain)) return { kind: "commands", items, parts: [{ word: "hold" }] };
   }
-  const r = readWords(marked.text, marked.marks, code, said.instruction);
+  const r = readWords(marked.text, marked.marks, code, said.instruction, author.words);
   const unmet = unmetConditions(normal.conditions, r.parts);
   const guard = GUARD.exec(marked.text.replace(INSTRUCTION_RE, () => ` ${said.instruction} `).replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
   const rest = [...r.unknown, ...unmet, ...(normal.refused ? [normal.refused] : []), ...(guard && !r.unknown.some((u) => u.toLowerCase().includes(guard.toLowerCase())) ? [guard] : [])];
@@ -379,6 +381,25 @@ function pullInstruction(text: string): { text: string; instruction: string | nu
   return { text, instruction: null };
 }
 
+/** Stands for the person's words for the author taken out of the text (pullAuthorWords). */
+const AUTHOR_MARK = "\u0004";
+/** The words of the ask-author command, longest first. */
+const ASK_AUTHOR_RE = new RegExp(`(?<![\\w-])(?:${any(["ask author", ...COMMANDS.filter((c) => c.word === "ask-author").flatMap((c) => [c.word, ...c.aliases])])})(?![\\w-])`, "i");
+
+/**
+ * The first ask-author command and the person's words for the author after it ("ask the author to wire in the group editor, then merge"),
+ * up to where the next command starts: they come out of the text, and the command stays with a marker in their place. A leading
+ * "to", "for" or "that" is not theirs.
+ */
+function pullAuthorWords(text: string): { text: string; words: string | null } {
+  const m = ASK_AUTHOR_RE.exec(text);
+  if (!m) return { text, words: null };
+  const tail = text.slice(m.index + m[0].length);
+  const end = INSTRUCTION_END.exec(tail);
+  const words = (end ? tail.slice(0, end.index) : tail).replace(/^\s*:?\s*/, "").replace(/^(?:to|for|that)\s+/i, "").replace(/[\s,;.!]+$/, "").trim();
+  return { text: `${text.slice(0, m.index)}ask-author${words ? ` ${AUTHOR_MARK}` : ""}${end ? tail.slice(end.index) : ""}`, words: words || null };
+}
+
 /** The list before the first `then` / `and then`, and what follows it (null without one). */
 function splitThen(list: string): [string, string | null] {
   const m = /(?:\s*[,;]\s*|\s+)(?:and\s+)?then\s+/i.exec(list);
@@ -457,7 +478,7 @@ function oneSwapOrSubstitution(a: string, b: string): boolean {
 const NAMED_RE = new RegExp(`^(${any(COMMANDS.filter((c) => c.answer).flatMap((c) => [c.word, ...c.aliases]))})\\s+(.+)$`, "i");
 
 /** Commands, separated by commas, semicolons, new lines, `and` or `then`. */
-function readWords(src: string, marks: readonly { tok: string }[] = [], code: readonly string[] = [], instruction: string | null = null): Read {
+function readWords(src: string, marks: readonly { tok: string }[] = [], code: readonly string[] = [], instruction: string | null = null, author: string | null = null): Read {
   const tainted = new Set<number>();
   const parts: CommandPart[] = [];
   const unknown: string[] = [];
@@ -492,6 +513,12 @@ function readWords(src: string, marks: readonly { tok: string }[] = [], code: re
   const readOne = (raw: string): void => {
     let seg = raw.trim().replace(/\s+/g, " ").replace(/^(?:(?:and then|then|and|please) )+/i, "").replace(/(?: (?:and|&))+$/i, "").trim();
     if (!seg) return;
+    // The words for the author (pullAuthorWords), as written, inline code in backticks.
+    if (/^ask-author(?:\s+\u0004)?$/i.test(seg)) {
+      const words = /\u0004/.test(seg) && author ? author.replace(CODE_RE, (_m, i: string) => `\`${code[Number(i)] ?? ""}\``).replace(/\s+/g, " ").trim() : "";
+      push({ word: "ask-author", ...(words ? { args: words } : {}) });
+      return;
+    }
     if (!/^auto[-\s]?repin(?:\s|$)/i.test(seg)) {
       const bare = stripFiller(seg);
       yes ||= saysYes(seg);

@@ -62,6 +62,8 @@ export type Run = {
   implements: boolean;
   /** The question its review has for the issue's reporter: it is posted, and the issue is reviewed again after their answer. */
   asks: string | null;
+  /** A PR's author is asked to finish or fix it, with the review's findings and the person's own `words`; the workflow waits for their push. */
+  asksAuthor: { words: string | null } | null;
 };
 
 export type Ambiguity =
@@ -87,6 +89,7 @@ export type Refusal =
   /** `merge` on an issue's review: the merge is approved with the implementation. */
   | { why: "issue-review-merge" }
   | { why: "autorepin-not-pr" }
+  | { why: "ask-author-not-pr" }
   /** take or release on an item with no live work. */
   | { why: "no-live-work"; word: "take" | "release" }
   | { why: "already-held"; by: string; at: string }
@@ -110,7 +113,7 @@ export const isLive = (wf: ItemWorkflow | null): wf is ItemWorkflow => !!wf && L
 
 const run = (r: Partial<Run>): Resolved => ({
   kind: "run",
-  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, replaces: false, retryMerge: false, retryPremerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, runner: null, answers: false, goesOn: false, pick: null, instruction: null, thenImplement: false, implements: false, asks: null, ...r },
+  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, replaces: false, retryMerge: false, retryPremerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, runner: null, answers: false, goesOn: false, pick: null, instruction: null, thenImplement: false, implements: false, asks: null, asksAuthor: null, ...r },
 });
 
 const ENTRY_OF = { review: "review", "fix-up": "fixup", implement: "implement" } as const;
@@ -166,6 +169,14 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   // Words that end the work or stand apart run alone; two entry points can't both start.
   if (((end.length || repin || runner) && parts.length > 1) || (has("resume") && parts.some((p) => p.word !== "resume" && p.word !== "weight")) || (entries.length > 1 && !chain)) return ambiguous({ why: "conflict", words: parts.map((p) => p.word) });
 
+  // The author is asked on its own; the merge may be approved with it, so their push goes on to the merge after its review.
+  const askAuthor = parts.find((p): p is Extract<CommandPart, { word: "ask-author" }> => p.word === "ask-author");
+  if (askAuthor) {
+    if (parts.some((p) => p.word !== "ask-author" && p.word !== "merge" && p.word !== "weight")) return ambiguous({ why: "conflict", words: parts.map((p) => p.word) });
+    if (state.kind !== "pr") return refused({ why: "ask-author-not-pr" });
+    const approve = merge && !(live && wf.approvedBy);
+    return run({ asksAuthor: { words: askAuthor.args ?? null }, approve, merges: merge || (live && !!wf.approvedBy), weight, answers: live && !!wf.rec, how: approve ? "approved" : live && wf.rec ? "answered" : live ? "set" : "started" });
+  }
   if (end.length) {
     const e = end[0]!;
     if (e === "hold" && !live && state.held && !state.closing) return refused({ why: "already-held", by: state.held.stoppedBy ?? "", at: state.held.stoppedAt ?? "" });
@@ -259,7 +270,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   // Only drops, while a recommendation is open: the recommendation without those parts, as a yes would run it.
   if (rec && drop.length && !fix.length && !entry && !instruction) {
     // A close or backlog drops nothing: dropping parts of it could mean "go ahead anyway" or "don't".
-    if (rec.close || rec.backlog) return ambiguous({ why: "conflict", words: [rec.close ? "close" : "backlog", ...named.map((p) => `drop ${p.part}`)] });
+    if (rec.close || rec.backlog || rec.author) return ambiguous({ why: "conflict", words: [rec.close ? "close" : rec.backlog ? "backlog" : "ask-author", ...named.map((p) => `drop ${p.part}`)] });
     if (merge && state.reviewFailed) return withoutReview(wf, drop, weight);
     const left = rec.parts.fix.filter((n) => !drop.includes(n));
     return accept(wf, left, [...new Set([...rec.parts.drop, ...drop])], weight, merge);
@@ -332,7 +343,7 @@ const goOn = (held: ItemWorkflow, weight: number | null): Resolved => {
 };
 
 /** A recommendation that fixes, runs, answers, closes and merges nothing: a yes to it would do nothing. */
-const runsNothing = (r: NonNullable<ItemWorkflow["rec"]>): boolean => !r.parts.fix.length && !r.again && !r.answer && !r.close && !r.backlog && !r.merges && !r.goes && !r.issue;
+const runsNothing = (r: NonNullable<ItemWorkflow["rec"]>): boolean => !r.parts.fix.length && !r.again && !r.answer && !r.close && !r.backlog && !r.author && !r.merges && !r.goes && !r.issue;
 
 /**
  * The word merge where the review failed for good at the head: the PR starts at the merge queue without that review, unless an earlier
@@ -357,6 +368,10 @@ function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number 
   const rec = wf.rec!;
   if (rec.close && !fix.length && !merge) return run({ end: "close", ...(rec.closeAs && { close: rec.closeAs }), how: "answered", answers: true, weight });
   if (rec.backlog && !fix.length && !merge) return run({ end: "backlog", how: "answered", answers: true, weight });
+  if (rec.author && !fix.length) {
+    const approve = merge && !wf.approvedBy;
+    return run({ asksAuthor: { words: null }, approve, merges: merge || !!wf.approvedBy, how: approve ? "approved" : "answered", answers: true, weight });
+  }
   if (rec.issue && !fix.length && !merge) {
     switch (rec.issue.action) {
       case "implement": return run({ implements: true, how: "answered", answers: true, weight });

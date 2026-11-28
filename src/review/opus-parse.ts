@@ -271,16 +271,19 @@ export function parseReviewWorkflow(r: Record<string, unknown>, partOf: (n: numb
   // The note may be filed in the PR's public follow-up issue: one that leaks the reference or that the reply checks flagged (`drop`) is not kept.
   const note = lines && typeof o!.note === "string" && !REFERENCE_LEAK.test(o!.note) && !drop.has(o!.note) ? o!.note : "";
   const outside = lines ? { lines, note: note.replace(/\s+/g, " ").trim().slice(0, OUTSIDE_NOTE_CHARS), checked: true as const } : null;
-  const x = r.recommendation as { text?: unknown; fix?: unknown; merge?: unknown; close?: unknown; backlog?: unknown } | null | undefined;
+  const x = r.recommendation as { text?: unknown; fix?: unknown; merge?: unknown; close?: unknown; backlog?: unknown; author?: unknown; scope?: unknown } | null | undefined;
   const text = x && typeof x === "object" && typeof x.text === "string" && x.text.trim() && !REFERENCE_LEAK.test(x.text) ? firstSentence(x.text.replace(/\s+/g, " ").trim()).slice(0, RECOMMENDATION_CHARS) : null;
   const named = text && Array.isArray(x!.fix) ? [...new Set(x!.fix)] : [];
   const fix = named.map((n) => (Number.isInteger(n) ? partOf(n as number) : null));
   const close = !!text && x!.close === true && !named.length;
   const backlog = !!text && !close && x!.backlog === true && !named.length;
-  const merge = !!text && !close && !backlog && x!.merge === true;
-  const usable = keepRec && !!text && fix.every((n) => n !== null) && (fix.length > 0 || merge || close || backlog);
+  // The author's turn runs no fix and no merge of ours; a scope question about it goes to a maintainer first.
+  const asks = !!text && !close && !backlog && x!.author === true && !named.length;
+  const scope = asks && x!.scope === true;
+  const merge = !!text && !close && !backlog && !asks && x!.merge === true;
+  const usable = keepRec && !!text && fix.every((n) => n !== null) && (fix.length > 0 || merge || close || backlog || asks);
   const exact = fix.every((n, i) => n === named[i]);
-  const rec = usable ? { text: exact ? text! : "", fix: fix as number[], merge, close, ...(backlog ? { backlog: true as const } : {}) } : null;
+  const rec = usable ? { text: exact ? text! : "", fix: fix as number[], merge, close, ...(backlog ? { backlog: true as const } : {}), ...(asks ? { author: true as const } : {}), ...(scope ? { scope: true as const } : {}) } : null;
   const a = r.author_commits as { in_scope?: unknown; note?: unknown } | null | undefined;
   const author = a && typeof a === "object" && typeof a.in_scope === "boolean"
     ? { in_scope: a.in_scope, note: typeof a.note === "string" ? a.note.replace(/\s+/g, " ").trim().slice(0, OUTSIDE_NOTE_CHARS) : "" } : null;

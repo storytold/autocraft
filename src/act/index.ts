@@ -1,4 +1,4 @@
-// Act stage: carries out what people told AutoCraft to close. A close command, on any surface, queues a person action
+// Act stage: carries out what people told AutoCraft to close, and posts the comments that ask a pull request's author for more work. A close command, on any surface, queues a person action
 // (`workflow_actions`, kinds close and comment-close; src/workflow/effects.ts). The planner lists the item for this step while the
 // action is due (core/decide-item.ts), and the step posts one short comment from a fixed template (close: none) and closes the item.
 //
@@ -18,7 +18,8 @@ import { actRoom } from "../conversations/queue.ts";
 import { addAudit, loadTrackedRepos } from "../data/control/index.ts";
 import { applyLocal } from "../data/mirror/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
-import { loadActions, loadActionsDue, saveActions, type ActionState, type DueAction } from "../data/workflow/index.ts";
+import { listWorkflows, loadActions, loadActionsDue, saveActions, type ActionState, type DueAction } from "../data/workflow/index.ts";
+import { authorAsk } from "../workflow/types.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import type { Exec } from "../fixup/git.ts";
@@ -114,10 +115,10 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
   }
   // Each close is a person's command, which is its approval in any repo (gates); they must still be able to act on it.
   // Heaviest workflow first, then in the order of the commands.
-  let todo = await loadActionsDue(db, { repos: [repo], kinds: CLOSE_KINDS });
+  let todo = await loadActionsDue(db, { repos: [repo], kinds: [...CLOSE_KINDS, "ask-author"] });
   if (params.limit !== undefined) todo = todo.slice(0, Math.max(0, params.limit - cardWrites));
   if (dryRun) {
-    for (const a of todo) log(`  would close ${refOf(a)}${a.close_as ? ` (${a.close_as})` : ""} as ${a.by}`);
+    for (const a of todo) log(a.kind === "ask-author" ? `  would ask the author of ${refOf(a)}` : `  would close ${refOf(a)}${a.close_as ? ` (${a.close_as})` : ""} as ${a.by}`);
     log(`act ${repo}: dry run, nothing called or written`);
     summary.done = todo.map(refOf);
     return summary;
@@ -127,7 +128,8 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
   for (const a of todo) {
     // The daily count is shared with card presses; one close is one count.
     if (!await actRoom(db, 1, now().getTime())) { summary.note = "the daily limit is reached"; break; }
-    const r = await closeOne(db, a, { deps: d, by: params.by ?? CLI_BY, log, started: () => { handled++; params.onHandled?.(handled); } });
+    const o = { deps: d, by: params.by ?? CLI_BY, log, started: () => { handled++; params.onHandled?.(handled); } };
+    const r = a.kind === "ask-author" ? await askOne(db, a, o) : await closeOne(db, a, o);
     if (r.kind === "done") summary.done.push(refOf(a));
     else if (r.kind === "skipped") summary.skipped.push({ ref: refOf(a), reason: r.reason });
     else if (r.kind === "failed") summary.failed.push({ ref: refOf(a), reason: r.reason });
@@ -229,6 +231,48 @@ async function closeOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (
       if (last) await addAudit(db, [{ login: ACTOR, action: "act-stopped", target: refOf(a), details: { action: a.id, by: a.by, reason: why, attempts } }]);
     });
     await say(`failed: ${shown}`);
+    return { kind: "failed", reason: shown };
+  }
+}
+
+/**
+ * Posts the comment of a workflow's author ask (src/workflow/effects.ts queueAuthorAsk) as the app: only while the workflow still waits
+ * for the author at the head it was asked at, and the PR is open there. A person's command is its approval; an ask the review made acts
+ * for the person who started the work.
+ */
+async function askOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (line: string) => void; started: () => void }): Promise<Ended> {
+  const { deps: d, log } = o;
+  const at = () => d.now().toISOString();
+  const say = (text: string) => jobItem(db, a.repo, a.number, text, log);
+  const end = async (reason: string): Promise<Ended> => {
+    await saveActions(db, [{ id: a.id, state: "skipped", reason, at: at() }], { from: ["pending"] });
+    await say(`author not asked: ${reason}`);
+    return { kind: "skipped", reason };
+  };
+  o.started();
+  const ask = authorAsk((await listWorkflows(db, { ids: [a.workflow_id] }))[0] ?? null);
+  if (!ask || ask.head !== a.head) return await end("the work no longer waits for the author there");
+  try {
+    const live = await readLive(d.querier, a.repo, a.number);
+    if (!live) return await end("GitHub returned no such item");
+    if (live.state !== "OPEN") return await end(`already ${live.state.toLowerCase()} on GitHub`);
+    if (live.head !== a.head) return await end(`the pull request changed after the ask (${short(a.head)} → ${short(live.head)})`);
+    const g = await guardItem(db, { repo: a.repo, number: a.number }, { kind: "act", bucket: "close", id: a.id }, o.by, a.by);
+    if ("refused" in g) { await say(`author not asked yet: ${g.refused}`); return { kind: "left" }; }
+    if (authorAsk((await listWorkflows(db, { ids: [a.workflow_id] }))[0] ?? null)?.at !== ask.at) return await end("the ask changed");
+    const w: Writer = { db, login: ACTOR, ...d.app };
+    const url = await commentOn(w, g, d.querier, "act-comment", { repo: a.repo, number: a.number, id: live.id }, ask.auto ? { by: "fixed" } : { by: "fixed-operator" }, ask.text, { action: a.id, workflow: a.workflow_id, by: a.by });
+    await saveActions(db, [{ id: a.id, state: "done", reason: null, commentUrl: url, at: at() }], { from: ["pending"] });
+    await say("asked the author");
+    return { kind: "done" };
+  } catch (e) {
+    const why = oneLine(e);
+    if (e instanceof WritePacedError) return { kind: "paced", reason: why };
+    if (githubWide(e)) { await say(`GitHub is failing, stopping: ${why}`); return { kind: "stop", reason: why }; }
+    const attempts = a.attempts + 1, last = attempts >= ACT_MAX_ATTEMPTS;
+    const shown = last ? `stopped after ${attempts} failed tries: ${why}` : why;
+    await saveActions(db, [{ id: a.id, state: last ? "failed" : "pending", reason: shown, attempts, at: at() }], { from: ["pending"] });
+    await say(`author not asked: ${shown}`);
     return { kind: "failed", reason: shown };
   }
 }

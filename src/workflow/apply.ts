@@ -395,10 +395,10 @@ function takeRefusalText(r: TakeRefusal, connect: string): string {
 
 /**
  * A run that gives a Task Runner work: anything but an end, an autorepin, a take or release, a weight alone, a resume of what nobody
- * started, and a question to an issue's reporter, which only posts.
+ * started, and a question to an issue's reporter or a PR's author, which only posts.
  */
 const needsRunner = (r: Run): boolean =>
-  r.end === null && r.autorepin === null && r.runner === null && r.resume !== "unstarted" && r.asks === null
+  r.end === null && r.autorepin === null && r.runner === null && r.resume !== "unstarted" && r.asks === null && r.asksAuthor === null
   && (r.start !== null || r.again !== null || r.approve || r.retryMerge || r.answers || r.resume !== null || r.goesOn || r.pick !== null || r.fix.length > 0 || r.implements);
 
 /** The tier of the workflow's model steps (review, fix-up, implement), which run on Opus. */
@@ -441,6 +441,7 @@ function eventKind(r: Run): WorkflowEventKind {
   if (r.end === "close") return "closed";
   if (r.end === "backlog") return "backlog";
   if (r.autorepin !== null) return "set";
+  if (r.asksAuthor && r.how === "started") return "started";
   if (r.start || (r.implements && !r.answers)) return "started";
   // An answer to the open recommendation is an answer also when it approves the merge: it accepts what the recommendation showed.
   if (r.answers) return "answered";
@@ -536,6 +537,29 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     return { failed: [], commit: unchanged };
   }
 
+  if (r.asksAuthor) {
+    // The PR waits for its author: everything that runs on it ends, and the comment to them is queued at the head the person saw.
+    if (wf?.kind === "issue") throw new fx.EffectError(t("ask author is for pull requests."));
+    const ask = await fx.authorAskOf({ ...c, ...shown }, r.asksAuthor.words, wf?.plan ?? []);
+    const patch: WorkflowPatch = {
+      state: "waiting", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: { author: ask }, step: null,
+      ...(r.weight !== null ? { weight: r.weight } : {}), ...(r.approve ? { approvedBy: by, approvedAt: at, approvedVia: via } : {}),
+      ...(r.answers && wf?.startedBy === RULE_STARTER && by !== RULE_STARTER ? { takenBy: by } : {}),
+    };
+    const id = await db.write(async () => {
+      if (wf) {
+        const now = (await listWorkflows(db, { ids: [wf.id], live: true }))[0];
+        if (!now || !sameWorkflow(now, wf)) throw new Moved();
+      }
+      const id = wf?.id ?? (await startWorkflows(db, [{ repo: item.repo, number: item.number, kind: "pr", entry: "review", weight: r.weight ?? WEIGHT_NORMAL, startedBy: by, startedVia: via, baseHead: item.head, at }]))
+        .get(`${item.repo}#${item.number}`);
+      if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
+      await saveWorkflows(db, [{ id, patch, at }]);
+      return id;
+    });
+    const failed = await fx.stopAll({ ...c, workflowId: id, keepBatch: false });
+    return { failed, commit: async () => { await fx.queueAuthorAsk(db, id, item, ask); return id; } };
+  }
   if (r.start) {
     const entry = r.start;
     const ends = r.replaces ? wf! : null;

@@ -10,7 +10,12 @@ import { releaseHeld } from "../data/intake/index.ts";
 import { loadChecks, loadItems, loadRepoCiSignals, loadRepos } from "../data/mirror/index.ts";
 import { queueIssueReviews } from "../data/issuereview/index.ts";
 import { withdrawItemCalls, withdrawUnownedItemCalls } from "../data/runners/index.ts";
-import { adoptLegs, endFixupRequests, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadLegs, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
+import { adoptLegs, endFixupRequests, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadLegs, queueActions, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
+import { loadReviewsAt, type ReviewRow } from "../data/review/index.ts";
+import { headRef } from "../data/review/rows.ts";
+import { authorAskComment } from "../act/templates.ts";
+import { REFERENCE_LEAK } from "../review/opus-parse.ts";
+import { clipText, firstSentence } from "../prose.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { queueLaneActions } from "../github/user-lane.ts";
@@ -25,7 +30,7 @@ import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { requestRepin } from "../repin/index.ts";
 import { markReviewsStale } from "../review/discussion.ts";
 import { LANE_STEPS } from "./blockers.ts";
-import { RULE_STARTER, type ItemKind, type ItemWorkflow, type PlanPart, type Surface } from "./types.ts";
+import { RULE_STARTER, type AuthorAsk, type ItemKind, type ItemWorkflow, type PlanPart, type Surface } from "./types.ts";
 
 /** A legacy step refused the command; its message says why, translated (`effectText`). `later`: a moment may lift it (src/preapproval NotYet). */
 export class EffectError extends Error {
@@ -298,10 +303,10 @@ export async function endLeg(c: Ctx, pr: { repo: string; number: number }): Prom
   }
 }
 
-/** Takes back the closes of the item, and those its workflow made of other items, that are still to be made: queued, or waiting for their person's sign-in or access. */
+/** Takes back the closes and the comment to the author of the item, and those its workflow made of other items, that are still to be made: queued, or waiting for their person's sign-in or access. */
 export async function stopCloses(c: Ctx): Promise<void> {
   const open = ["pending", "waiting-token", "waiting-permission"] as const;
-  const of = { kinds: ["close", "comment-close"], states: open } as const;
+  const of = { kinds: ["close", "comment-close", "ask-author"], states: open } as const;
   const maps = await c.db.together(() => Promise.all([
     loadActions(c.db, { refs: [{ repo: c.item.repo, number: c.item.number }], ...of }), ...(c.workflowId === undefined ? [] : [loadActions(c.db, { workflowIds: [c.workflowId], ...of })]),
   ]));
@@ -317,6 +322,45 @@ export async function stopCloses(c: Ctx): Promise<void> {
 export async function queueClose(c: Ctx, workflowId: number, item: Target, closeAs: CloseAs | null = null): Promise<void> {
   const { db, by, at } = c;
   await queueLaneActions(db, [{ workflowId, repo: item.repo, number: item.number, kind: "comment-close", by, head: item.kind === "pr" ? item.head : null, at, closeAs }]);
+}
+
+// ---- the author's turn ---------------------------------------------------------------------------------------------------
+
+/** Characters of the one line the item's status shows for an author ask. */
+const ASK_LINE_CHARS = 160;
+
+/**
+ * What AutoCraft asks a PR's author (`login`) for, at `head`: the comment, built from the review of that head (its public summary, and its
+ * fixes nobody dropped from `plan`, by title and file) and the person's own `words`, and the line the status shows. Text that points at
+ * the private reference is left out. `auto`: the review's recommendation asks, with no person's question first.
+ */
+export function authorAskFor(o: { login: string | null; head: string; review: ReviewRow | null; plan: readonly PlanPart[]; words: string | null; by: string; at: string; auto?: boolean }): AuthorAsk {
+  const dropped = new Set(o.plan.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase()));
+  const clean = (x: string | null | undefined): string | null => (x?.trim() && !REFERENCE_LEAK.test(x) ? x.trim() : null);
+  const summary = clean(o.review?.public_summary);
+  const fixes = (o.review?.fixes ?? []).flatMap((f) => (f.title && clean(f.title) && !dropped.has(f.title.toLowerCase()) ? [{ title: f.title, file: REFERENCE_LEAK.test(f.file) ? "" : f.file }] : []));
+  const words = o.words?.trim() || null;
+  const text = authorAskComment({ login: o.login, summary, fixes, words, from: words && !o.auto ? o.by : null });
+  const line = clipText(firstSentence(words ?? summary ?? fixes[0]?.title ?? t("finish the pull request")).replace(/\s+/g, " "), ASK_LINE_CHARS);
+  return { login: o.login, head: o.head, text, line, by: o.by, at: o.at, ...(o.auto ? { auto: true as const } : {}) };
+}
+
+/** The author ask a person's command makes on the PR `c.item` at its head: its author and its review there are read. */
+export async function authorAskOf(c: Ctx, words: string | null, plan: readonly PlanPart[]): Promise<AuthorAsk> {
+  const { db, item } = c;
+  if (item.kind !== "pr") throw new EffectError(t("ask author is for pull requests."));
+  if (!item.head) throw new EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: `${item.repo}#${item.number}` }));
+  const [items, reviews] = await db.together(() => Promise.all([loadItems(db, [{ repo: item.repo, number: item.number }], "pr"), loadReviewsAt(db, [{ repo: item.repo, number: item.number, head: item.head! }])]));
+  const login = items.get(`${item.repo}#${item.number}`)?.author ?? null;
+  return authorAskFor({ login, head: item.head, review: reviews.get(headRef(item.repo, item.number, item.head)) ?? null, plan, words, by: c.by, at: c.at });
+}
+
+/**
+ * Queues the comment of the workflow's author ask: the act step posts it as the app (src/act), once, while the workflow still waits for
+ * the author at that head. A new ask of the same workflow takes the place of the one before.
+ */
+export async function queueAuthorAsk(db: Db, workflowId: number, pr: { repo: string; number: number }, ask: AuthorAsk): Promise<void> {
+  await queueActions(db, [{ workflowId, repo: pr.repo, number: pr.number, kind: "ask-author", by: ask.by, head: ask.head, at: ask.at }]);
 }
 
 // ---- autorepin -----------------------------------------------------------------------------------------------------------

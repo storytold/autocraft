@@ -95,6 +95,7 @@ function useBrowseUrl() {
 const AUTOCRAFT_WORD: Record<BrowseAutocraft, { label: string; tone: Tone } | null> = {
   running: { label: "Working", tone: "accent" },
   waiting: { label: "Waiting", tone: "warn" },
+  author: { label: "Waiting for author", tone: "neutral" },
   stopped: { label: "Stopped by the rule", tone: "neutral" },
   held: { label: "Held", tone: "neutral" },
   backlog: { label: "Backlog", tone: "neutral" },
@@ -102,7 +103,7 @@ const AUTOCRAFT_WORD: Record<BrowseAutocraft, { label: string; tone: Tone } | nu
   none: null,
 };
 const AUTOCRAFT_TITLE: Record<BrowseAutocraft, string> = {
-  running: "AutoCraft is working on it", waiting: "AutoCraft waits for a person", stopped: "Stopped by the automatic merge rule; a maintainer's yes takes it over", held: "Held", backlog: "In the Backlog", done: "AutoCraft is done with it", none: "Not started",
+  running: "AutoCraft is working on it", waiting: "AutoCraft waits for a person", author: "AutoCraft waits for the author", stopped: "Stopped by the automatic merge rule; a maintainer's yes takes it over", held: "Held", backlog: "In the Backlog", done: "AutoCraft is done with it", none: "Not started",
 };
 const priorityTone = (p: string): Tone => (p === "P0" ? "bad" : p === "P1" ? "warn" : "neutral");
 
@@ -157,6 +158,11 @@ function factsOf(r: BrowseRow, compact = false) {
             <>
               {t("Stopped")}
               <span className="sr-only"> {t("by the rule")}</span>
+            </>
+          ) : short && r.autocraft === "author" ? (
+            <>
+              {t("Author")}
+              <span className="sr-only">{t(": waiting for their push")}</span>
             </>
           ) : (
             t(word.label)

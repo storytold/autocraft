@@ -2892,7 +2892,7 @@ export interface MaintainItems {
 
 /** AutoCraft's part in an item, in one word: working on it, waiting for a person, held, in the Backlog, done, or never started. */
 /** `stopped`: only the automatic merge rule started it and it stopped; it asks nobody until a maintainer takes it over. */
-export type BrowseAutocraft = "running" | "waiting" | "stopped" | "held" | "backlog" | "done" | "none";
+export type BrowseAutocraft = "running" | "waiting" | "author" | "stopped" | "held" | "backlog" | "done" | "none";
 
 /** One row of the Items browser. */
 export interface BrowseRow {

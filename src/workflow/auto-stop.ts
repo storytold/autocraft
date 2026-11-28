@@ -52,7 +52,7 @@ export function autoStop(f: PrFacts, p: Plan, reviews: readonly ReviewRow[], pre
   if (code === null || p.waitKind !== "person" || !JUDGEMENT_WAITS.includes(code) || p.reasons.some((r) => PASSING.has(r))) return null;
   const review = reviews.find((r) => r.head === f.head) ?? null;
   const fixes = review ? planOf(review.fixes, []) : [];
-  const view = review ? { verdict: review.verdict, sure: review.sure, rec: review.workflow?.recommendation ?? null, finding: review.public_summary, blockedBy: review.blocked_by } : null;
+  const view = review ? { verdict: review.verdict, sure: review.sure, rec: review.workflow?.recommendation ?? null, finding: review.public_summary, blockedBy: review.blocked_by, hold: review.workflow?.hold } : null;
   const conflict = conflictOf(f);
   const q = questionFor(f, p, { approved: false, review: view, parts: fixes, conflict });
   if (!q) return null;

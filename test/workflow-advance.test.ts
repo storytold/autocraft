@@ -27,7 +27,9 @@ import { openQuestion } from "../src/implement/questions.ts";
 import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
 import { applyStuckAnswer, markStuck } from "../src/implement/stuck.ts";
 import { resumeRetiredStops } from "../src/workflow/retired-stops.ts";
-import { actor, approvedReview, asked, ASKS, fixup, implementationOpened, implementIssue, keep, labelOf, later, leg8, legState, MAINT, nextStep, ownPush, pause, review, review8, say } from "./workflow-advance-world.ts";
+import { actor, approvedReview, asked, ASKS, fixup, implementationOpened, implementIssue, keep, labelOf, later, leg8, legState, MAINT, nextStep, ownPush, pause, review, review8, say, ticks } from "./workflow-advance-world.ts";
+import { decidePr } from "../src/core/decide.ts";
+import { loadPrFact } from "../src/core/facts.ts";
 
 test("each blocker stops an approved item and keeps its approval", async () => {
   const cases: [Blocker, (w: World) => Promise<unknown>][] = [
@@ -364,45 +366,62 @@ test("a started PR that is not approved comes back with the review's recommendat
   assert.deepEqual([wf.state, wf.rec?.text, wf.rec?.parts.fix, wf.rec?.merges, wf.plan.map((p) => p.title)], ["recommending", "Fix 1, then merge.", [1], true, ["guard empty input", "typo"]]);
 });
 
-test("a hold that plans no fix and gave no recommendation comes back with its finding and the backlog, and a yes runs no review of the head again", async () => {
+test("a started review whose hold finds the PR incomplete asks its author at once and waits; the author's push ends the wait and their commits are reviewed", async () => {
   const w = await approvedReview();
   const db = w.db;
-  await w.pr(2, { label: "feature" });
-  const on = (text: string) => runCommand(db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: 2 }] });
-  assert.equal((await on("review")).items[0]!.outcome, "run");
+  await w.pr(2, { label: "feature", author: "octo-dev" });
+  assert.equal((await runCommand(db, actor, "dashboard", { parsed: parse("review"), items: [{ repo: "app", number: 2 }] })).items[0]!.outcome, "run");
   await db.run(db.k.insertInto("main.opus_reviews").values({
     repo: "app", number: 2, head_oid: "sha2", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r",
-    public_review: JSON.stringify({ summary: "The group editor the description promises is not built.", points: [] }),
-    workflow: JSON.stringify({ outside_purpose: null, recommendation: null, hold: { class: "off-purpose", why: "Most of the promised UI is missing." } }),
+    public_review: JSON.stringify({ summary: "The group editor the description promises has no caller.", points: [] }),
+    workflow: JSON.stringify({ outside_purpose: null, recommendation: { text: "Ask the author to wire in the group editor.", fix: [], merge: false, close: false, author: true }, hold: { class: "off-purpose", why: "Most of the promised UI is missing." } }),
   }));
   await advanceWorkflows(db);
-  const rec = (await liveWorkflow(db, "app", 2))!.rec!;
-  assert.ok(rec.text.includes("group editor") && !/again/i.test(rec.text), rec.text);
-  assert.equal(rec.again, undefined);
-  const stale = () => db.all(db.k.selectFrom("main.review_state").select("stale_at").where("number", "=", 2));
-  const before = await stale();
-  assert.equal((await on("yes")).items[0]!.outcome, "run");
+  const wf = (await liveWorkflow(db, "app", 2))!;
+  assert.deepEqual([wf.state, wf.rec], ["waiting", null], "no question comes back first");
+  const asks = await db.all(db.k.selectFrom("main.workflow_actions").select(["kind", "state", "head"]).where("number", "=", 2));
+  assert.deepEqual(asks, [{ kind: "ask-author", state: "pending", head: "sha2" }]);
+  const ask = (wf.blockerParams as { author: { text: string; auto?: true } }).author;
+  assert.ok(ask.auto && ask.text.startsWith("@octo-dev") && ask.text.includes("group editor"), ask.text);
+  await w.synced(2, "sha9");
   await advanceWorkflows(db);
-  assert.equal((await workflowHistory(db, "app", 2)).at(-1)!.state, "backlog");
-  assert.deepEqual(await stale(), before, "the review of the head is not asked for again");
+  assert.equal((await liveWorkflow(db, "app", 2))!.state, "running");
+  assert.ok(decidePr((await loadPrFact(db, "app", 2))!).actions.some((a) => a.kind === "review" && a.head === "sha9"), "the author's push is reviewed");
 });
 
-test("a hold with fixes on a PR that conflicts with its base branch recommends no review of the same head", async () => {
+/** PR 2, conflicting with its base branch, started with `start`, and a hold review at sha2 with one fix and no recommendation. */
+async function heldConflicting(start: string): Promise<World> {
   const w = await approvedReview();
   const db = w.db;
   await w.pr(2, { label: "feature" });
-  assert.equal((await runCommand(db, actor, "dashboard", { parsed: parse("review"), items: [{ repo: "app", number: 2 }] })).items[0]!.outcome, "run");
   await db.run(db.k.updateTable("main.items").set({ base_ref: "main", mergeable: "CONFLICTING" }).where("number", "=", 2));
   await db.run(db.k.updateTable("main.pr_checks").set({ mergeable: "CONFLICTING" }).where("number", "=", 2));
+  assert.equal((await runCommand(db, actor, "dashboard", { parsed: parse(start), items: [{ repo: "app", number: 2 }] })).items[0]!.outcome, "run");
   await db.run(db.k.insertInto("main.opus_reviews").values({
     repo: "app", number: 2, head_oid: "sha2", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r",
-    fixes: JSON.stringify([{ file: "src/a.rs", change: "x", title: "wire in the group editor" }]),
-    workflow: JSON.stringify({ outside_purpose: null, recommendation: null }),
+    fixes: JSON.stringify([{ file: "src/a.rs", change: "x", title: "wire in the group editor" }]), workflow: JSON.stringify({ outside_purpose: null, recommendation: null }),
   }));
-  await advanceWorkflows(db);
-  const rec = (await liveWorkflow(db, "app", 2))!.rec!;
-  assert.ok(/conflicts/.test(rec.text) && !/again/i.test(rec.text), rec.text);
-  assert.deepEqual([rec.again, rec.parts.fix], [undefined, []]);
+  return w;
+}
+
+test("a hold with fixes on a PR that conflicts with its base branch recommends the fixes after the base merge, never the backlog", async () => {
+  const w = await heldConflicting("review");
+  await advanceWorkflows(w.db);
+  const rec = (await liveWorkflow(w.db, "app", 2))!.rec!;
+  assert.ok(/conflicts/.test(rec.text) && !/again|backlog/i.test(rec.text), rec.text);
+  assert.deepEqual([rec.again, rec.backlog, rec.parts.fix], [undefined, undefined, [1]]);
+});
+
+test("an approved PR whose review holds it and that conflicts merges the base branch and asks for the fix-up, with no backlog", async () => {
+  const w = await heldConflicting("review and merge");
+  const db = w.db;
+  await ticks(w);
+  const wf = (await liveWorkflow(db, "app", 2))!;
+  assert.ok(wf.state !== "blocked" && !wf.rec, JSON.stringify(wf.rec));
+  const fixups = await db.all(db.k.selectFrom("main.operator_fixups").select(["from_head", "state"]).where("number", "=", 2));
+  assert.deepEqual(fixups, [{ from_head: "sha2", state: "queued" }], "the fix-up is asked for as the approver");
+  const plan = decidePr((await loadPrFact(db, "app", 2))!).actions;
+  assert.ok(plan.some((a) => a.kind === "conflict"), JSON.stringify(plan));
 });
 
 test("a recommendation's fix numbers follow the stored fixes, not the model's list", () => {
@@ -608,9 +627,10 @@ test("one workflow's change that cannot be stored loses no other's, and the pass
     try { await advanceWorkflows(db, () => {}, () => { woken++; }); } finally { db.write = write; }
     return (await Promise.all([2, 3].map((n) => liveWorkflow(db, "app", n)))).map((x) => x!.state).sort();
   };
-  assert.deepEqual(await pass(), ["recommending", "running"]);
+  // A hold with no recommendation of its own asks the author: the workflow waits for them.
+  assert.deepEqual(await pass(), ["running", "waiting"]);
   assert.ok(woken > 0);
-  assert.deepEqual(await pass(), ["recommending", "recommending"]);
+  assert.deepEqual(await pass(), ["waiting", "waiting"]);
   assert.equal(woken, 0);
 });
 

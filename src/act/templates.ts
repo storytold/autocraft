@@ -58,7 +58,41 @@ export function duplicateComment(o: { repo: string; original: string; closed: bo
   return `Duplicate of ${refText(o.repo, o.original)}${o.closed ? ", which is closed" : ""}.`;
 }
 
+/** Fixes the comment to the author lists at most. */
+export const AUTHOR_FIXES_SHOWN = 8;
+const AUTHOR_SUMMARY_MAX = 600;
+const AUTHOR_WORDS_MAX = 1000;
+
+/**
+ * The comment that asks a pull request's author to finish or fix it: a ping to them, what the review found (its public summary), the
+ * fixes it lists by title and file, and the words of the person who asked (`from`, their login). Mentions of anyone else are removed.
+ */
+export function authorAskComment(o: { login: string | null; summary: string | null; fixes: readonly { title: string; file: string }[]; words: string | null; from: string | null }): string {
+  const plain = (x: string, max: number) => cleanReason(x.replace(/@/g, ""), max);
+  const out = [o.login ? `@${o.login} this pull request needs more work before it can be merged.` : "This pull request needs more work before it can be merged."];
+  const summary = o.summary ? plain(o.summary, AUTHOR_SUMMARY_MAX) : null;
+  if (summary) out.push(summary);
+  const fixes = o.fixes.slice(0, AUTHOR_FIXES_SHOWN).flatMap((f) => { const title = plain(f.title, REASON_MAX); return title ? [`- ${title.replace(/\.$/, "")}${f.file ? ` (\`${f.file.replace(/`/g, "")}\`)` : ""}`] : []; });
+  if (fixes.length) out.push(`What needs to change:\n${fixes.join("\n")}`);
+  const words = o.words ? o.words.replace(/@(?=[\w-])/g, "").replace(/\s+/g, " ").trim().slice(0, AUTHOR_WORDS_MAX) : "";
+  if (words) out.push(o.from ? `${o.from} adds: ${words}` : words);
+  out.push("Push your changes to this branch, and the new commits are reviewed.");
+  return out.join("\n\n");
+}
+
 export const COMMENT_TEMPLATES: CommentTemplate[] = [
+  {
+    id: "act.ask-author", stage: "Act",
+    purpose: "Posted once when a maintainer tells AutoCraft to ask a pull request's author for more work, or when the review of a started pull request finds it incomplete or wrong. The pull request then waits for the author's push.",
+    text: authorAskComment({ login: "{{author}}", summary: "{{summary}}", fixes: [{ title: "{{fix}}", file: "{{file}}" }], words: "{{words}}", from: "{{maintainer}}" }),
+    placeholders: [
+      { name: "author", meaning: "The pull request's author" },
+      { name: "summary", meaning: "The review's public summary, cleaned to one line (mentions, links and HTML removed, at most 600 characters)" },
+      { name: "fix, file", meaning: "Each fix the review lists that nobody dropped, by its title and file; at most 8" },
+      { name: "maintainer, words", meaning: "The maintainer who asked and their own words after ask author, when they wrote any; mentions removed" },
+    ],
+    example: authorAskComment({ login: "octo-dev", summary: "Most of the described tab UI is never wired in: the group pill and the group editor have no caller.", fixes: [{ title: "Wire the group editor into the tab bar", file: "src/tabs/bar.rs" }], words: "Please also cover split panes in close-other.", from: "mira" }),
+  },
   {
     id: "act.close", stage: "Act",
     purpose: "Posted when a maintainer tells AutoCraft to close an issue or a pull request, just before the close, which is made as that maintainer.",

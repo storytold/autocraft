@@ -62,8 +62,13 @@ export type Recommendation = {
   merges: boolean;
   /** A yes closes the item (the review says close); no parts are fixed and nothing merges. */
   close?: boolean;
-  /** A yes sends the item to the backlog: it stays open with no work planned (a hold whose next step is a person's or the author's). */
+  /** A yes sends the item to the backlog: it stays open with no work planned (a hold that waits for other items). */
   backlog?: true;
+  /**
+   * The next step is the author's: AutoCraft posts the review's findings to the PR's author and waits for their push. `ask`: it does so
+   * without a question, right after the review; `scope`: the review raises a scope question, so a person answers first and a yes asks the author.
+   */
+  author?: "ask" | "scope";
   /** How a yes closes the item, where the review says (an issue review's close). */
   closeAs?: CloseReason;
   /** An issue review's recommendation other than a close (src/issuereview): a yes implements the issue, sends it to the backlog, or asks its reporter `question`. */
@@ -121,6 +126,19 @@ export const asksForApprover = (wf: Pick<ItemWorkflow, "state" | "blockerParams"
 export const openRecommendation = (wf: Pick<ItemWorkflow, "state" | "rec"> | null): Recommendation | null =>
   (wf && (ASKING_STATES as readonly WorkflowState[]).includes(wf.state) ? wf.rec : null);
 
+/**
+ * A PR's workflow that waits for its author (state `waiting`, kept in `blockerParams.author`): the comment AutoCraft posts to them, at the
+ * head it was asked at. Their push ends the wait; nothing else of AutoCraft's runs on the item meanwhile. `by`: who asked; `auto`: the
+ * review's recommendation asked, with nobody's question first.
+ */
+export type AuthorAsk = { login: string | null; head: string; text: string; line: string; by: string; at: string; auto?: true };
+
+/** The author ask of a workflow that waits for its PR's author; null for any other. */
+export const authorAsk = (wf: Pick<ItemWorkflow, "kind" | "state" | "blockerParams"> | null): AuthorAsk | null => {
+  const a = wf?.kind === "pr" && wf.state === "waiting" ? (wf.blockerParams?.author as AuthorAsk | undefined) : undefined;
+  return a && typeof a.head === "string" && typeof a.text === "string" ? a : null;
+};
+
 /** What the held workflow goes back to. */
 export const heldWork = (wf: Pick<ItemWorkflow, "blockerParams">): HeldWork => (wf.blockerParams?.held ?? {}) as HeldWork;
 
@@ -174,6 +192,8 @@ export type CloseReason = { as: "completed" | "not-planned" } | { as: "duplicate
 /** One command word with its arguments, as the parser understood it. */
 export type CommandPart =
   | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "hold" | "resume" | "take" | "release" | "autorepin"; args?: string }
+  /** `args`: the person's own words for the author, as written. */
+  | { word: "ask-author"; args?: string }
   | { word: "close"; reason?: CloseReason }
   | { word: "drop" | "fix"; part: number | string; /** A fix's words as written, which the fix-up carries out when they name no part of the plan. */ text?: string }
   | { word: "weight"; weight: number };

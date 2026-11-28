@@ -218,7 +218,7 @@ function Commands() {
           ))}
         </ul>
         <p>
-          <Code>land it</Code>, <Code>park it</Code>, <Code>carry on</Code> {t("mean merge, backlog and resume.")}
+          <Code>land it</Code>, <Code>park it</Code>, <Code>carry on</Code>, <Code>wait for the author</Code> {t("mean merge, backlog, resume and ask author.")}
         </p>
         <p>{t("These don't run:")}</p>
         <ul className="flex flex-col gap-2">
@@ -353,7 +353,11 @@ function flows(): { title: string; note?: string; rows: FlowRow[] }[] {
     { when: t("Not approved"), text: t("one recommendation"), kind: "asks" },
   ];
   return [
-    { title: t(ENTRY_LABEL.review), rows: [{ text: "review", kind: "you" }, { text: t("Model review of the pull request") }, ends(t("Fix the findings, review again, merge"))] },
+    {
+      title: t(ENTRY_LABEL.review),
+      note: t("A review that finds the pull request incomplete or wrong asks its author at once, with the findings, and waits for their push; one that asks whether the change is wanted at all comes to you first."),
+      rows: [{ text: "review", kind: "you" }, { text: t("Model review of the pull request") }, ends(t("Fix the findings, review again, merge"))],
+    },
     {
       title: t("Review (issues)"),
       note: t("The review reads the issue and the code, posts one comment, and recommends one next step."),

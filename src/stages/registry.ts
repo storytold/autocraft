@@ -241,15 +241,16 @@ export const STAGES: StageDef[] = [
   },
   {
     id: "act", title: "Act", order: 12, runStage: 6, docSection: "Act", mode: "steps",
-    description: "Carries out the closes people command, as them, with a short comment from a fixed template.",
+    description: "Carries out the closes people command, as them, with a short comment from a fixed template, and posts the comment that asks a pull request's author for more work.",
     steps: [{ name: "act", maxMin: 10, label: "Act", limit: null, seeded: 20 }],
     lanes: [{ name: "act", steps: ["act"], order: 12 }],
     models: [],
     promptIds: [], promptStage: "Act",
     waits: [
+      { name: "Author's push", why: "A pull request whose workflow waits for its author (ask author, or a review that finds it incomplete or wrong) gets no work and no model call; the author's push ends the wait and their new commits are reviewed. A comment of theirs without a push keeps it waiting", howLong: "Until the author pushes, or a maintainer sends another command; no timer", showsAs: "State line \"Waiting for <author>: <what was asked>\"", kind: "external" },
       { name: "Stopped held follow-up create", why: "A process stopped while it opened a follow-up issue held until the merge; its audit row tells whether the issue was opened or never sent only once no create can still be running", howLong: "10 minutes after the create started; no timer runs, the planner wakes then", showsAs: "Item page: the held issue, then \"the create's outcome is unknown, check GitHub\" when the audit row cannot tell", kind: "backoff" },
     ],
-    writes: [{ what: "Comment, then close", approval: "comment" }],
+    writes: [{ what: "Comment, then close", approval: "comment" }, { what: "Comment to a pull request's author, as the app (the command, or the start of the person whose work it is, is the approval)" }],
     person: "Per-repo approval",
   },
   {
