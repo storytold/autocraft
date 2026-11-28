@@ -516,11 +516,12 @@ export const unapprovedStop = (f: PrFacts): "conflict" | "ci" | null =>
 export type ConflictPath = "merge" | "contributor" | "person";
 /**
  * Whether the PR is wanted at its head, so the base branch may be merged into it: a merge entry, a take or take-fix review there, an
- * approved merge (AutoCraft makes the fixes a hold asks for itself), or a person's fix-up queued at the head.
+ * approved merge (AutoCraft makes the fixes a hold asks for itself), or a person's fix-up queued at the head. An approved merge waits while
+ * the review of the head is stale: it is read again first, as before every other push of ours.
  */
 export function conflictWanted(f: PrFacts): boolean {
-  const r = f.review;
-  return mergeEntry(f) || !!(r && (r.verdict === "take" || r.verdict === "take-fix") && r.head === f.head && !r.stale) || !!workflowOf(f)?.approved || !!f.operator?.fix;
+  const r = f.review, stale = !!r && r.head === f.head && r.stale;
+  return mergeEntry(f) || !!(r && (r.verdict === "take" || r.verdict === "take-fix") && r.head === f.head && !r.stale) || (!!workflowOf(f)?.approved && !stale) || !!f.operator?.fix;
 }
 
 /** The conflict path of a started PR; null when it does not conflict, or when nothing at its head says it is wanted (conflictWanted). */
@@ -533,6 +534,12 @@ export function conflictPath(f: PrFacts | null): ConflictPath | null {
 }
 /** Who settles the conflict of a PR that is wanted, whatever says so. */
 export function settlesConflict({ conflict: c, pushable }: Pick<PrFacts, "conflict" | "pushable">): ConflictPath {
+/**
+ * The conflict path of a PR once a person's fix-up is queued at its head: that fix-up makes the PR wanted (conflictWanted), so the base branch
+ * is merged in first also where the review holds it and nobody approved the merge.
+ */
+export const fixupConflictPath = (f: PrFacts | null): ConflictPath | null =>
+  conflictPath(f && !f.operator?.fix ? { ...f, operator: { hold: false, premerge: false, ...f.operator, fix: { attempts: 0 } } } : f);
   if (!c?.baseOk) return "person";
   switch (c.bucket) {
     // The approval of the merge is the approval of this push as well; `done`: pushed, and the mirror does not show it yet.
@@ -798,8 +805,10 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // Merge the base branch into a conflicting PR that is wanted, or ask the contributor. A person's fix-up queued at the head lets the base
   // in first, also on a PR whose review holds it: the fix-up follows the merge (src/workflow/advance.ts carryFixups).
   if (f.conflict && f.conflict.baseOk && f.mergeable === "CONFLICTING" && (fixAllowed(f) || !!f.operator?.fix) && conflictWanted(f) && !f.draft && !held && !f.inActiveBatch) {
-    // No push to a PR whose maintainer asked for changes: those come first.
-    if ((f.conflict.bucket === "merge" && !f.changesRequested) || f.conflict.bucket === "ask") actions.push(act("conflict", f.head, { bucket: f.conflict.bucket }));
+    // No push to a PR whose maintainer asked for changes: those come first. Where only the person's fix-up wants the PR, the base merge is
+    // theirs too (core/may.ts mayPush).
+    const byFix = !fixAllowed(f) && !!f.operator?.fix;
+    if ((f.conflict.bucket === "merge" && !f.changesRequested) || f.conflict.bucket === "ask") actions.push(act("conflict", f.head, { bucket: f.conflict.bucket, ...(byFix ? { source: "operator" } : {}) }));
   }
 
   // An implementation PR goes back to its session for the review's fixes and red CI, after a conflict is merged away.

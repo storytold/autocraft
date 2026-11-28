@@ -467,7 +467,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     if (base.mergeable !== "CONFLICTING" || !i.base_ref) return;
     // The comment asks the author to resolve it: never a bot, AutoCraft itself, or a quiet PR's author. Our own merge of the base still goes.
     const askless = authorUnaskable({ login: i.author, type: i.author_type, quiet: !!base.quiet, own: d.ownLogins }) !== null;
-    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff, uncapped: owned !== null }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved && !askless }, now);
+    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff, uncapped: owned !== null }, { push: pushAllowed(base, "conflict") || (!!base.operator?.fix && pushAllowed(base, "conflict", true)), comment: rf.commentApproved && !askless }, now);
     const until = bucket === "capped" ? nextUtcMidnight(now) : bucket === "ask-retry" ? conflictAskRetryAtOf(patch.conflicts, qh, now) : undefined;
     base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
   };

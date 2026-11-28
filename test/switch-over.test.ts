@@ -193,8 +193,9 @@ test("a started pull request whose pre-approved merge had stopped comes back wit
   await switchOver(db, { now: NOW });
   await advanceWorkflows(db);
   const w = (await rows(db, "SELECT state, approved_by, rec, rec_head FROM main.item_workflows WHERE id = 1002"))[0]!;
-  const rec = JSON.parse(w.rec as string) as { parts: { fix: number[] }; merges: boolean; again?: string };
-  assert.deepEqual([w.state, w.approved_by, w.rec_head, rec.parts.fix, rec.merges, rec.again], ["blocked", "erin", "h5", [], true, "review"]);
+  const rec = JSON.parse(w.rec as string) as { parts: { fix: number[] }; merges: boolean; again?: string; waits?: string };
+  // The merge stays approved and waits for a person to resolve the conflict; the held head is not reviewed again.
+  assert.deepEqual([w.state, w.approved_by, w.rec_head, rec.parts.fix, rec.merges, rec.again, rec.waits], ["blocked", "erin", "h5", [], true, undefined, "person"]);
   assert.deepEqual((await rows(db, "SELECT state FROM main.preapprovals WHERE number = 5")).map((l) => l.state), ["cancelled"]);
   await db.close();
 });

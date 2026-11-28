@@ -12,9 +12,8 @@ import { queueIssueReviews } from "../data/issuereview/index.ts";
 import { withdrawItemCalls, withdrawUnownedItemCalls } from "../data/runners/index.ts";
 import { adoptLegs, endFixupRequests, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadLegs, queueActions, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
-import { loadQuiet } from "../data/security/quiet.ts";
-import { loadReviewsAt, type ReviewRow } from "../data/review/index.ts";
-import { headRef } from "../data/review/rows.ts";
+import { loadQuiet } from "../data/security/index.ts";
+import { headRef, loadReviewsAt, type ReviewRow } from "../data/review/index.ts";
 import { authorAskComment } from "../act/templates.ts";
 import { REFERENCE_LEAK } from "../review/opus-parse.ts";
 import { clipText, firstSentence } from "../prose.ts";
@@ -25,7 +24,7 @@ import { t } from "../i18n/index.ts";
 import { removeFromBatch } from "../merge/controls.ts";
 import { conflictAhead } from "../core/conflict-ahead.ts";
 import { PARTS_ONLY, partLine } from "../core/evidence.ts";
-import { byHand, conflictPath, type ConflictPath } from "../core/decide.ts";
+import { byHand, conflictPath, fixupConflictPath, type ConflictPath } from "../core/decide.ts";
 import { loadPrFact } from "../core/facts.ts";
 import { cancelPreapproval, checkFixup, checkMergeLeg, inActiveBatch, INSTRUCTIONS_MAX, NotYet, PreapprovalRefused, type CheckedStep } from "../preapproval/index.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
@@ -152,8 +151,9 @@ export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: bool
   // A fix-up start with the person's words makes that fix first; its push is reviewed as any push of ours is, and carries the merge leg.
   if (instruction && item.kind === "pr") {
     const had = merges ? await activeLeg(db, item) : null;
-    const f = merges ? await loadPrFact(db, item.repo, item.number) : null;
-    const path = conflictPath(f);
+    const f = await loadPrFact(db, item.repo, item.number);
+    // The person's fix-up makes the PR wanted: where the pipeline can merge the base branch in, that merge comes first.
+    const path = fixupConflictPath(f);
     if (byHand(path)) throw new EffectError(t("{ref} conflicts with its base branch, which someone has to resolve before AutoCraft can fix it.", { ref: ref(item) }));
     const fix = writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: fixInstructions([], [], instruction), merge: merges && had === null, afterBase: path !== null })));
     const leg = merges && had !== null ? await mergeLeg(c, had) : nothing;
@@ -217,7 +217,9 @@ export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan:
   if (o.again === "fixup" && path !== null && f?.review?.verdict === "take-fix" && !major && !o.instruction) return { write: await mergeLeg(c, had), ...note };
   if (o.again === "fixup") {
     const merge = o.merges && had === null;
-    const fix = writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: fixInstructions(o.plan, o.fix, o.instruction ?? null), merge, afterBase: path !== null })));
+    // The fix-up makes the PR wanted, also one the review holds and nobody approved for merge: the pipeline merges the base branch in first.
+    const afterBase = path !== null || fixupConflictPath(f ?? await loadPrFact(db, item.repo, item.number)) === "merge";
+    const fix = writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: fixInstructions(o.plan, o.fix, o.instruction ?? null), merge, afterBase })));
     const leg = o.merges && !merge ? await mergeLeg(c, had) : nothing;
     return { write: async (id) => { await leg(id); await fix(id); }, ...note };
   }
@@ -248,7 +250,7 @@ export async function askFixes(c: Ctx, fixes: readonly { instructions: string; h
   if (!last) return nothing;
   const f = await loadPrFact(db, item.repo, item.number);
   const merge = merges && (await activeLeg(db, item)) === null;
-  return writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: last.instructions, merge, afterBase: conflictPath(f) !== null })));
+  return writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: last.instructions, merge, afterBase: fixupConflictPath(f) !== null })));
 }
 
 /**

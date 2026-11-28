@@ -128,6 +128,10 @@ const ON_CONFLICT: Record<Exclude<ConflictPath, "merge">, (text: string) => stri
   person: (text) => t("It conflicts with its base branch, which AutoCraft cannot resolve: someone has to do that on its branch first. {text}", { text }),
 };
 
+/** A held PR whose fixes a yes makes, with the base branch AutoCraft merges in first: its sentence says so (onConflict). */
+const mergedFirst = (rec: Recommendation, c: Conflict | null): boolean =>
+  !!c && c.path === null && c.held === "merge" && !(rec.close || rec.backlog || rec.author || rec.answer) && (rec.parts.fix.length > 0 || rec.again === "fixup");
+
 /**
  * The recommendation on a PR that conflicts with its base branch, where no fix-up can be made before that merge. Where the pipeline merges the
  * base in, a yes approves the merge and the fixes follow that merge. Where a person has to resolve the conflict, a yes approves the
@@ -161,9 +165,9 @@ export function onConflict(rec: Recommendation, conflict: Conflict | null): Reco
  * review (unapprovedStop), which the sentence names.
  */
 export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[], stop: keyof typeof STOPS | null = null, conflict: Conflict | null = null): Recommendation {
-  const rec = onConflict(withFinding(recommended(review, plan), review?.finding ?? null), conflict);
+  const base = withFinding(recommended(review, plan), review?.finding ?? null), rec = onConflict(base, conflict);
   // Where the sentence is already about the conflict and who settles it, it is not said twice.
-  const said = stop === "conflict" && !!conflict?.path && conflict.path !== "merge" && rec.merges;
+  const said = stop === "conflict" && ((!!conflict?.path && conflict.path !== "merge" && rec.merges) || mergedFirst(base, conflict));
   return stop && !rec.close && !rec.backlog && !rec.author && !said ? { ...rec, text: STOPS[stop](rec.text) } : rec;
 }
 

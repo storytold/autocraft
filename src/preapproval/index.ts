@@ -489,8 +489,9 @@ async function whyNotPlanned(db: Db, f: PrFacts): Promise<string | null> {
   if (decidePr(f).actions.some((a) => a.kind === "fixup" && a.params?.source === "operator")) return null;
   if (f.draft) return "the PR is a draft";
   if (f.heldBacklog) return "the PR is held in the backlog";
-  // It is made once the conflict is gone, at the head that leaves; nobody's fix-up gets there while only a person could merge the base in.
-  if (f.mergeable === "CONFLICTING") return fixAllowed(f) && conflictPath(f) !== "person" ? null : "the PR conflicts with its base branch";
+  // It is made once the conflict is gone, at the head that leaves; nobody's fix-up gets there while only a person could merge the base in. The
+  // request itself lets the base in first, also on a PR whose review holds it (decide.ts conflictWanted).
+  if (f.mergeable === "CONFLICTING") return (fixAllowed(f) || !!f.operator?.fix) && conflictPath(f) !== "person" ? null : "the PR conflicts with its base branch";
   if (!f.pushable) return "the PR's branch cannot be pushed to";
   if (!f.inScope) return "the PR is out of the pipeline's scope";
   if (notStarted(f)) return "nobody started the PR";

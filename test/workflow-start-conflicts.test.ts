@@ -110,8 +110,12 @@ test("a recommendation on a conflicting PR offers nothing that is refused", asyn
     await settle(w);
     const { rec, state } = (await liveWorkflow(w.db, "app", 1))!;
     assert.equal(state, "recommending", verdict);
-    assert.deepEqual([rec!.parts.fix, rec!.merges, rec!.again ?? null], verdict === "hold" ? [[], false, "review"] : [[1], true, null], rec!.text);
+    // A hold's fix is made on a yes, with the base merged in first: never another review of the same head.
+    assert.deepEqual([rec!.parts.fix, rec!.merges, rec!.again ?? null], verdict === "hold" ? [[1], false, null] : [[1], true, null], rec!.text);
+    assert.equal(rec!.text.match(/conflicts with its base branch/g)?.length, 1, rec!.text);
     await run(w, "yes");
+    await settle(w);
+    assert.ok((await acts(w, 1)).includes("conflict:merge"), `${verdict}: ${await acts(w, 1)}`);
     w.close();
   }
 });
