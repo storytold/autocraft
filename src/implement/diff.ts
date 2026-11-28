@@ -272,12 +272,12 @@ export function compileTimeChanges(path: string, before: string | null, after: s
  * The workspace's diff against its base commit, read by an own call (it does not count as a session tool call): every
  * change of the working tree, untracked files included (`git add -A -N` on a copy of the index), at most MAX_CHECKPOINT_BYTES.
  */
-export async function workspaceDiff(db: Db, api: KubeApi, workspaceId: number, now: () => number = Date.now): Promise<{ ok: true; diff: string; base: string } | { ok: false; reason: string }> {
+export async function workspaceDiff(db: Db, api: KubeApi, workspaceId: number, now: () => number = Date.now, purpose = "implement"): Promise<{ ok: true; diff: string; base: string } | { ok: false; reason: string }> {
   const w = await getWorkspace(db, workspaceId);
   if (!w || w.state !== "ready") return { ok: false, reason: `workspace ${workspaceId} is not ready` };
   if (!w.base_commit) return { ok: false, reason: `workspace ${workspaceId} has no base commit` };
   const r = await execWs(db, api, workspaceId, ["run", "300", "--", "sh", "-c", diffScript(DIFF_NAME, DIFF_FLAGS), DIFF_NAME, w.base_commit],
-    { tool: "checkpoint", args: { purpose: "implement" }, timeoutMs: 310_000 }, now);
+    { tool: "checkpoint", args: { purpose }, timeoutMs: 310_000 }, now);
   if (r.header?.kind !== "status" || r.header.state !== "exited" || r.header.exit !== 0) {
     const last = r.output.trim().split("\n").pop()?.slice(0, 200);
     return { ok: false, reason: `the diff failed (${r.error ?? describeHeader(r.header)})${last ? `: ${last}` : ""}` };

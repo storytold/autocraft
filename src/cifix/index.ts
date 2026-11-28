@@ -25,7 +25,7 @@ import { Git, exec, fixupDir, type Exec } from "../fixup/git.ts";
 import { DIFF_CAP, FILE_CAP, PR_QUERY, TOTAL_CAP, noteLive, scrubReason, whoAmI, type PrNode } from "../fixup/index.ts";
 import { commitIdentity } from "../github/identity.ts";
 import { outsideShown, shownSize, viewFile } from "../fixup/excerpt.ts";
-import { buildScriptsAt, editable, validatePatch } from "../fixup/patch.ts";
+import { buildScriptsAt, editable, validatePatch, type BuildScripts } from "../fixup/patch.ts";
 import { loadQuiet } from "../data/security/index.ts";
 import { patchGiveaway, QUIET_PATCH_REFUSAL } from "../security/rules.ts";
 import { readGate } from "../merge/changes-requested.ts";
@@ -218,8 +218,20 @@ class Recorder {
 }
 
 /** The failure text the models and the check see: every failed step's tail, with its check and step names. */
-function logText(f: CiFailure): CifixPr["failure"] {
+export function logText(f: CiFailure): CifixPr["failure"] {
   return f.checks.map((c) => ({ check: c.name, steps: c.steps.map((s) => ({ job: s.job, step: s.step, log: s.tail })) }));
+}
+
+const failureText = (f: CiFailure): string => f.checks.flatMap((x) => x.steps.map((s) => s.tail)).join("\n");
+
+/**
+ * The files a CI fix may edit: the files a compiler error points at first, then the files the diff changes, then the files a panic
+ * points at, at most MAX_FILES; nothing else, and never a test file.
+ */
+export function cifixFiles(failure: CiFailure, diffText: string, scripts: BuildScripts): string[] {
+  const text = failureText(failure);
+  return [...new Set(errorFiles(text).concat([...diffText.matchAll(DIFF_FILE)].map((m) => m[1]!), panicFiles(text)))]
+    .filter((p) => editable(p, scripts) && !TEST_PATH.test(p)).slice(0, MAX_FILES);
 }
 
 /** What `patchFromFailure` needs to know about the commit and the failure it patches. */
@@ -294,12 +306,10 @@ async function guardTree(git: Git, head: string, tree: string): Promise<string |
 export async function patchFromFailure(db: Db, d: Pick<CifixDeps, "ask" | "check" | "root">, r: PatchRequest): Promise<PatchResult> {
   const no = (state: "failed" | "refused", reason: string): PatchResult => ({ ok: false, state, reason });
   const { git, ref, title, repo, head, failure } = r;
-  const text = failure.checks.flatMap((x) => x.steps.map((s) => s.tail)).join("\n");
+  const text = failureText(failure);
   const scripts = await buildScriptsAt(git, head);
-  // Files a compiler error points at come first, then the files the diff changes, then the files a panic points at; nothing else is editable. Test files are not editable by a CI fix.
   const cited = errorFiles(text);
-  const named = [...new Set(cited.concat([...r.diffText.matchAll(DIFF_FILE)].map((m) => m[1]!), panicFiles(text)))]
-    .filter((p) => editable(p, scripts) && !TEST_PATH.test(p)).slice(0, MAX_FILES);
+  const named = cifixFiles(failure, r.diffText, scripts);
   // With a sandbox checkout the model reads the files itself, so they are listed by path and no size limit applies.
   const checkout = (await r.checkout()) ?? undefined;
   if (!checkout && r.diffText.length > DIFF_CAP) return no("failed", `the PR diff is over the ${DIFF_CAP} character limit and no checkout could be made`);
