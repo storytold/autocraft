@@ -14,14 +14,14 @@ import { guard } from "../core/guard.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { planned } from "../core/select.ts";
 import { claimFollowup, deferFollowup, loadFollowupRows, loadPremerge, loadReviewsAt, settleFollowup, unsentTries, type FollowupSource, type ReviewRow } from "../data/review/index.ts";
-import { unsentAsk } from "../core/rules.ts";
+import { FILING_LEASE_MS, unsentAsk } from "../core/rules.ts";
 import { followUpClaims, reviewFollowUps } from "../core/review-blocking.ts";
 import { partTitle } from "../workflow/work.ts";
 import { loadShown } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
 import { exec, type Exec } from "../fixup/git.ts";
 import { createIssue, ghFollowupComment, IssueError, type Writer } from "../github/write.ts";
-import { isUnsent } from "../github/unsent.ts";
+import { isUnsent, rateLimited } from "../github/unsent.ts";
 import { issueText, issueTitle, refusal } from "../postmerge/template.ts";
 import { CARRIED } from "../review/carry.ts";
 import { postSourcesOf, type PostSource } from "../review/post-source.ts";
@@ -146,7 +146,7 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
     const at = () => deps.now().toISOString();
     const bad = refusal([title, body], login);
     const unsentBefore = unsentTries(mine.find((x) => x.head_oid === rowHead));
-    if (!await claimFollowup(db, { repo, number, source, head: rowHead, at: at() })) continue;
+    if (!await claimFollowup(db, { repo, number, source, head: rowHead, at: at(), staleBefore: new Date(deps.now().getTime() - FILING_LEASE_MS).toISOString() })) continue;
     handled++;
     params.onHandled?.(handled);
     if (!fs.length) {
@@ -178,7 +178,7 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
     } catch (e) {
       const reason = oneLine(e);
       // Nothing was sent: the head is tried again after a backoff, and the try after the last one fails it.
-      if (isUnsent(e) || (e instanceof IssueError && (e.later || e.unsettled))) {
+      if (isUnsent(e) || rateLimited(reason) || (e instanceof IssueError && (e.later || e.unsettled))) {
         const now = at(), tries = [...unsentBefore, now];
         if (unsentAsk(tries, Date.parse(now)) !== "final") {
           await deferFollowup(db, { repo, number, source, head: rowHead, at: now, tries });

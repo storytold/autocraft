@@ -156,6 +156,8 @@ export const repeatAfter = (lastMs: number, n: number, delays: readonly number[]
  * An ask comment that never reached GitHub (the app lane got no token, so no request went out) is recorded as
  * `comment-unsent` and asked again after these delays; one more unsent row past them is final, as `comment-failed` is.
  */
+/** A follow-up row in state `filing` older than this was left by a job that ended (a restart) before it settled the row: it is tried again. The step's job ends within 10 minutes. */
+export const FILING_LEASE_MS = 15 * 60_000;
 export const COMMENT_UNSENT_DELAYS_MS = [10 * 60_000, 60 * 60_000];
 /** Where a head's unsent ask comments (`ats`: their rows' times, ISO) leave the next ask: due (null), due at `until` (ms), or final. */
 export function unsentAsk(ats: readonly string[], nowMs: number, delays: readonly number[] = COMMENT_UNSENT_DELAYS_MS): { until: number } | "final" | null {

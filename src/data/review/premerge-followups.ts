@@ -43,12 +43,12 @@ export function unsentTries(r: Pick<PremergeFollowupRow, "state" | "note"> | und
   } catch { return []; }
 }
 
-/** Writes a head's row in state `filing`, or takes over its `unsent` row for the retry (keeping its tries); false when the head has another (filed, failed, or being filed). */
-export async function claimFollowup(db: Db, r: { repo: string; number: number; source: FollowupSource; head: string; at: string }): Promise<boolean> {
+/** Writes a head's row in state `filing`, or takes over its `unsent` row, or its `filing` row left before `staleBefore` (ISO) by a job that ended, for the retry (keeping its tries); false when the head has another (filed, failed, or being filed). */
+export async function claimFollowup(db: Db, r: { repo: string; number: number; source: FollowupSource; head: string; at: string; staleBefore: string }): Promise<boolean> {
   const q = queryDb(db);
   const got = await q.all(q.k.insertInto(tableOf(r.source))
     .values({ repo: r.repo, number: r.number, head_oid: r.head, issue_number: null, url: null, state: "filing", at: r.at, note: null })
-    .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet({ state: "filing", at: r.at }).where(`${tableOf(r.source)}.state`, "=", "unsent"))
+    .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet({ state: "filing", at: r.at }).where((eb) => eb.or([eb(`${tableOf(r.source)}.state`, "=", "unsent"), eb.and([eb(`${tableOf(r.source)}.state`, "=", "filing"), eb(`${tableOf(r.source)}.at`, "<", r.staleBefore)])])))
     .returning(["head_oid"]));
   return got.length > 0;
 }

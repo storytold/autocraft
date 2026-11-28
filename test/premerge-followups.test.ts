@@ -72,6 +72,23 @@ test("a filing whose write sends nothing holds the merge for two retries, at 10 
   w.close();
 });
 
+test("a filing row a restart left in `filing` is tried again after its lease, not counted as filed", async () => {
+  const w = await approvedWith(NOT_BLOCKING);
+  const head = (await w.prPlan(1)).actions.find((a) => a.kind === "followups")!.head!;
+  const left = (at: Date) => w.db.run(w.db.k.insertInto("main.premerge_followups").values({ repo: "app", number: 1, head_oid: head, issue_number: null, url: null, state: "filing", at: at.toISOString(), note: null })
+    .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet({ at: at.toISOString() })));
+  await left(new Date());
+  await settle(w);
+  assert.ok(!(await kinds(w)).includes("followups"), "a filing inside its lease is left alone");
+  await left(new Date(Date.now() - 20 * 60_000));
+  await settle(w);
+  assert.ok((await kinds(w)).includes("followups"), "a filing past its lease is due again");
+  const exec = async (_c: string, args: string[]) => ({ code: 0, stdout: args[1] === "create" ? "https://github.com/storytold/app/issues/78\n" : "", stderr: "" });
+  const s = await runPremergeFollowups(w.db, { repo: "app" }, () => {}, { exec, now: () => new Date(), lane: appLane(w.gh.querier) });
+  assert.deepEqual(s.filed, ["app#1"]);
+  w.close();
+});
+
 test("a blocking defect, or one stored before defects were classed, gets the automatic fix-up round and files nothing", async () => {
   for (const blocking of [{ class: "regression" as const, why: "Lists that load on the base branch panic." }, undefined]) {
     const w = await approvedWith(blocking);

@@ -109,6 +109,25 @@ export function jsonEachField<A extends string>(d: D, e: Ex, key: string, alias:
 }
 
 /**
+ * The elements of a JSON array of findings with their `severity` and the JSON type of their `blocking.class` ("null" when the class is
+ * null, NULL when the element names no class). Same array handling as jsonEachField.
+ */
+export function jsonEachFindings<A extends string>(d: D, e: Ex, alias: A): { from: AliasedRawBuilder<{ severity: string | null; classType: string | null }, A>; severity: RawBuilder<string | null>; classType: RawBuilder<string | null> } {
+  if (pgOf(d)) {
+    return {
+      from: sql<{ severity: string | null; classType: string | null }>`LATERAL (SELECT e ->> 'severity' AS severity, json_typeof(e -> 'blocking' -> 'class') AS "classType" FROM json_array_elements(CASE WHEN (${x(e)}) IS JSON ARRAY THEN (${x(e)})::json ELSE '[]'::json END) AS e)`.as(alias),
+      severity: sql`${sql.ref(`${alias}.severity`)}`, classType: sql`${sql.ref(`${alias}.classType`)}`,
+    };
+  }
+  const v = sql.ref(`${alias}.value`);
+  return {
+    from: sql<{ severity: string | null; classType: string | null }>`json_each(CASE WHEN json_valid(${x(e)}) THEN CASE json_type(${x(e)}) WHEN 'array' THEN ${x(e)} ELSE '[]' END ELSE '[]' END)`.as(alias),
+    severity: sql`(CASE ${sql.ref(`${alias}.type`)} WHEN 'object' THEN json_extract(${v}, '$.severity') END)`,
+    classType: sql`(CASE ${sql.ref(`${alias}.type`)} WHEN 'object' THEN json_type(${v}, '$.blocking.class') END)`,
+  };
+}
+
+/**
  * `e IN (values)` with the list bound as one JSON parameter, so the statement text is the same for any length and an
  * empty list matches nothing (Kysely's `in` with an empty array is a syntax error on Postgres). `type` is the elements'
  * type on Postgres; compare a citext column with "citext" to keep SQLite's NOCASE match. `not` gives NOT IN.

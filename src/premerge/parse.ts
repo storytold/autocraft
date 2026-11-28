@@ -4,7 +4,7 @@ import { wholeReplyJson } from "../core/reply-json.ts";
 import { safePath } from "../fixup/patch.ts";
 import type { LintProblem } from "../replylint.ts";
 import { CLAIM_INCOMPLETE, evidenceAt, OPUS_MAX_FIXES, REFERENCE_LEAK, parseClaims, type Claim, parseStatementConflicts, type StatementConflict, type OwnerStatement } from "../review/opus-parse.ts";
-import { BLOCKING_CLASSES, blockingOf, type Blocking, type PremergeFinding } from "./types.ts";
+import { BLOCKING_CLASSES, NO_FILE, blockingOf, type Blocking, type PremergeFinding } from "./types.ts";
 
 export const PREMERGE_MAX_FINDINGS = 30;
 export const PREMERGE_TITLE_CHARS = 160;
@@ -58,10 +58,10 @@ function entries(text: string, ref: string): { entries: Entry[]; searched: strin
  */
 export function claimFindings(claims: readonly Claim[], files: readonly string[]): PremergeFinding[] {
   return claims.filter((c) => c.impact === "code-wrong" || c.impact === "code-incomplete").map((c) => {
-    const at = evidenceAt(c.evidence, files), file = at && safePath(at.path) ? at.path : "(description)";
+    const at = evidenceAt(c.evidence, files), file = at && safePath(at.path) ? at.path : NO_FILE;
     const wrong = c.impact === "code-wrong";
     return {
-      severity: "defect" as const, file, line: at && file !== "(description)" ? at.line : 0,
+      severity: "defect" as const, file, line: at && file !== NO_FILE ? at.line : 0,
       title: `${wrong ? "Claim shows wrong code" : "Claim holds only in part"}: ${c.claim}`.slice(0, PREMERGE_TITLE_CHARS),
       scenario: (wrong ? `The claim "${c.claim}" is ${c.status} and the code is wrong. ${c.evidence}`
         : `The claim "${c.claim}" holds in the code the pull request changes, but not on every path or case. ${c.evidence}`).slice(0, PREMERGE_SCENARIO_CHARS),

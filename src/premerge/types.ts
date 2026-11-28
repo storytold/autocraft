@@ -31,6 +31,9 @@ export type PremergeFinding = {
 };
 
 /** What the fix-up is told to change for a defect: the review's own fix, or, when it wrote none, the defect itself (title and scenario) in its file. */
+/** The file of a finding that names none (a claim of the description): no fix-up can apply it. */
+export const NO_FILE = "(description)";
+
 export const defectFix = (d: PremergeFinding): { file: string; change: string } => d.fix ?? { file: d.file, change: `${d.title}: ${d.scenario}` };
 
 /**

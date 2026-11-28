@@ -2,6 +2,7 @@
 import type { AliasableExpression, Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
+import { sql } from "../../db/sql.ts";
 
 /** The number of the post-merge PR whose follow-up issue is `repo#number`, or null. */
 export const followupParentOf = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Expression<number | null> =>
@@ -11,12 +12,12 @@ export const followupParentOf = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Expr
 export const hasTakeReview = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.opus_reviews as tr").select(eb.lit(1).as("one")).where("tr.repo", "=", kx.exprOf(eb, repo)).where("tr.number", "=", kx.exprOf(eb, number)).where("tr.verdict", "in", ["take", "take-fix"]));
 
-/** The pre-merge review of the PR's `head` was made and found no defect. */
+/** The pre-merge review of the PR's `head` was made and found no blocking defect: a defect the review classed as not blocking (`blocking.class` null) does not count. */
 export const premergeClean = (db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, head: kx.Ex): AliasableExpression<SqlBool> => {
-  const severity = kx.jsonEachField(db, kx.ref("pn.findings"), "severity", "pf");
+  const f = kx.jsonEachFindings(db, kx.ref("pn.findings"), "pf");
   return eb.exists(kx.schemaEb(eb).selectFrom("main.premerge_reviews as pn").select(eb.lit(1).as("one"))
     .where("pn.repo", "=", kx.exprOf(eb, repo)).where("pn.number", "=", kx.exprOf(eb, number)).where("pn.head_oid", "=", kx.exprOf(eb, head)).where("pn.findings", "is not", null)
-    .where((x) => x.not(x.exists(kx.schemaEb(x).selectFrom(severity.from).select(x.lit(1).as("one")).where(severity.value, "=", "defect")))));
+    .where((x) => x.not(x.exists(kx.schemaEb(x).selectFrom(f.from).select(x.lit(1).as("one")).where(f.severity, "=", "defect").where(sql<boolean>`COALESCE(${f.classType}, '') <> 'null'`)))));
 };
 
 /** The PR's final review at `head` is a take or take-fix, and `head` is the head of its newest Opus review with a verdict. */
