@@ -22,6 +22,8 @@ const MAIN = HELP_COMMANDS.filter((c) => !c.more);
 const MORE = HELP_COMMANDS.filter((c) => c.more);
 const BLOCKERS: Blocker[] = ["failed-twice", "author-commits"];
 const ITEM = "photocraft#803";
+/** Commands whose example ends in the person's own words: an item written after them would be part of the words, so it goes after a colon. */
+const FREE_WORDS: ReadonlySet<string> = new Set(["fix", "ask-author"]);
 
 /** Phrasings the parser reads, with the command each one runs. */
 const WORKS: [string, () => string][] = [
@@ -143,7 +145,7 @@ function Surfaces({ c }: { c: HelpCommand }) {
       </dd>
       <dt className={dt}>Discord</dt>
       <dd className="min-w-0 break-words">
-        <Code>{ask ? `@AutoCraft ask ${ITEM} ${c.example.replace(/^ask\s+/, "")}` : `@AutoCraft ${c.example} ${ITEM}`}</Code>
+        <Code>{ask ? `@AutoCraft ask ${ITEM} ${c.example.replace(/^ask\s+/, "")}` : FREE_WORDS.has(c.word) ? `@AutoCraft ${c.example}: ${ITEM}` : `@AutoCraft ${c.example} ${ITEM}`}</Code>
       </dd>
       {!ask && (
         <>
