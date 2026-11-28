@@ -254,6 +254,8 @@ export type TaskBundle = {
   /** Wall-clock limit for the whole harness run: the call's own, or the lease's when cut to the claim's login room. */
   timeoutSeconds: number;
   maxTurns: number | null;
+  /** The task budget of a call retried after it used every turn (src/remote/turn-limit.ts), in place of its prompt's; the `claude` hints carry it as they would the prompt's. */
+  taskBudget?: number;
   /** The text sent on stdin. */
   stdin: string;
   /** The system prompt for a call without a sandbox; null when the harness's own system prompt is kept. */

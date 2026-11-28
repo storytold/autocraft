@@ -11,6 +11,7 @@ import type { Role } from "../dash/types.ts";
 import { fillHarness, rootArgs, validRoot } from "../prompts/harness.ts";
 import { rootAgents } from "../sandbox/agents.ts";
 import { joinParts, TASK_BUDGET_CLAUDE, taskBudgetOf, withoutTaskBudget, withTaskBudget } from "../prompts/index.ts";
+import { TURN_LIMIT_SUBTYPE } from "./turn-limit.ts";
 import { scrub } from "../runner/scrub.ts";
 import { remoteToolRows } from "../agents/tools.ts";
 import { loadFreshWrites, permKey } from "../data/access/index.ts";
@@ -630,14 +631,14 @@ async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, timeoutMs
  * A queued bundle as one harness reads it: the marked harness phrases of its text, and of the `claude` hints that carry the
  * system prompt, filled in. With the claim's path root (a macOS helper) the marked sandbox paths, the path arguments of the
  * hints and the explorer's prompt name the same paths below it; the mounts keep the fixed paths, which the helper places
- * below its root itself. The `claude` hints get the prompt's task budget here, not in the queued bundle, and only when the
+ * below its root itself. The `claude` hints get the task budget here (the prompt's, or the bundle's own after a turn-limit stop), not in the queued hints, and only when the
  * claim's `harnessVersion` is at least the first Claude Code that takes it (unknown counts as older): an older Claude Code
  * still runs the call, and a server of an earlier version leasing a queued bundle never hands the flag on.
  */
 export function forHarness<B extends Omit<TaskBundle, "callId">>(b: B, harness: HarnessId, root = "", harnessVersion?: string | null): B {
   const claude = b.hints.claude;
   const takes = harness === "claude" && harnessVersion && !olderVersion(harnessVersion, TASK_BUDGET_CLAUDE);
-  const budget = takes ? taskBudgetOf(b.promptId, b.maxTurns !== null) : undefined;
+  const budget = takes ? b.taskBudget ?? taskBudgetOf(b.promptId, b.maxTurns !== null) : undefined;
   const args = claude && (budget !== undefined ? withTaskBudget(withoutTaskBudget(claude.args), budget) : withoutTaskBudget(claude.args));
   return {
     ...b, stdin: fillHarness(b.stdin, harness, root), system: b.system === null ? null : fillHarness(b.system, harness, root),
@@ -773,7 +774,9 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
     return { accepted: true };
   }
   // The last attempt's tokens stay with the failed call.
-  if (await runners.failLease(db, l, { error, skipLogin: true, usage, duration, summary: "helper failed", output }, nowMs)) await keep("failed");
+  // A run that used every turn goes back with more of them (src/remote/turn-limit.ts).
+  const turnLimit = s.subtype === TURN_LIMIT_SUBTYPE ? { promptBudget: taskBudgetOf(l.promptId, true) } : undefined;
+  if (await runners.failLease(db, l, { error, skipLogin: true, usage, duration, summary: "helper failed", output, ...(turnLimit && { turnLimit }) }, nowMs)) await keep("failed");
   return { accepted: true };
 }
 

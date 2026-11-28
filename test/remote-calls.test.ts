@@ -457,6 +457,55 @@ describe("user-local remote calls", async () => {
     assert.equal((await ask)?.text, "second try");
   });
 
+  test("a run that used every turn goes back with twice the turns and a larger task budget; another failure keeps the limit", async () => {
+    const restore = setWorkspace(async () => []);
+    const saved = { no: process.env.AUTOCRAFT_NO_SANDBOX, bin: process.env.AUTOCRAFT_CLAUDE_BIN };
+    process.env.AUTOCRAFT_NO_SANDBOX = "1";
+    process.env.AUTOCRAFT_CLAUDE_BIN = join(dir, "no-claude");
+    const sha = "e".repeat(40);
+    mkdirSync(join(SCRATCH, "checkouts", "photocraft", sha), { recursive: true });
+    const limits = (b: Awaited<ReturnType<typeof bundleOf>>) => {
+      const args = b!.hints.claude!.args;
+      return { maxTurns: b!.maxTurns!, flag: Number(args[args.indexOf("--max-turns") + 1]), budget: Number(args[args.indexOf("--task-budget") + 1]) };
+    };
+    const fail = (subtype: string) => ({ ok: false, error: "the run stopped", subtype, usage: { inputTokens: 900, outputTokens: 100 }, durationMs: 5 });
+    try {
+      const checkout = (await checkoutForPr("photocraft", 1287, sha))!;
+      const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db, { checkout, itemTools: null });
+      const newer = { harnessVersion: "2.1.323" };
+      await idle("bob");
+      const first = (await leaseFor("bob", newer))!;
+      // A third attempt, for the failure after the retry.
+      await db.run(db.k.updateTable("remote_calls").set({ max_attempts: 3 }).where("id", "=", first.id));
+      const before = limits(await bundleOf(db, first.secret));
+      assert.equal(before.flag, before.maxTurns, "the harness gets the bundle's turn limit");
+      const runId = (await db.get(db.k.selectFrom("remote_calls").select("run_id").where("id", "=", first.id)))!.run_id!;
+      await submitCall(db, first.secret, fail("error_max_turns"));
+      assert.match((await db.get(db.k.selectFrom("agent_runs").select("summary").where("id", "=", runId)))!.summary ?? "", new RegExp(`retried with ${before.maxTurns * 2} turns`));
+      await noneIdle();
+      await idle("alice");
+      const second = (await leaseFor("alice", newer))!;
+      assert.equal(second.id, first.id);
+      const after = limits(await bundleOf(db, second.secret));
+      assert.equal(after.maxTurns, before.maxTurns * 2);
+      assert.equal(after.flag, after.maxTurns);
+      assert.ok(after.budget > before.budget, "the task budget grows with the turns");
+      await submitCall(db, second.secret, fail("error_during_execution"));
+      await noneIdle();
+      await idle("carol");
+      const third = (await leaseFor("carol", newer))!;
+      assert.deepEqual(limits(await bundleOf(db, third.secret)), after, "a failure that is not the turn limit keeps it");
+      await done(third.secret, JSON.stringify({ verdict: "take", summary: "s", why: "w", public: { summary: "ok", points: [] } }));
+      await ask;
+    } finally {
+      process.env.AUTOCRAFT_NO_SANDBOX = saved.no;
+      process.env.AUTOCRAFT_CLAUDE_BIN = saved.bin;
+      if (saved.no === undefined) delete process.env.AUTOCRAFT_NO_SANDBOX;
+      if (saved.bin === undefined) delete process.env.AUTOCRAFT_CLAUDE_BIN;
+      restore();
+    }
+  });
+
   test("after a give-back for a local setup failure the same user's runner takes the call again within minutes, up to its attempts; other give-backs keep it away longer", async () => {
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     let lease = (await leaseFor("bob"))!;

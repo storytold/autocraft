@@ -6,6 +6,7 @@ import { noteFailure, noteSuccess } from "./cooloffs.ts";
 import { ITEM_WITHDRAWN_PREFIX, REFUSED_PREFIX, dropQueueCache, sha256hex } from "./calls-shared.ts";
 import { itemsGoneExpr } from "./cross.ts";
 import { bury, requeue, unlease } from "./calls-unlease.ts";
+import { moreTurns } from "../../remote/turn-limit.ts";
 import type { LiveLease, ParsedSubmit, RefusalRetry, SubmitResult } from "./types.ts";
 
 type Tokens = { input: number; output: number; cacheRead: number; cacheWrite: number };
@@ -38,14 +39,21 @@ export async function submitLease(db: Db, lease: LiveLease, s: ParsedSubmit, now
 
 /**
  * Requeues with the helper's error, notes the failure and the last attempt's usage, in one transaction. The attempt's run keeps the error, the
- * tokens the attempt used (`usage` in the stored shape) and `output`, the stored form of the helper's whole failure text. False when the lease was not the one named.
+ * tokens the attempt used (`usage` in the stored shape) and `output`, the stored form of the helper's whole failure text. `turnLimit`: the run
+ * used every turn, and a call with a turn limit goes back to the queue with twice its turns and task budget (`moreTurns`; `promptBudget` is the
+ * prompt's budget with tools), which its run's summary names. False when the lease was not the one named.
  */
-export async function failLease(db: Db, lease: LiveLease, f: { error: string; skipLogin: boolean; usage: Tokens | null; duration: number; summary?: string; output?: Uint8Array }, now: number): Promise<boolean> {
+export async function failLease(db: Db, lease: LiveLease, f: { error: string; skipLogin: boolean; usage: Tokens | null; duration: number; summary?: string; output?: Uint8Array; turnLimit?: { promptBudget: number | undefined } }, now: number): Promise<boolean> {
   const q = queryDb(db);
   return await db.write(async () => {
+    const retry = f.turnLimit && lease.attempt < lease.maxAttempts;
+    const more = retry ? moreTurns(JSON.parse((await q.get(q.k.selectFrom("main.remote_calls").select("bundle").where("id", "=", lease.id)))!.bundle), f.turnLimit!.promptBudget) : null;
+    const summary = f.summary ?? "helper failed";
     const state = await requeue(db, { id: lease.id, runId: lease.runId, attempt: lease.attempt, maxAttempts: lease.maxAttempts, hash: lease.secretHash }, f.error, now,
-      { ...(f.skipLogin && { skipLogin: lease.login }), summary: f.summary ?? "helper failed", ...(f.usage && { tokens: f.usage }), ...(f.output && { output: f.output }) });
+      { ...(f.skipLogin && { skipLogin: lease.login }), summary: more ? `${summary}; retried with ${more.maxTurns} turns` : summary, ...(f.usage && { tokens: f.usage }), ...(f.output && { output: f.output }) });
     if (state === null) return false;
+    // The bundle hash stays: a resumed job adopts the call as it was asked.
+    if (more && state === "queued") await q.run(q.k.updateTable("main.remote_calls").set({ bundle: JSON.stringify(more) }).where("id", "=", lease.id).where("state", "=", "queued"));
     await noteFailure(db, lease.login, now);
     // The last attempt's tokens stay with the failed call.
     if (state === "failed") await q.run(q.k.updateTable("main.remote_calls").set({ usage: f.usage ? JSON.stringify(f.usage) : null, duration_ms: f.duration }).where("id", "=", lease.id).where("state", "=", "failed"));
