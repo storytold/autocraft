@@ -4,6 +4,8 @@
 // stored on the rows (state `linting`) with its lint task and the step ends; a later run collects the result: formatting is
 // folded in, findings go back to the model (at most LINT_MAX_ROUNDS lint rounds). The clean commit is pushed to the
 // pipeline account's fork on `autocraft/main-ci-<check>-<sha7>` and a PR is opened against the default branch.
+// A check whose patch could not be made and whose failure is only in test code, which a CI fix may not change, gets the red
+// streak's issue instead (testCodeFailure).
 // The log, the files and other PRs are untrusted data; nothing from them is run here.
 import { ownPrSelect } from "../github/adopt.ts";
 import { leaseItem } from "../runner/leases.ts";
@@ -12,9 +14,11 @@ import { guardRepo } from "../core/guard.ts";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { errorFiles, patchFromFailure, type CifixDeps } from "../cifix/index.ts";
+import { isTestLine } from "../cifix/guard.ts";
+import { testLocations } from "../core/failure-locations.ts";
 import { loadQuiet } from "../data/security/index.ts";
 import { readFailure } from "../cifix/logs.ts";
-import type { CifixPr } from "../cifix/types.ts";
+import type { CiFailure, CifixPr } from "../cifix/types.ts";
 import { forkOf } from "../github/fork.ts";
 import { outsideShown } from "../fixup/excerpt.ts";
 import { Git, type Exec } from "../fixup/git.ts";
@@ -123,12 +127,32 @@ async function coveringPr(c: Ctx, checks: string[], files: string[], since: stri
   return null;
 }
 
-type Outcome = "opened" | "skipped" | "failed" | "waiting" | "linting";
+/** The places of one check read to judge it test-only; a log naming more is not judged. */
+const TEST_PLACES = 50;
+
+/**
+ * The failing test of one check when every place its log names (compile errors and panics, testLocations) is test code at
+ * `head` (isTestLine): "test X fails at file:line". Null when the log names no place or more than TEST_PLACES, one is not
+ * test code or a file cannot be read.
+ */
+export async function testCodeFailure(git: Git, head: string, check: CiFailure["checks"][number]): Promise<string | null> {
+  const { places, capped } = testLocations(check.steps.map((s) => s.tail).join("\n"), TEST_PLACES);
+  if (!places.length || capped) return null;
+  for (const p of places) {
+    const f = await git.file(head, p.file);
+    if (!f.ok || !isTestLine(p.file, f.content, p.line)) return null;
+  }
+  const first = places.find((p) => p.test) ?? places[0]!;
+  return `${first.test ? `test ${first.test} fails` : "test code fails"} at ${first.file}:${first.line}${places.length > 1 ? ` (and ${places.length - 1} more)` : ""}`;
+}
+
+type Outcome = "opened" | "skipped" | "failed" | "waiting" | "linting" | "issue";
 
 /**
  * One attempt for the rows of one head: one patch and one PR for all of them. The rows are `needs-fix` (a new patch) or
  * `linting` (a stored patch whose lint task is collected). Each row ends in nothing-to-do, pr-opened or fix-failed, goes to
- * linting with a stored patch, or stays as it is while the head is still running or the lint task is.
+ * linting with a stored patch, goes to issue-opening when no patch was made and its check fails only in test code
+ * (testCodeFailure), or stays as it is while the head is still running or the lint task is.
  */
 async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: SessionLedger): Promise<Outcome> {
   const at = (): string => c.now().toISOString();
@@ -171,6 +195,26 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
     const git = new Git(c.exec, c.fix.root, c.repo);
     mkdirSync(c.fix.root, { recursive: true });
     if (!(await git.fetchBranch(ownerOf(c.repo), c.repo, now.branch, head))) return await set(live, "fix-failed", "the head commit is no longer in the repository");
+    /**
+     * No patch could be made (`reason`). A check whose failure is only in test code is a person's to fix: its rows go to
+     * issue-opening and the red streak's issue (openInfraIssues) names the test. The other rows are fix-failed.
+     */
+    const noPatch = async (reason: string): Promise<"issue" | "failed"> => {
+      const how = /\btest/.test(reason) ? "the only fix found changes the test" : "no fix outside the test was found";
+      const failed: FixRow[] = [];
+      let issues = 0;
+      for (const r of live) {
+        const found = await testCodeFailure(git, head, failing.get(r.check)!);
+        if (!found) { failed.push(r); continue; }
+        const why = scrubReason(oneLine(`${found}; ${how}, and a CI fix may not change tests`), c.fix.root);
+        // A stored patch of a lint round is dropped with the row's move.
+        await c.setState(r, "issue-opening", why, at(), { patch: null, files: null, lintTask: null, lintRound: null, lintState: null, session: null });
+        c.log(`  ${c.repo}: ${r.check}: ${why}; opening an issue`);
+        issues++;
+      }
+      if (failed.length) await set(failed, "fix-failed", reason);
+      return issues ? "issue" : "failed";
+    };
     const ref = `${c.repo}@${head.slice(0, 8)}`;
     const names = live.map((r) => r.check);
     const title = prTitle(names);
@@ -235,7 +279,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
         const ses = sessionAsk(w.session, "", texts, new Date(at()));
         const made = await generate({ patch: w.patch, findings: texts }, w.round + 1, ses);
         dropSessions(w.session, ses.kept ? { "": ses.kept } : {});
-        if (!made.ok) return await set(live, "fix-failed", made.reason);
+        if (!made.ok) return await noPatch(made.reason);
         ({ patch, files: patchFiles, changed, shown, model, applied } = made);
         const task = await queueLintFor(c.db, { step: "mainfix", repo: c.repo, number: null, head, base: head, patch });
         if (task === null) { /* the new patch changes no Rust file: nothing to lint */ } else {
@@ -248,7 +292,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
     } else {
       const ses: SessionAsk = {};
       const made = await generate(null, 1, ses);
-      if (!made.ok) return await set(live, "fix-failed", made.reason);
+      if (!made.ok) return await noPatch(made.reason);
       ({ patch, files: patchFiles, changed, shown, model, applied } = made);
       // Like every model patch, this one is linted before it is pushed; the collect step on a later run folds in the formatting or sends findings back.
       const task = await queueLintFor(c.db, { step: "mainfix", repo: c.repo, number: null, head, base: head, patch });
@@ -267,7 +311,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
     const commit = await git.commit(applied.tree, head, commitMessage(title, patchFiles), { name: author.name, email: author.email });
     const changes = await git.rawChanges(head, commit);
     const touched = changes.map((x) => x[3]!).sort().join("\n");
-    if (changes.some((x) => x[2] !== "M" || x[0] !== x[1] || (x[0] !== "100644" && x[0] !== "100755")) || touched !== [...files].sort().join("\n"))
+    if (changes.some((x) => x[2] !== "M" || x[0] !== x[1] || (x[0] !== "100644" && x[0] !== "100755")) || touched !== [...patchFiles].sort().join("\n"))
       return await set(live, "fix-failed", "the commit would change files or modes outside the validated diff");
     const outside = outsideShown(shown, await git.diffText(head, commit));
     if (outside) return await set(live, "fix-failed", outside);
@@ -308,8 +352,8 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
 }
 
 /** Takes the repo's `needs-fix` and `linting` rows head by head; `onHandled` is called once per head that reaches the model work. */
-export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ opened: number; skipped: number; failed: number; linting: number }> {
-  const out = { opened: 0, skipped: 0, failed: 0, linting: 0 };
+export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ opened: number; skipped: number; failed: number; linting: number; issue: number }> {
+  const out = { opened: 0, skipped: 0, failed: 0, linting: 0, issue: 0 };
   const rows = await loadMainFixes(c.db, { repo: c.repo, states: ["needs-fix", "linting"], verdict: "code" });
   const byHead = new Map<string, FixRow[]>();
   const ledger = new SessionLedger();

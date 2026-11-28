@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import { setFeature } from "../src/build/features.ts";
-import { failureLocations, repoPath } from "../src/merge/batch-blame.ts";
+import { failureLocations, repoPath } from "../src/core/failure-locations.ts";
 import { batchSizeOf } from "../src/merge/batch-store.ts";
 import { runBatches, type BatchDeps } from "../src/merge/batch.ts";
 import { world, type World } from "./world-db.ts";

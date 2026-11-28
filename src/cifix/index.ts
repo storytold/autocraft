@@ -59,6 +59,7 @@ import { foldFormat, queueLintFor, readLint } from "../prepush/index.ts";
 import { findingsWord, lintVerdict, testsNoteOf } from "../prepush/tests.ts";
 import { dropSessions, SessionLedger, sessionAsk, storeSessions, sweepSessions, type SessionAsk } from "../prepush/resume.ts";
 import type { LintPrevious } from "../fixup/patch.ts";
+import { failureLocations } from "../core/failure-locations.ts";
 import type { CiFailure, CifixPr } from "./types.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { ownerOf, slugOf } from "../owners.ts";
@@ -165,20 +166,13 @@ export function gitFormatDiff(text: string): string {
 }
 
 const DIFF_FILE = /^diff --git a\/(\S+) b\/\S+$/gm;
-const LOCATION = /^\s*--> ([\w./-]+\.rs):\d+/;
-const ERROR_LINE = /^\s*error(\[E\d+\])?: /;
-
-/** Files named on the compiler location line (`--> path:line`) directly after an `error` line. The log is untrusted, so no other mention counts. */
+/** The Rust files a failure's compiler errors name (failureLocations), first seen first. */
 export function errorFiles(log: string): string[] {
-  const lines = log.split("\n");
-  const out: string[] = [];
-  lines.forEach((l, i) => {
-    if (i === 0 || !ERROR_LINE.test(lines[i - 1]!)) return;
-    const m = LOCATION.exec(l);
-    if (m && !out.includes(m[1]!)) out.push(m[1]!);
-  });
-  return out;
+  return [...new Set(failureLocations(log).filter((x) => x.what === "error" && x.file.endsWith(".rs")).map((x) => x.file))];
 }
+
+/** The files a failure's panics name. */
+const panicFiles = (log: string): string[] => [...new Set(failureLocations(log).filter((x) => x.what === "panic").map((x) => x.file))];
 
 type Fix = { patch: string; files: string[]; changed: number };
 
@@ -303,9 +297,9 @@ export async function patchFromFailure(db: Db, d: Pick<CifixDeps, "ask" | "check
   const { git, ref, title, repo, head, failure } = r;
   const text = failure.checks.flatMap((x) => x.steps.map((s) => s.tail)).join("\n");
   const scripts = await buildScriptsAt(git, head);
-  // Files a compiler error points at come first, then the files the diff changes; nothing else is editable. Test files are not editable by a CI fix.
+  // Files a compiler error points at come first, then the files the diff changes, then the files a panic points at; nothing else is editable. Test files are not editable by a CI fix.
   const cited = errorFiles(text);
-  const named = [...new Set(cited.concat([...r.diffText.matchAll(DIFF_FILE)].map((m) => m[1]!)))]
+  const named = [...new Set(cited.concat([...r.diffText.matchAll(DIFF_FILE)].map((m) => m[1]!), panicFiles(text)))]
     .filter((p) => editable(p, scripts) && !TEST_PATH.test(p)).slice(0, MAX_FILES);
   // With a sandbox checkout the model reads the files itself, so they are listed by path and no size limit applies.
   const checkout = (await r.checkout()) ?? undefined;

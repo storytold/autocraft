@@ -107,16 +107,20 @@ export async function loadPatchSignature(db: Db, keys: KeySource): Promise<Map<R
   return out;
 }
 
+/** `testIssues`: the issue states (`issue-opening`, ...) whose rows at the head are all failures only in test code (verdict code), none infra. */
+export type MainFixStates = { states: string[]; prNumber: number | null; unreadable?: string; issueNumber?: number; testIssues?: string[] };
+
 /**
- * Main CI page text: the fix states, the lowest PR number of the fix PRs and why the failure log cannot be read (`unreadable`, the
- * reason of such a row) per default-branch head; key is `repo@headSha`. 1 statement (heads as one JSON list).
+ * Main CI page text: the fix states, the lowest number of the fix PRs and of the opened issues, and why the failure log cannot be
+ * read (`unreadable`, the reason of such a row) per default-branch head; key is `repo@headSha`. 1 statement (heads as one JSON list).
  */
-export async function loadMainFixStates(db: Db, heads: { repo: string; headSha: string }[]): Promise<Map<string, { states: string[]; prNumber: number | null; unreadable?: string }>> {
-  const out = new Map<string, { states: string[]; prNumber: number | null; unreadable?: string }>();
+export async function loadMainFixStates(db: Db, heads: { repo: string; headSha: string }[]): Promise<Map<string, MainFixStates>> {
+  const out = new Map<string, MainFixStates>();
   if (!heads.length) return out;
+  const infra = new Set<string>(), test = new Map<string, Set<string>>();
   const k = queryDb(db).k as any;
   for (const part of kx.chunks(heads)) {
-    const rows = await rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "state", "reason", "pr_number"])
+    const rows = await rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "state", "verdict", "reason", "pr_number", "issue_number"])
       .where(kx.tupleIn(db, ["repo", "head_sha"], part.map((h) => [h.repo, h.headSha]), ["text", "text"])).orderBy("repo").orderBy("head_sha").orderBy("check"));
     for (const r of rows) {
       const key = `${r.repo}@${r.head_sha}`;
@@ -124,7 +128,16 @@ export async function loadMainFixStates(db: Db, heads: { repo: string; headSha: 
       if (!e.states.includes(r.state)) e.states.push(r.state);
       if (r.state === "unreadable" && r.reason) e.unreadable = r.reason;
       if (r.state === "pr-opened" && r.pr_number !== null && (e.prNumber === null || Number(r.pr_number) < e.prNumber)) e.prNumber = Number(r.pr_number);
+      if (r.state === "issue-opened" && r.issue_number !== null && (e.issueNumber === undefined || Number(r.issue_number) < e.issueNumber)) e.issueNumber = Number(r.issue_number);
+      if (r.state.startsWith("issue-")) {
+        if (r.verdict === "code") (test.get(key) ?? test.set(key, new Set()).get(key)!).add(r.state);
+        else infra.add(`${key}\0${r.state}`);
+      }
     }
+  }
+  for (const [key, states] of test) {
+    const kept = [...states].filter((st) => !infra.has(`${key}\0${st}`));
+    if (kept.length) out.get(key)!.testIssues = kept;
   }
   return out;
 }

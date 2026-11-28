@@ -26,11 +26,11 @@ function git(cwd: string, ...args: string[]): string {
 const BROKEN = "fn a() -> i32 {\n    1\n}\nfn main() {\n    let x: i32 = b();\n}\n";
 
 /** A repo whose head has a compile error, the patch that fixes it, and the fork the PR branch is pushed to. */
-async function world() {
+async function world(o: { source?: string; log?: string; reply?: string | null } = {}) {
   const work = mkdtempSync(join(dir, "work-"));
   git(work, "init", "-q", "-b", "main");
   mkdirSync(join(work, "src"));
-  writeFileSync(join(work, "src/lib.rs"), BROKEN);
+  writeFileSync(join(work, "src/lib.rs"), o.source ?? BROKEN);
   git(work, "add", "-A");
   git(work, "commit", "-qm", "break");
   const head = git(work, "rev-parse", "HEAD");
@@ -49,7 +49,7 @@ async function world() {
   await onCodeVerdict(db, row, "a compile error", T0);
 
   const asked: { previous?: { patch: string; findings: string[] }; files: unknown }[] = [];
-  const log = { pushed: 0, opened: 0 };
+  const log = { pushed: 0, opened: 0, issues: [] as { title: string; body: string }[] };
   // git talks to local directories in place of github.com; gh answers from fixed data.
   const exec: Exec = async (cmd, args, opts = {}) => {
     const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
@@ -65,18 +65,19 @@ async function world() {
     if (joined.startsWith("api repos/bot/app")) return ok("storytold/app");
     if (args[0] === "pr" && args[1] === "list") return ok("");
     if (args[0] === "pr" && args[1] === "create") { log.opened++; return ok(`${PR_URL}\n`); }
+    if (args[0] === "issue" && args[1] === "create") { log.issues.push({ title: args[args.indexOf("--title") + 1]!, body: String(opts.input) }); return ok("https://github.com/storytold/app/issues/41\n"); }
     return { code: 1, stdout: "", stderr: `unexpected gh call: ${joined}` };
   };
   const gh = async (args: string[]): Promise<string> => {
     if (args[1]?.includes("check-runs")) return JSON.stringify({ check_runs: [{ name: "gate / test", status: "completed", conclusion: "failure", details_url: "https://github.com/storytold/app/actions/runs/11/job/1" }] });
-    if (args[0] === "run") return "test\tcargo test\terror[E0425]: cannot find function `b`\ntest\tcargo test\t --> src/lib.rs:5:18\n";
+    if (args[0] === "run") return o.log ?? "test\tcargo test\terror[E0425]: cannot find function `b`\ntest\tcargo test\t --> src/lib.rs:5:18\n";
     throw new Error(`unexpected call: ${args.join(" ")}`);
   };
   const deps: MainFixDeps = {
     gh, exec, now: () => new Date(T0), classify: async () => null,
     fix: {
       root: join(dir, "fixups"),
-      ask: async (_db, input) => { const i = (input as { previous?: { patch: string; findings: string[] }; files: unknown }[])[0]!; asked.push({ previous: i.previous, files: i.files }); return patch; },
+      ask: async (_db, input) => { const i = (input as { previous?: { patch: string; findings: string[] }; files: unknown }[])[0]!; asked.push({ previous: i.previous, files: i.files }); return o.reply === undefined ? patch : o.reply; },
       check: async () => '{"verdict":"approve","reasons":"fixes the call","problems":[]}',
       checkout: async () => join(dir, "checkout"),
     },
@@ -137,4 +138,22 @@ test("findings go back to the model with the earlier patch; the second clean pat
   assert.equal((await stateOf(l.db)).state, "fix-failed");
   assert.match((await stateOf(l.db)).reason!, /clippy findings remain after 2 rounds/);
   assert.equal(l.asked.length, 2);
+});
+
+test("a panic inside a test whose patch could not be made opens an issue naming the test; one outside the tests stays fix-failed", async () => {
+  const source = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {\n        assert_eq!(super::add(1, 1), 3);\n    }\n}\n";
+  const panicAt = (line: number) => `test\tcargo test\tthread 'tests::adds' (437684) panicked at src/lib.rs:${line}:9:\ntest\tcargo test\tassertion \`left == right\` failed\n`;
+  const row = async (db: Db) => (await db.get(db.k.selectFrom("main_fixes").select(["state", "issue_number as issue", "reason"])))!;
+
+  const w = await world({ source, log: panicAt(9), reply: null });
+  await w.step();
+  const r = await row(w.db);
+  assert.deepEqual([r.state, Number(r.issue), w.asked.length, w.log.opened, w.log.issues.length], ["issue-opened", 41, 1, 0, 1], "the patch is tried first");
+  assert.match(String(r.reason), /tests::adds fails at src\/lib\.rs:9/);
+  assert.match(w.log.issues[0]!.title, /failing test/);
+  assert.match(w.log.issues[0]!.body, /No fix PR was opened: test tests::adds fails at src\/lib\.rs:9/);
+
+  const lib = await world({ source, log: panicAt(2), reply: null });
+  await lib.step();
+  assert.deepEqual([(await row(lib.db)).state, lib.log.issues.length], ["fix-failed", 0]);
 });

@@ -28,7 +28,8 @@ import { claimForWork } from "../github/claim.ts";
 import { ghClosePr, ghOpenPr, ghRerunMainFailed, mergeViaCommand, pushOwnBranch, type Writer } from "../github/write.ts";
 import { readFailure } from "../cifix/logs.ts";
 import type { CiFailure } from "../cifix/types.ts";
-import { failureLocations, MAX_SUSPECTS, suspects } from "./batch-blame.ts";
+import { MAX_LOCATIONS, MAX_SUSPECTS, suspects } from "./batch-blame.ts";
+import { failureLocations } from "../core/failure-locations.ts";
 import { type Exec, exec, fixupDir } from "../fixup/git.ts";
 import { whoAmI } from "../fixup/index.ts";
 import { setPipelineLogin } from "../github/pipeline-account.ts";
@@ -358,7 +359,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   async function traceOf(b: BatchView, members: BatchMember[], text: string): Promise<Map<number, string> | null> {
     if (members.length < 2) return null;
     try {
-      const found = await suspects(git, b, members, failureLocations(text));
+      const found = await suspects(git, b, members, failureLocations(text, MAX_LOCATIONS));
       return found.size && found.size < members.length && found.size <= MAX_SUSPECTS ? found : null;
     } catch (e) {
       log(`  ${b.branch}: the failure could not be traced: ${oneLine(String((e as Error).message ?? e), 120)}`);
