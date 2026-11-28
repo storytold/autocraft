@@ -167,7 +167,10 @@ function HowStep() {
         <li>{t("Nothing runs on an item until someone sends a command.")}</li>
         <li>{t("Exception: small and medium bug fixes from contributors with a good merge history.")}</li>
         <li>
-          <Code>merge</Code> {t("approves the merge, like pressing the merge button.")}
+          <Code>merge</Code> {t("asks AutoCraft to get the item merged: it makes the fixes, runs the checks and merges on green CI.")}
+        </li>
+        <li>
+          <Code>merge</Code> {t("skips the full review;")} <Code>review and merge</Code> {t("keeps it.")}
         </li>
         <li>{t("Approved: AutoCraft reviews, fixes and merges in your name on green CI.")}</li>
         <li>{t("It comes back to you only when it cannot get there.")}</li>
