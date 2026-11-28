@@ -64,7 +64,7 @@ test("saves are checked, rolled back and switched to the release, with their aud
   const path = "⟦locked:harness⟧/repo⟦/locked⟧";
   assert.ok(compare.includes(path));
   assert.equal((await saveEdit(db, { id: "verify.compare", scope: "base", body: compare.replace(path, `${path}s`), note: "x", by, baseRev: null })).ok, false, "a harness path cannot grow");
-  assert.equal((await saveEdit(db, { id: "classify.jev", scope: "base", body: "{}", note: "x", by, baseRev: null })).ok, false, "Jev prompts wait for their form");
+  assert.equal((await saveEdit(db, { id: "classify.jev", scope: "base", body: "{}", note: "x", by, baseRev: null })).ok, false, "a Jev body without its questions is refused");
   assert.deepEqual(await rows(), [], "a refused save stores nothing");
   assert.equal(await audits(), 0);
 

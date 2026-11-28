@@ -1035,8 +1035,8 @@ export interface PromptInfo {
   /** Claude without tools: the fixed text sent as `--system-prompt`; null when the call keeps the CLI's own system prompt (sandboxed) or is a Jev request. */
   system: string | null;
   placeholders: { name: string; meaning: string }[];
-  /** Jev only: every question with its type and criteria. */
-  questions: { id: string; type: string; instructions: string; criteria: Record<string, string> | null }[];
+  /** Jev only: each question as it runs; `lead` is the opening of its instructions (the untrusted-data sentence), which an edit keeps. */
+  questions: { id: string; type: string; lead: string; instructions: string; criteria: Record<string, string> | null }[];
   output: string;
   validation: string;
   /** Exactly what would be sent on stdin for `exampleItems` (made-up items). */
