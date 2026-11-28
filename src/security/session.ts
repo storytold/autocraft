@@ -5,6 +5,7 @@
 // with its stored change put back in the tree when it has one, from a clean tree when it has none. Nothing here writes to GitHub.
 // The calls name the finding's security pseudo repo item, so they are recorded, routed and shown as the patch path's are.
 import type { ItemRef } from "../../web/src/api/types.ts";
+import { isHalt } from "../agents/call.ts";
 import type { Db } from "../db/index.ts";
 import { ensurePrompts } from "../data/prompts/index.ts";
 import { loadLiveFixSession } from "../data/fixsession/index.ts";
@@ -47,8 +48,10 @@ export type SessionRound =
   | { kind: "ok"; patch: string; testPatch: string; files: string[]; title: string; summary: string; turnId: number; cost: number; resumed: boolean }
   /** The round failed: counts as a round, and the next one starts clean on the same session. */
   | { kind: "failed"; why: string; cost: number; resumed: boolean }
-  /** Nothing ran to an end: the workspace is not ready, or the session ended meanwhile. `stuck`: no workspace starts until a kubernetes environment changes. */
-  | { kind: "wait"; reason: string; stuck?: true };
+  /** Nothing ran to an end: the workspace is not ready (the next job runs when its row changes state), or the session ended meanwhile. */
+  | { kind: "wait"; reason: string }
+  /** The session's workspace does not start at the pinned commit: the fix gives up with the reason, and no round counts. */
+  | { kind: "stuck"; reason: string };
 
 /** Runs one round of the finding's fix as a step of its security fix session. */
 export async function sessionRound(r: SessionRoundRequest): Promise<SessionRound> {
@@ -56,7 +59,8 @@ export async function sessionRound(r: SessionRoundRequest): Promise<SessionRound
   const opened = await openSession(db, "security", r.repo, r.n, { head: sha });
   if ("refused" in opened) return { kind: "wait", reason: "the finding's fix session was refused" };
   const session = opened.session;
-  const env: StepEnv = { ...r.deps, db, log: r.log, ...(r.cancelled && { cancelled: r.cancelled }) };
+  // No polling while the workspace starts: the job ends, and advanceSecurityFixes runs the next one once the workspace's row moves on.
+  const env: StepEnv = { ...r.deps, db, log: r.log, pollReady: false, ...(r.cancelled && { cancelled: r.cancelled }) };
   const task = await renderSecuritySession(db, r.input);
   const f = r.failed;
   const lint = f?.patch ? { patch: f.patch, message: roundFailedMessage(f.reason), parentId: await lintParent(db, session, f.sessionTurn) } : undefined;
@@ -84,9 +88,9 @@ export async function sessionRound(r: SessionRoundRequest): Promise<SessionRound
   const failed = (why: string): SessionRound => ({ kind: "failed", why, cost, resumed });
   r.log(`${r.repo} finding ${r.n}: fix session ${out.session.id}: ${out.turns.length} turns, ${out.kind}`);
   switch (out.kind) {
-    case "wait": return { kind: "wait", reason: out.reason, ...(out.stuck && { stuck: true as const }) };
+    case "wait": return out.stuck ? { kind: "stuck", reason: `the fix session's workspace failed to start at the pinned commit ${sha.slice(0, 7)}; start the fix again once a confidential kubernetes environment is enabled or edited` } : { kind: "wait", reason: out.reason };
     case "ended": return { kind: "wait", reason: out.reason };
-    case "failed": return failed(`fix session: ${out.reason}`);
+    case "failed": return out.startFailed ? { kind: "stuck", reason: out.reason } : failed(`fix session: ${out.reason}`);
     case "report": return failed(`the fix session is blocked: ${out.report.blocked_reason ?? out.report.summary}`);
     case "empty": return failed("the fix session reported done but the tree holds no change");
     case "refused": return failed(`the change was refused: ${out.problems.join("; ")}`);
@@ -104,12 +108,19 @@ export async function sessionRound(r: SessionRoundRequest): Promise<SessionRound
  * in the tree) or has ended (`end`, with `reason`: the session and its workspace end). False when it has no live session.
  */
 export async function settleSecuritySession(db: Db, deps: FixSessionDeps | null, repo: string, n: number, how: "park" | "end", reason = "done", log: (line: string) => void = () => {}): Promise<boolean> {
-  const s = await loadLiveFixSession(db, "security", repo, n);
-  if (!s) return false;
-  if (how === "end") {
-    const ended = await endSession(db, s.id, reason);
-    if (ended) await endSessionWorkspaces(db, [ended]);
-    return ended !== null;
+  // The fix's outcome is already written: a failure here is logged and leaves the pod to the sweep (idle sessions end with their workspaces).
+  try {
+    const s = await loadLiveFixSession(db, "security", repo, n);
+    if (!s) return false;
+    if (how === "end") {
+      const ended = await endSession(db, s.id, reason);
+      if (ended) await endSessionWorkspaces(db, [ended]);
+      return ended !== null;
+    }
+    return deps ? await parkSession({ ...deps, db, log }, s) : false;
+  } catch (e) {
+    if (isHalt(e)) throw e;
+    log(`${repo} finding ${n}: the fix session's workspace was not ${how === "park" ? "parked" : "ended"}: ${String((e as Error).message ?? e)}`);
+    return false;
   }
-  return deps ? await parkSession({ ...deps, db, log }, s) : false;
 }

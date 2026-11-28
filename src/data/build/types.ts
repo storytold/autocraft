@@ -179,7 +179,7 @@ export type CallPage = { rows: CallListRow[]; more: boolean };
 export type SessionSource = { ids: number[] } | { workspaceIds: number[] } | { remoteCallId: number } | { jobId: number };
 export type SweptSession = { id: number; workspaceId: number | null; keep: boolean; jobId: number | null; jobState: string | null; error: string | null };
 export type WorkspaceQuery = { state: "live" | "all"; cursor?: string; limit: number };
-export type WorkspaceListRow = { id: number; repo: string; base_sha: string; app: string | null; state: string; state_at: string; node: string | null; warm: string | null; created_at: string; ended_at: string | null };
+export type WorkspaceListRow = { id: number; repo: string; base_sha: string; app: string | null; state: string; state_at: string; node: string | null; warm: string | null; owner: string | null; created_at: string; ended_at: string | null };
 export type WorkspaceListPage = { rows: WorkspaceListRow[]; next: string | null };
 export type CacheTaskRow = { id: number; repo: string; state: string; summary: string | null; head_sha: string; ended_at: string | null; sandbox_env: string | null; warm_image: string | null };
 /** The database half of the Caches page (the caller adds coverage and builds the node view). `bytes` is keyed by warm key, the rest by repo. */

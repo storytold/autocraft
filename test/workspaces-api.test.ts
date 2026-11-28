@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { calls, detail, image, list, output } from "../src/dash/api/workspaces.ts";
+import { SECURITY_WORKSPACE_OWNER } from "../src/data/build/index.ts";
 import { TOPICS } from "../src/db/live.ts";
+import { securityRepo } from "../src/security/rules.ts";
 import { INPUT_TOPICS } from "../src/runner/autopilot.ts";
 import type { Req } from "../src/dash/types.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -42,4 +44,20 @@ test("a viewer sees a workspace's state but none of its prompts, replies, errors
   assert.equal(img.headers?.["content-type"], "image/png");
 
   assert.ok(TOPICS.includes("workspaces") && !INPUT_TOPICS.includes("workspaces"));
+});
+
+test("a security fix session's workspace is left out of a viewer's list and is 404 to them; a maintainer who sees the repo sees it under the security pseudo repo", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "ws-")), "t.db"));
+  const at = "2026-01-01T00:00:00Z";
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: at, pipeline: 1 }));
+  await db.run(db.k.insertInto("workspaces").values({ id: 1, repo: "app", base_sha: "a".repeat(40), env_id: "cluster", state: "ready", state_at: at, owner: "fix session 1", created_at: at, updated_at: at }));
+  await db.run(db.k.insertInto("workspaces").values({ id: 2, repo: "app", base_sha: "a".repeat(40), env_id: "vault", state: "ready", state_at: at, owner: `${SECURITY_WORKSPACE_OWNER} 2`, created_at: at, updated_at: at }));
+  const all = { query: new URLSearchParams("state=all") };
+  const as = (role: "viewer" | "maintainer", params: Record<string, string> = {}): Req =>
+    ({ params, query: new URLSearchParams(), user: { login: role, role, canRead: async () => true, canWrite: async () => false } }) as unknown as Req;
+
+  assert.deepEqual((await list(db, { ...as("viewer"), ...all })).workspaces.map((w) => w.id), [1]);
+  await assert.rejects(detail(db, as("viewer", { id: "2" })), /no such workspace/);
+  assert.deepEqual((await list(db, { ...as("maintainer"), ...all })).workspaces.map((w) => [w.id, w.repo]), [[2, securityRepo("app")], [1, "app"]]);
+  assert.equal((await detail(db, as("maintainer", { id: "2" }))).repo, securityRepo("app"));
 });

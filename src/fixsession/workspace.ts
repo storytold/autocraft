@@ -52,6 +52,11 @@ export type FixWorkspaceEnv = {
   cancelled?: () => Promise<boolean>;
   pollMs?: number;
   now?: () => number;
+  /**
+   * false: a workspace that is not ready is a wait at once, with no polling, and the caller's next job runs when the workspace's row
+   * changes state (a security fix session: advanceSecurityFixes).
+   */
+  pollReady?: boolean;
 };
 
 /** The step waits (registry wait FIX_WORKSPACE_WAIT): no environment can hold the session's workspace now. */
@@ -229,7 +234,8 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
 
 /**
  * The ready row of workspace `id`, resuming it when parked. `lost`: it will not be ready (gone, failed or ended, or parked and out of
- * resumes); `pending`: it is still waiting for a slot or starting after READY_LIMIT_MS (an external wait, Workspace start).
+ * resumes); `pending`: it is still waiting for a slot or starting after READY_LIMIT_MS (an external wait, Workspace start), or at
+ * once with `pollReady` false.
  */
 async function readyRow(env: FixWorkspaceEnv, id: number): Promise<WorkspaceRow | { lost: string } | { pending: string }> {
   const now = env.now ?? Date.now;
@@ -240,6 +246,7 @@ async function readyRow(env: FixWorkspaceEnv, id: number): Promise<WorkspaceRow 
     if (w.state === "ready") return w;
     if (w.state === "parked" && !await resumeWorkspace(env.db, id, now())) return { lost: `workspace ${id} is parked and could not be resumed${w.error ? `: ${w.error}` : ""}` };
     if (!LIVE_STATES.includes(w.state as WorkspaceStateName)) return { lost: `workspace ${id} is ${w.state}${w.error ? `: ${w.error}` : ""}` };
+    if (env.pollReady === false) return { pending: `workspace ${id} is ${w.state === "parked" ? "resuming" : w.state}` };
     if (now() - from > READY_LIMIT_MS) return { pending: `workspace ${id} is still ${w.state} after ${Math.round(READY_LIMIT_MS / 60_000)} min` };
     if (await env.cancelled?.()) throw new WorkspaceUnavailable("cancelled while the workspace started", false);
     if (w.state !== last) {

@@ -122,24 +122,30 @@ export async function loadFindingsToFix(db: Db, f: { repo?: string; number?: num
   return rows.map((r) => findingKey(r.repo, r.number));
 }
 
-/** `fixing` findings with no queued or running fix job: those with a `building` round (task ids, the round's `created_at`) first, then those waiting on a confidential environment. 1 statement. */
+/**
+ * `fixing` findings with no queued or running fix job: those with a `building` round (task ids, the round's `created_at`) first, then
+ * those waiting on a confidential environment, with the state of their security fix session's workspace. 1 statement.
+ */
 export async function loadFixesToAdvance(db: Db): Promise<FixAdvanceRow[]> {
   const q = queryDb(db);
   const noJob = (eb: kx.AnyEb) => eb.not(liveJobOfFinding(db, eb, FIX_STEPS, "f.repo", "f.number"));
   const building = q.k.selectFrom("security_findings as f").innerJoin("security_fix_rounds as r", (j) => j.onRef("r.repo", "=", "f.repo").onRef("r.number", "=", "f.number").on("r.state", "=", "building"))
     .select(["f.repo", "f.number", "f.decided_by as by", "r.created_at as round_at", "r.head_task as head", "r.base_task as base"])
-    .select((eb) => [kx.literal(0).as("src"), eb.lit(null).as("env_at")])
+    .select((eb) => [kx.literal(0).as("src"), eb.lit(null).as("env_at"), eb.lit(null).as("ws_state")])
     .where("f.state", "=", "fixing").where(noJob);
   const waiting = q.k.selectFrom("security_findings as f")
     .select(["f.repo", "f.number", "f.decided_by as by"])
     .select((eb) => [eb.lit(null).as("round_at"), eb.lit(null).as("head"), eb.lit(null).as("base"), kx.literal(1).as("src")])
     .select("f.env_wait_at as env_at")
+    // The state of the workspace of the finding's live security fix session, if any.
+    .select((eb) => eb.selectFrom("main.fix_sessions as fs").innerJoin("main.workspaces as w", "w.id", "fs.workspace_id").select("w.state")
+      .where("fs.kind", "=", "security").whereRef("fs.repo", "=", "f.repo").whereRef("fs.number", "=", "f.number").where("fs.state", "=", "live").limit(1).as("ws_state"))
     .where("f.state", "=", "fixing").where("f.env_wait_at", "is not", null).where(noJob);
   const rows = (await q.all((building as any).unionAll(waiting as any).orderBy("src").orderBy("repo").orderBy("number"))) as {
-    repo: string; number: number; by: string | null; round_at: string | null; head: number | null; base: number | null; env_at: string | null;
+    repo: string; number: number; by: string | null; round_at: string | null; head: number | null; base: number | null; env_at: string | null; ws_state: string | null;
   }[];
   return rows.map((r) => ({
-    repo: r.repo, number: r.number, by: r.by, tasks: r.head === null ? null : { head: r.head, base: r.base! }, roundCreatedAt: r.round_at, envWaitAt: r.env_at,
+    repo: r.repo, number: r.number, by: r.by, tasks: r.head === null ? null : { head: r.head, base: r.base! }, roundCreatedAt: r.round_at, envWaitAt: r.env_at, workspaceState: r.ws_state,
   }));
 }
 

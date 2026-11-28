@@ -2,7 +2,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { SECURITY_PREFIX } from "../../security/rules.ts";
 import { hiddenRepos } from "../control/fragments.ts";
 import { loadWarmReport } from "./build-state.ts";
@@ -13,14 +12,15 @@ import { LIVE_STATES, SECURITY_WORKSPACE_OWNER, WARM_STEP } from "./types.ts";
 const filtered = (h: ViewScope["hiddenRepos"]): boolean => !!h.visible || h.length > 0;
 
 /** The repo a workspace is listed under: its repo's security pseudo repo for a security fix session's workspace (isSecurityWorkspace). */
-const listedRepo = () => sql<string>`CASE WHEN owner LIKE ${sql.lit(`${SECURITY_WORKSPACE_OWNER} %`)} THEN ${sql.lit(SECURITY_PREFIX)} || repo ELSE repo END`;
+const listedRepo = (db: Db, eb: kx.AnyEb) =>
+  eb.case().when(kx.like(db, "owner", eb.val(`${SECURITY_WORKSPACE_OWNER} %`))).then(kx.concat(eb.val(SECURITY_PREFIX), "repo")).else(eb.ref("repo")).end();
 
 /** The Workspaces list: newest first, keyset-paged by id; `state: "live"` leaves out ended and failed ones. Sessions and costs come from the views module. 1 statement. */
 export async function loadWorkspacePage(db: Db, q: WorkspaceQuery, scope: ViewScope): Promise<WorkspaceListPage> {
   const d = queryDb(db);
-  let b = d.k.selectFrom("main.workspaces").select(["id", "repo", "base_sha", "app", "state", "state_at", "node", "warm", "created_at", "ended_at"])
+  let b = d.k.selectFrom("main.workspaces").select(["id", "repo", "base_sha", "app", "state", "state_at", "node", "warm", "owner", "created_at", "ended_at"])
     .orderBy("id", "desc").limit(q.limit + 1);
-  if (filtered(scope.hiddenRepos)) b = b.where(hiddenRepos(db, listedRepo(), scope.hiddenRepos));
+  if (filtered(scope.hiddenRepos)) b = b.where((eb) => hiddenRepos(db, listedRepo(db, eb as unknown as kx.AnyEb), scope.hiddenRepos));
   if (q.state === "live") b = b.where("state", "in", LIVE_STATES);
   if (q.cursor) b = b.where("id", "<", Number(q.cursor));
   const rows = await d.all(b);

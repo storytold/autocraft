@@ -164,6 +164,9 @@ export const ROUND_BUILD_LIMIT_MS = 4 * 3_600_000;
  */
 export type SecurityFixWork = { due: Awaited<ReturnType<typeof sec.loadFixesToAdvance>>; ready: number | null; sessions: FixSessionsSetting; sessionEnv: boolean };
 
+/** Workspace states in which a security fix session's workspace is on its way to ready. */
+const STARTING = ["requested", "starting", "seeding"];
+
 /** What advanceSecurityFixes reads, in one wave. */
 export async function loadSecurityFixWork(db: Db): Promise<SecurityFixWork> {
   const [due, ready, sessions, env] = await db.together(() => Promise.all([sec.loadFixesToAdvance(db), loadConfidentialReadyAt(db), fixSessionsSetting(db), fixSessionEnv(db, "security")]));
@@ -180,8 +183,8 @@ export async function advanceSecurityFixes(db: Db, pipelineOn = true, work?: Sec
   const { due, ready, sessions, sessionEnv } = work ?? await loadSecurityFixWork(db);
   const inSessions = (repo: string): boolean => sessions.steps.includes("security") && (sessions.repos === null || sessions.repos.includes(repo));
   // A fix that waits for a confidential build environment continues once one is ready; in a fix session, once a confidential
-  // kubernetes environment can hold its workspace too.
-  const rows = due.filter((r) => r.tasks !== null || (ready !== null && (sessionEnv || !inSessions(r.repo))));
+  // kubernetes environment can hold its workspace too, and not while that workspace is still starting (its next state wakes it).
+  const rows = due.filter((r) => r.tasks !== null || (ready !== null && (!inSessions(r.repo) || (sessionEnv && !STARTING.includes(r.workspaceState ?? "")))));
   const ids = rows.flatMap((r) => (r.tasks ? [r.tasks.head, r.tasks.base] : []));
   const tasks = await loadTasks(db, ids);
   let queued = 0;

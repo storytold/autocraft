@@ -9,6 +9,8 @@ export { REPORT_LIST_MAX, REPORT_TEXT_MAX };
 /** A first or fresh turn's limits; a follow-up turn (checks, lint, undo, report) has FIX_FOLLOW_UP_CALL's. */
 export const FIX_SESSION_CALL = { timeoutSeconds: 90 * 60, maxTurns: 400 } as const;
 export const FIX_FOLLOW_UP_CALL = { timeoutSeconds: 45 * 60, maxTurns: 200 } as const;
+/** Follow-ups with AutoCraft's own check findings per step. */
+export const CHECK_FOLLOW_UPS = 2;
 /** Bytes of the diff read back from the pod: a transport bound, not a scope rule. */
 export const SESSION_DIFF_MAX_BYTES = 5 * 1024 * 1024;
 /** Where a fix session's workspace holds the default branch's maintainer documents (AGENTS.txt): outside /work/src, so the PR cannot change them and they are not part of the diff. */

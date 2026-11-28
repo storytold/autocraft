@@ -172,8 +172,12 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
     const testName = securityTestName(repo, n);
     const testPath = regressionPath(crate.dir, testName);
     const verification = row.verification ? JSON.parse(row.verification) as { proposedTest?: string | null } : null;
-    const checkout = (await d.checkout(repo, branch, sha)) ?? undefined;
-    const base = { repo: securityRepo(repo), number: FIX_RUN_BASE + n, project: repo, commit: sha, ...(checkout && { repo_dir: REPO_PATH }) };
+    // The read-only checkout serves the patch path's calls and the review; made once, when a call first needs it, so a fix session's
+    // round (which reads its own workspace) makes none.
+    let checkoutP: Promise<string | undefined> | undefined;
+    const checkoutOf = (): Promise<string | undefined> => (checkoutP ??= d.checkout(repo, branch, sha).then((c) => c ?? undefined));
+    const core = { repo: securityRepo(repo), number: FIX_RUN_BASE + n, project: repo, commit: sha };
+    const baseOf = async () => ({ ...core, ...((await checkoutOf()) && { repo_dir: REPO_PATH }) });
     const finding = { title: row.title, severity: row.severity, refs, reach: row.reach, impact: row.impact, area: row.area };
     const run = usageRunId(row.scan_id);
     // The scan's own test of the finding, once it has been run (feature scan-tests); no row, no key.
@@ -200,7 +204,7 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
         } finally { rmSync(scratch2, { recursive: true, force: true }); }
       }
       if (patch.length > CHECK_PATCH_CAP) return { ok: false, why: `the patch is over the ${CHECK_PATCH_CAP} character limit for the review` };
-      const review = await reviewPatch(db, d, { ...base, finding: { title: row.title, refs, reach: row.reach, impact: row.impact }, patch, test_path: testPath }, { checkout, scanId: row.scan_id, n, run });
+      const review = await reviewPatch(db, d, { ...await baseOf(), finding: { title: row.title, refs, reach: row.reach, impact: row.impact }, patch, test_path: testPath }, { checkout: await checkoutOf(), scanId: row.scan_id, n, run });
       if (!review.ok) return { ok: false, why: review.reason };
       const who = await d.who(repo);
       const files = [...v.files, testPath];
@@ -269,6 +273,8 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
       }
     }
     let lastWhy = previous?.failure ?? "no round ran";
+    /** A round of this job that failed before its builds and has no row: written as a failed row when the job ends on a wait. */
+    let unsaved: { round: number; why: string } | null = null;
     for (let round = startRound; round <= FIX_ROUNDS; round++) {
       if (await d.cancelled()) return await noFix("the fix was cancelled");
       /** `patch`: the round's change (empty: none, so a fix session's next round starts clean), with `turn`, the session turn that wrote it. */
@@ -276,6 +282,7 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
         lastWhy = why;
         previous = { patch: (patch ?? previous?.patch ?? "").slice(0, 60_000), failure: why };
         if (patch !== undefined) prevRound = patch ? { patch, turn } : null;
+        unsaved = { round, why };
         log(`${repo} finding ${n}: round ${round} failed: ${oneLine(why, 160)}`);
       };
       if (passed) {
@@ -285,9 +292,10 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
         if (r.ok) return r.summary;
         await sec.markRounds(db, [{ repo, number: n, round: done.row.round, set: { state: "failed", failure: r.why } }]);
         failRound(r.why, done.row.patch, done.row.session_turn);
+        unsaved = null;
         continue;
       }
-      const first: SecurityFixInput = { ...base, finding, crate: { name: crate.name, dir: crate.dir }, test_path: testPath, proposed_test: verification?.proposedTest ?? null, ...(scanTest && { scan_test: scanTest }) };
+      const first: SecurityFixInput = { ...core, finding, crate: { name: crate.name, dir: crate.dir }, test_path: testPath, proposed_test: verification?.proposedTest ?? null, ...(scanTest && { scan_test: scanTest }) };
       const started = new Date().toISOString();
       let got: { title: string; summary: string; patch: string; testPatch: string; turn: number | null; kept: Kept };
       if (sessions) {
@@ -295,12 +303,21 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
         if (!deps) return await noFix("fix sessions are on for security fixes, but this runner is not in the cluster, so it cannot reach a fix session's workspace");
         const failed: FailedRound | undefined = previous && { reason: previous.failure, patch: prevRound?.patch ?? null, sessionTurn: prevRound?.turn ?? null };
         const sr = await sessionRound({
-          db, deps, log, repo, n, sha, input: first, item: { repo: base.repo, number: base.number },
+          db, deps, log, repo, n, sha, input: first, item: { repo: core.repo, number: core.number },
           gate: { step: "security", allowed, testPath, crateDir: crate.dir, testName, scripts }, ...(failed && { failed }), cancelled: d.cancelled,
         });
+        if (sr.kind === "stuck") return await noFix(sr.reason);
         if (sr.kind === "wait") {
-          if (sr.stuck) return await noFix(sr.reason);
-          // Nothing ran to an end: advanceSecurityFixes queues the next job, which goes on from the last failed round.
+          if (await d.cancelled()) return await noFix("the fix was cancelled");
+          // Nothing ran to an end. The round this job failed is kept as a failed row, so the next job (advanceSecurityFixes queues it
+          // once the session's workspace moves on) goes on from it, with its reason, change and round count.
+          const f = unsaved as { round: number; why: string } | null;
+          if (f) {
+            await sec.saveRound(db, {
+              repo, number: n, round: f.round, patch: prevRound?.patch ?? "", test_patch: "", title: "", summary: "", head_task: 0, base_task: 0, retried: 0,
+              session: null, session_turn: prevRound?.turn ?? null, state: "failed", failure: f.why, created_at: new Date().toISOString(),
+            });
+          }
           await sec.setFindingEnvWait(db, sec.findingKey(repo, n), new Date().toISOString());
           log(`${repo} finding ${n}: waiting: ${oneLine(sr.reason, 200)}`);
           return `${repo} finding ${n}: waiting: ${oneLine(sr.reason, 120)}`;
@@ -311,13 +328,13 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
         if (sr.kind === "failed") { failRound(sr.why, ""); continue; }
         got = { title: sr.title, summary: sr.summary, patch: sr.patch, testPatch: sr.testPatch, turn: sr.turnId, kept: {} };
       } else {
-        const input: SecurityFixInput = { ...first, ...(previous && { previous }) };
+        const input: SecurityFixInput = { ...first, ...await baseOf(), ...(previous && { previous }) };
         const tool = new CheckTool({ db, step: "fix-check", repo, number: null, recordRepo: securityRepo(repo), head: sha, base: sha, applies: applyCheck(git, d.root, sha, (p) => refusal(validateFixPatch(p, allowed, testPath, crate.dir, testName, scripts))) });
         // A later round continues the earlier session within the window; `input` (with `previous`) is the new call it falls back to.
         const ses: SessionAsk = kept && previous && Date.now() - kept.at <= RESUME_WINDOW_MS ? { resume: { session: kept.session, message: resumeFixMessage(previous.failure) } } : {};
         const tried = ses.resume !== undefined;
         let reply: Awaited<ReturnType<FixDeps["ask"]>>;
-        try { reply = await d.ask(ASK_STEPS.fix, input, { checkout, tool, agent: `security-fix-${n}`, run, session: ses }); } finally { await tool.close(); }
+        try { reply = await d.ask(ASK_STEPS.fix, input, { checkout: await checkoutOf(), tool, agent: `security-fix-${n}`, run, session: ses }); } finally { await tool.close(); }
         const resumed = tried && reply.resumed === true;
         ledger.hold(reply.kept);
         kept = reply.kept ? { session: reply.kept, at: Date.now() } : undefined;

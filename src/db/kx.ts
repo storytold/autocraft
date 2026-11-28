@@ -329,6 +329,11 @@ export function like(d: D, a: Ex, pattern: Ex, escape?: string): RawBuilder<SqlB
   return escape === undefined ? sql`${x(a)} LIKE ${x(pattern)}` : sql`${x(a)} LIKE ${x(pattern)}${esc}`;
 }
 
+/** The text `a` followed by the text `b` (`||` on both databases; cast, so a bound value needs no type); NULL when either is NULL. */
+export function concat(a: Ex, b: Ex): RawBuilder<string> {
+  return sql`(CAST(${x(a)} AS TEXT) || CAST(${x(b)} AS TEXT))`;
+}
+
 /** `e` without any of the characters of `chars` at either end (SQLite `trim(e, chars)`, Postgres `btrim`). */
 export function trimChars(d: D, e: Ex, chars: string): RawBuilder<string | null> {
   return pgOf(d) ? sql`btrim(${x(e)}, ${chars})` : sql`trim(${x(e)}, ${chars})`;
