@@ -7,14 +7,14 @@ import { num, push, refKey, rowsOf } from "./rows.ts";
 import type { MainFixRow, MainFixVerdict, RefKey } from "./types.ts";
 
 type Head = { repo: string; headSha: string };
-type MainFixDue = { rows: { check: string; state: string }[]; lintingHeads: { headSha: string; lintTask: number | null }[]; staleNeedsFix: boolean; /** The repo holds an `issue-opening` row at any head. */ opening: boolean };
+type MainFixDue = { rows: { check: string; state: string; updatedAt: string }[]; lintingHeads: { headSha: string; lintTask: number | null }[]; staleNeedsFix: boolean; /** The repo holds an `issue-opening` row at any head. */ opening: boolean };
 
-const COLS = ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "issue_number", "pr_number", "pr_url", "patch", "files", "lint_task", "lint_round", "lint_state", "session", "created_at", "updated_at"] as const;
+const COLS = ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "issue_number", "pr_number", "pr_url", "patch", "files", "lint_task", "lint_round", "lint_state", "session", "tries", "created_at", "updated_at"] as const;
 
 const rowOf = (r: any): MainFixRow => ({
   repo: r.repo, headSha: r.head_sha, check: r.check, verdict: r.verdict as MainFixVerdict, state: r.state, reason: r.reason, runId: num(r.run_id), runUrl: r.run_url, excerpt: r.excerpt,
   issueNumber: num(r.issue_number), prNumber: num(r.pr_number), prUrl: r.pr_url, patch: r.patch, files: r.files, lintTask: num(r.lint_task), lintRound: num(r.lint_round), lintState: r.lint_state,
-  session: r.session, createdAt: r.created_at, updatedAt: r.updated_at,
+  session: r.session, tries: Number(r.tries ?? 0), createdAt: r.created_at, updatedAt: r.updated_at,
 });
 
 /**
@@ -49,7 +49,7 @@ export async function loadMainFixDue(db: Db, heads: (Head & { running: boolean }
   const k = queryDb(db).k as any;
   const repos = [...new Set(heads.map((h) => h.repo))];
   const [rows, linting, needs] = await db.together(() => Promise.all([
-    rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "check", "state"]).where(kx.tupleIn(db, ["repo", "head_sha"], heads.map((h) => [h.repo, h.headSha]), ["text", "text"]))
+    rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "check", "state", "updated_at"]).where(kx.tupleIn(db, ["repo", "head_sha"], heads.map((h) => [h.repo, h.headSha]), ["text", "text"]))
       .orderBy("repo").orderBy("head_sha").orderBy("check")),
     rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "lint_task"]).where(kx.inList(db, "repo", repos)).where("state", "=", "linting").orderBy("created_at").orderBy("head_sha").orderBy("check")),
     rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "state"]).distinct().where(kx.inList(db, "repo", repos)).where("state", "in", ["needs-fix", "issue-opening"])),
@@ -58,8 +58,8 @@ export async function loadMainFixDue(db: Db, heads: (Head & { running: boolean }
   const needing = withState("needs-fix"), opening = withState("issue-opening");
   const lintingBy = new Map<string, { headSha: string; lintTask: number | null }[]>();
   for (const r of linting) push(lintingBy, r.repo, { headSha: r.head_sha, lintTask: num(r.lint_task) });
-  const rowsBy = new Map<string, { check: string; state: string }[]>();
-  for (const r of rows) push(rowsBy, `${r.repo}@${r.head_sha}`, { check: r.check, state: r.state });
+  const rowsBy = new Map<string, { check: string; state: string; updatedAt: string }[]>();
+  for (const r of rows) push(rowsBy, `${r.repo}@${r.head_sha}`, { check: r.check, state: r.state, updatedAt: r.updated_at });
   for (const h of heads) out.set(`${h.repo}@${h.headSha}`, { rows: rowsBy.get(`${h.repo}@${h.headSha}`) ?? [], lintingHeads: lintingBy.get(h.repo) ?? [], staleNeedsFix: !h.running && needing.has(h.repo), opening: opening.has(h.repo) });
   return out;
 }
@@ -93,6 +93,20 @@ export async function countMainFixes(db: Db, f: { state: string }): Promise<numb
   return Number(r?.n ?? 0);
 }
 
+/** The heads that hold a row in `state`. 1 statement. */
+export async function loadMainFixHeads(db: Db, state: string): Promise<Head[]> {
+  const k = queryDb(db).k as any;
+  return (await rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha"]).distinct().where("state", "=", state).orderBy("repo").orderBy("head_sha"))).map((r) => ({ repo: r.repo, headSha: r.head_sha }));
+}
+
+/** Removes the rows of one head and check. 1 statement. */
+export async function dropMainFix(db: Db, key: Head & { check: string }): Promise<void> {
+  const q = queryDb(db);
+  await db.write(async () => {
+    await q.run((q.k as any).deleteFrom("main.main_fixes").where("repo", "=", key.repo).where("head_sha", "=", key.headSha).where("check", "=", key.check));
+  });
+}
+
 /**
  * Multi-row upsert keyed by (repo, head, check): 1 statement per 500 rows. A row that exists keeps its `created_at`; every other
  * column takes the new value and `updated_at` is `at`. Callers collect the rows of a head and write once.
@@ -105,10 +119,10 @@ export async function saveMainFixes(db: Db, rows: MainFixRow[], at: string): Pro
       await q.run((q.k as any).insertInto("main_fixes")
         .values(part.map((r) => ({
           repo: r.repo, head_sha: r.headSha, check: r.check, verdict: r.verdict, state: r.state, reason: r.reason, run_id: r.runId, run_url: r.runUrl, excerpt: r.excerpt, issue_number: r.issueNumber,
-          pr_number: r.prNumber, pr_url: r.prUrl, patch: r.patch, files: r.files, lint_task: r.lintTask, lint_round: r.lintRound, lint_state: r.lintState, session: r.session, created_at: r.createdAt, updated_at: at,
+          pr_number: r.prNumber, pr_url: r.prUrl, patch: r.patch, files: r.files, lint_task: r.lintTask, lint_round: r.lintRound, lint_state: r.lintState, session: r.session, tries: r.tries ?? 0, created_at: r.createdAt, updated_at: at,
         })))
         .onConflict((oc: any) => oc.columns(["repo", "head_sha", "check"]).doUpdateSet(kx.excluded([
-          "verdict", "state", "reason", "run_id", "run_url", "excerpt", "issue_number", "pr_number", "pr_url", "patch", "files", "lint_task", "lint_round", "lint_state", "session", "updated_at",
+          "verdict", "state", "reason", "run_id", "run_url", "excerpt", "issue_number", "pr_number", "pr_url", "patch", "files", "lint_task", "lint_round", "lint_state", "session", "tries", "updated_at",
         ]))));
     }
   });

@@ -384,6 +384,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   // The question of a status comment whose asked people were last pinged in a reply (src/prstatus/ping.ts).
   ["pr_status_comments", "pinged", "TEXT"],
   ["pr_status_comments", "ping_failures", "INTEGER NOT NULL DEFAULT 0"],
+  // Model replies at a red default-branch head that sorted none of its failed checks (src/mainfix): the third gives the head up.
+  ["main_fixes", "tries", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.
