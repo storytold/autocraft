@@ -47,7 +47,6 @@ export const FRESH_INPUT_TOKENS = 400_000;
 const STEP_TURNS_MAX = 10;
 /** Calls in a row that end without a reply before the step fails. */
 const MISSES_MAX = 2;
-const AGENTS_FILE = `${SESSION_REPO_DOCS}/AGENTS.txt`;
 /** The purposes of a step's opening turn, or of a lint round's: the backward counts of a resumed step stop there. */
 const OPENING: readonly FixTurnPurpose[] = ["start", "step", "lint"];
 /** The reasons of a diff that was read but cannot be used (workspaceDiff, collectDiff): the change is refused, not the step failed. */
@@ -209,25 +208,42 @@ export type StepResult =
   | { kind: "ok"; gate: GateOk; diff: string; base: string; baseSha: string; diffHash: string; report: SecurityReport; callId: number; turnId: number };
 export type StepOutcome = StepResult & { session: FixSession; workspaceId: number | null; turns: FixTurnResult[]; checks: CheckRound[] };
 
-/** The default branch's AGENTS.md of `repo` from the docs cache, or null. */
-async function defaultAgents(db: Db, repo: string): Promise<string | null> {
+/** The maintainers' documents a workspace gets from the default branch, by their name in SESSION_REPO_DOCS (src/sandbox/repo-docs.ts DOC_FILES). */
+export type RepoDocs = { "AGENTS.txt"?: string | null; "ROADMAP.md"?: string | null };
+const REPO_DOC_NAMES = ["AGENTS.txt", "ROADMAP.md"] as const;
+
+/** The default branch's documents of `repo` from the docs cache, each null when missing; `names`: the ones wanted. */
+export async function defaultRepoDocs(db: Db, repo: string, names: readonly (keyof RepoDocs)[] = REPO_DOC_NAMES): Promise<RepoDocs> {
   const branch = (await loadRepos(db, { names: [repo] })).get(repo)?.default_branch ?? "main";
   const dir = await repoDocsFor(repo, branch);
-  const f = dir ? join(dir, "AGENTS.txt") : null;
-  return f && existsSync(f) ? readFileSync(f, "utf8") : null;
+  const read = (name: string): string | null => {
+    const f = dir ? join(dir, name) : null;
+    return f && existsSync(f) ? readFileSync(f, "utf8") : null;
+  };
+  return Object.fromEntries(names.map((n) => [n, read(n)]));
 }
 
-/** Puts the default branch's AGENTS.md read-only at SESSION_REPO_DOCS/AGENTS.txt, outside /work/src; none leaves no file. */
-async function putRepoDocs(env: StepEnv, workspaceId: number, text: string | null): Promise<string | null> {
+/**
+ * Puts the default branch's maintainer documents read-only in SESSION_REPO_DOCS, outside /work/src: the ones in `docs` that have text;
+ * every other one there is removed. Returns what failed, or null.
+ */
+export async function putRepoDocs(env: FixWorkspaceEnv, workspaceId: number, docs: RepoDocs): Promise<string | null> {
   const run = async (what: string, script: string, ...args: string[]): Promise<string | null> => {
     const r = await execWs(env.db, env.api, workspaceId, ["run", "60", "--", "sh", "-c", script, what, ...args], { tool: "checkpoint", args: { repo_docs: what }, timeoutMs: 70_000, touch: true }, env.now);
     return r.header?.kind === "status" && r.header.state === "exited" && r.header.exit === 0 ? null : `${what}: ${r.error ?? describeHeader(r.header)}`;
   };
-  const cleared = await run("clear", 'mkdir -p "$1" && rm -f "$2"', SESSION_REPO_DOCS, AGENTS_FILE);
-  if (cleared || text === null) return cleared;
-  const put = await execWs(env.db, env.api, workspaceId, ["put", AGENTS_FILE], { tool: "checkpoint", args: { repo_docs: "put", bytes: Buffer.byteLength(text) }, stdin: Buffer.from(text), timeoutMs: 120_000, touch: true }, env.now);
-  if (put.header?.kind !== "ok") return `put: ${put.error ?? describeHeader(put.header)}`;
-  return await run("protect", 'chmod 0444 "$1"', AGENTS_FILE);
+  const cleared = await run("clear", 'd="$1"; shift; mkdir -p "$d" && for f in "$@"; do rm -f "$d/$f"; done', SESSION_REPO_DOCS, ...REPO_DOC_NAMES);
+  if (cleared) return cleared;
+  for (const name of REPO_DOC_NAMES) {
+    const text = docs[name];
+    if (text == null) continue;
+    const file = `${SESSION_REPO_DOCS}/${name}`;
+    const put = await execWs(env.db, env.api, workspaceId, ["put", file], { tool: "checkpoint", args: { repo_docs: "put", bytes: Buffer.byteLength(text) }, stdin: Buffer.from(text), timeoutMs: 120_000, touch: true }, env.now);
+    if (put.header?.kind !== "ok") return `put ${name}: ${put.error ?? describeHeader(put.header)}`;
+    const ro = await run("protect", 'chmod 0444 "$1"', file);
+    if (ro) return ro;
+  }
+  return null;
 }
 
 /**
@@ -288,10 +304,13 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
   /** Files each turn's tree held, for a fresh session's history note. */
   const filesOf = new Map<number, string[]>();
   const history: HistoryTurn[] = [];
-  for (const t of await turnsOf(db, s.id)) {
+  const earlier = await turnsOf(db, s.id);
+  for (const t of earlier) {
     const h = historyTurn(roundOf(t).result, []);
     if (h && t.outcome !== "queued") history.push(h);
   }
+  // The commit of the session's last task: a review in the session's workspace moves the workspace, not what the session was told.
+  const toldHead = earlier.at(-1)?.head ?? null;
   const done = (o: StepResult, workspaceId: number | null): StepOutcome => ({ ...o, session: s, workspaceId, turns, checks });
   const reload = async (): Promise<boolean> => {
     const now = (await loadSessions(db, [s.id])).get(s.id);
@@ -356,8 +375,8 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
   // Contributor code runs in the pod, so the maintainers' rules are written again before every turn.
   let agents: string | null | undefined;
   const docs = async (): Promise<void> => {
-    if (agents === undefined) agents = await (env.agents ?? ((repo) => defaultAgents(db, repo)))(s.repo);
-    const bad = await putRepoDocs(env, ws.workspaceId, agents);
+    if (agents === undefined) agents = await (env.agents ?? (async (repo) => (await defaultRepoDocs(db, repo, ["AGENTS.txt"]))["AGENTS.txt"] ?? null))(s.repo);
+    const bad = await putRepoDocs(env, ws.workspaceId, { "AGENTS.txt": agents });
     if (bad) env.log(`fix session ${s.id}: the repository's AGENTS.md was not put in the workspace (${bad})`);
   };
 
@@ -365,7 +384,7 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
   const deps = dependencyNote(ws.dependencies);
   const opening = async (): Promise<Next> => spec.lint ? { purpose: "lint", message: spec.lint.message + deps } : ({
     purpose: "step",
-    message: spec.message({ moved: ws.moved ? { from: ws.moved.from, diffStat: await env.movedStat?.(ws.moved.from, ws.moved.to).catch(() => "") ?? "" } : null }) + deps,
+    message: spec.message({ moved: toldHead && toldHead !== spec.head ? { from: toldHead, diffStat: await env.movedStat?.(toldHead, spec.head).catch(() => "") ?? "" } : null }) + deps,
   });
   let next: Next | null = round ? null : await opening();
   let misses = 0, retryOf: number | null = null;

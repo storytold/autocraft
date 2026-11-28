@@ -54,6 +54,8 @@ export type OpusPr = {
   repo_dir?: string;
   /** Set when the repo's reference folder is mounted at /reference; not part of the quoted JSON. */
   reference?: boolean;
+  /** Set when the call works in the pull request's workspace pod (askClaude's WorkspaceAsk); not part of the quoted JSON. */
+  workspace?: boolean;
   /** Set for an item on the maintainer workflow: the prompt asks for titled parts, `major`, `outside_purpose` and `recommendation`. Not part of the quoted JSON. */
   workflow?: boolean;
   /** Set when a maintainer approved the PR for merge: a delta after only our own commits looks for blocking problems only. Not part of the quoted JSON. */

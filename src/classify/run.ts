@@ -20,6 +20,9 @@ import { agentsDefinition, MCP_PATH } from "../sandbox/agents.ts";
 import { callLevel } from "../remote/level.ts";
 import { tierOfModel } from "../remote/mode.ts";
 import { awaitCall, enqueueCall, REFUSED_PREFIX, type Outcome } from "../remote/calls.ts";
+import type { CallDeps } from "../build/session-turns.ts";
+import { queueWorkspaceCall } from "../build/workspace-call.ts";
+import type { WorkspaceToolName } from "../build/workspace-tool-specs.ts";
 import { bundleMounts, checkoutCommit, REFERENCE_SERVER } from "../remote/bundle.ts";
 import { repoDocsFor, repoOfCheckout } from "../sandbox/repo-docs.ts";
 import { defaultWorkspace } from "../sandbox/workspace.ts";
@@ -347,6 +350,21 @@ export type AskOptions = {
   onRefused?: (error: string) => void;
   /** Called with the error of each remote call that failed (src/data/jobs lostCallError tells a lost one). */
   onFailed?: (error: string) => void;
+  /** User-local mode, for a prompt with a sandbox: the call works in this workspace instead of a checkout (WorkspaceAsk). */
+  workspace?: WorkspaceAsk;
+};
+
+/**
+ * A call that works in a workspace pod (a review in its pull request's fix session workspace): the tree is the workspace's, read
+ * and built with the workspace tools in `tools`, so there is no checkout, no shared repositories and no explorer. Its input carries
+ * `workspace: true`, which gives the prompt its workspace wording. `seconds` and `turns` are added to the prompt's limits for the
+ * builds and tests; `calls` replaces the queue and the wait in tests.
+ */
+export type WorkspaceAsk = {
+  workspaceId: number; tools: readonly WorkspaceToolName[]; seconds: number; turns: number;
+  /** The longest the first call waits in the queue (WaitLimitError past it), unless `firstWaitMs` says otherwise. */
+  firstWaitMs: number;
+  calls?: CallDeps;
 };
 
 /** The repo-docs directory for the item's repository, or undefined (no docs, or a checkout that is not one of ours). */
@@ -489,10 +507,12 @@ function remoteUsage(o: Extract<Outcome, { state: "done" }>, model: string): Ret
 async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: ClaudeInput[K], db: Db, opts: AskOptions): Promise<LintedReply | null | undefined> {
   const p = CLAUDE_PROMPTS[id];
   const ses = opts.session;
-  const at = opts.checkout !== undefined && p.sandbox !== undefined ? checkoutCommit(opts.checkout) : null;
-  const sandboxed = at !== null;
-  const docs = sandboxed && p.sandbox?.docs ? await docsOf(db, opts.checkout!) : undefined;
+  const pod = p.sandbox !== undefined && !ses ? opts.workspace : undefined;
+  const at = !pod && opts.checkout !== undefined && p.sandbox !== undefined ? checkoutCommit(opts.checkout) : null;
+  const sandboxed = at !== null || pod !== undefined;
+  const docs = at !== null && p.sandbox?.docs ? await docsOf(db, opts.checkout!) : undefined;
   if (docs) input = input.map((x) => ({ ...x, repo_docs: true })) as ClaudeInput[K];
+  if (pod) input = input.map((x) => ({ ...x, workspace: true })) as ClaudeInput[K];
   const reference = sandboxed && p.sandbox?.reference === true && opts.reference !== undefined;
   if (reference) input = input.map((x) => ({ ...x, reference: true })) as ClaudeInput[K];
   await ensurePrompts(db);
@@ -506,33 +526,45 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
   if (resume && (!sandboxed || parent === null || resume.session.checkout !== opts.checkout)) return undefined;
   // A resumed session goes on with the prompt it started with: its turns record that call's version.
   const version = resume ? (await loadCallPrompt(db, parent!))?.promptVersion ?? parts.version : parts.version;
-  const checkTool = sandboxed && opts.check !== undefined && p.sandbox?.check === true ? opts.check : undefined;
+  const checkTool = at !== null && opts.check !== undefined && p.sandbox?.check === true ? opts.check : undefined;
   try {
+    // Item tools come with the shared repositories; a workspace call has the item tools but neither the repositories nor the explorer.
     const workspace = sandboxed && p.sandbox?.workspace === true;
-    const shared = workspace ? opts.shared ?? await workspaceOf(db) : undefined;
+    const shared = workspace && !pod ? opts.shared ?? await workspaceOf(db) : undefined;
     const it = workspace ? opts.itemTools === undefined ? itemTools() : opts.itemTools : null;
     const servers = [...Object.keys(it?.mcpServers ?? {}), ...(checkTool ? [CHECK_SERVER] : []), ...(reference ? [REFERENCE_SERVER] : [])].sort();
     const persist = sandboxed && ((opts.lint !== undefined && p.lint === true) || checkTool !== undefined || ses !== undefined);
-    const args = claudeArgs(id, model, sandboxed, servers.length ? { config: MCP_PATH, servers } : undefined, parts.system, false, persist, docs !== undefined);
-    const agents = workspace ? JSON.stringify(agentsDefinition(Object.keys(it?.mcpServers ?? {}).sort())) : undefined;
+    const args = pod ? [] : claudeArgs(id, model, sandboxed, servers.length ? { config: MCP_PATH, servers } : undefined, parts.system, false, persist, docs !== undefined);
+    const agents = workspace && !pod ? JSON.stringify(agentsDefinition(Object.keys(it?.mcpServers ?? {}).sort())) : undefined;
     const mounts = at ? await bundleMounts(db, at, items, shared, docs) : [];
-    const timeoutSeconds = p.limits.timeoutSeconds + (checkTool ? CHECK_MAX_WALL_MS / 1000 : 0);
+    const timeoutSeconds = p.limits.timeoutSeconds + (checkTool ? CHECK_MAX_WALL_MS / 1000 : 0) + (pod?.seconds ?? 0);
     const tier = tierOfModel(model);
     const level = await callLevel(db, items[0]);
 
+    /** The call of a turn queued on the workspace (queueWorkspaceCall binds it to the workspace); `lean` allows no tool. */
+    const queueInPod = async (w: WorkspaceAsk, stdin: string, after: number | null, lean: boolean): Promise<number> => await (w.calls?.queue ?? queueWorkspaceCall)(db, {
+      workspaceId: w.workspaceId, promptId: id, promptVersion: version, model, tier, effort: p.effort, stdin, system: parts.system, timeoutSeconds,
+      maxTurns: lean ? FIX_TURN_MAX_TURNS : p.sandbox!.maxTurns + w.turns, items, level, maxAttempts: p.limits.attempts, servers, keepSession: persist, tools: lean ? [] : w.tools,
+      ...(reference && { referenceRepo: basename(opts.reference!) }), ...(after !== null && { parentId: after }), ...(opts.forLogin !== undefined && { forLogin: opts.forLogin }),
+    });
+
     /** One remote turn: the first message, or with `after` a follow-up on the session of that call. The reference folder is named after its repo (referenceDir). */
     const turn = async (stdin: string, after: number | null, lean = false, first = false): Promise<{ reply: Turned; callId: number } | "failed" | "unclaimed"> => {
-      const maxWaitMs = first && opts.firstWaitMs !== undefined ? Math.min(opts.firstWaitMs, opts.maxWaitMs ?? Infinity) : opts.maxWaitMs;
-      const callId = await enqueueCall(db, {
+      const firstWaitMs = opts.firstWaitMs ?? pod?.firstWaitMs;
+      const maxWaitMs = first && firstWaitMs !== undefined ? Math.min(firstWaitMs, opts.maxWaitMs ?? Infinity) : opts.maxWaitMs;
+      const sent = stdin === parts.stdin ? stdin : stripMarks(stdin);
+      const callId = pod ? await queueInPod(pod, sent, after, lean) : await enqueueCall(db, {
         promptId: id, promptVersion: version, tier, effort: p.effort, askedModel: model, items, level, maxAttempts: p.limits.attempts, ...(after !== null && { parentId: after }), ...(reference && { referenceRepo: basename(opts.reference!) }), ...(opts.forLogin !== undefined && { forLogin: opts.forLogin }),
         bundle: {
           promptId: id, promptVersion: version, tier, effort: p.effort, timeoutSeconds, maxTurns: sandboxed ? (lean ? FIX_TURN_MAX_TURNS : p.sandbox!.maxTurns) : null,
-          stdin: stdin === parts.stdin ? stdin : stripMarks(stdin), system: parts.system, mounts, mcpServers: servers, keepSession: persist, ...(after !== null && { resume: { parentCallId: after } }),
+          stdin: sent, system: parts.system, mounts, mcpServers: servers, keepSession: persist, ...(after !== null && { resume: { parentCallId: after } }),
           // The task budget is added when a Task Runner takes the call, for a Claude Code that takes the flag (forHarness).
           hints: { claude: { args: withoutTaskBudget(lean ? noToolArgs(args) : args), ...(agents && { agents }) } },
         },
       });
-      const o = await awaitCall(db, callId, { ...(opts.onProgress && { onProgress: opts.onProgress }), ...(maxWaitMs !== undefined && { maxWaitMs }), ...(checkTool && { check: checkTool }) });
+      // A workspace call's tool calls are served while it is awaited (src/build/workspace-relay.ts).
+      const o = pod?.calls ? await pod.calls.await(db, callId, { log: opts.onProgress ?? (() => {}), maxWaitMs: maxWaitMs ?? Infinity })
+        : await awaitCall(db, callId, { ...(opts.onProgress && { onProgress: opts.onProgress }), ...(maxWaitMs !== undefined && { maxWaitMs }), ...(checkTool && { check: checkTool }) });
       if (o.state === "unclaimed") return "unclaimed";
       if (o.state === "failed") {
         if (o.runId !== null) await finishRun(db, o.runId, { state: "failed", ...(o.tokens && { tokens: o.tokens }), error: scrubError(o.error), summary: "failed" });

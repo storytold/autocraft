@@ -25,6 +25,7 @@ import { ourCommitsSince } from "./ours.ts";
 import { relatedStatements } from "../memory/retrieve.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForPr } from "../sandbox/index.ts";
+import { defaultReviewWorkspace, inReviewWorkspace, type ReviewWorkspaceDeps } from "../fixsession/review.ts";
 import { referenceDir } from "../reference.ts";
 import { defaultSemanticDeps, type SemanticDeps } from "../reference-lint.ts";
 import { jobItem } from "../runner/job-items.ts";
@@ -78,6 +79,8 @@ export type OpusDeps = {
   semantic?: SemanticDeps;
   /** The PR's own diffs at two heads, for the review round; absent: unavailable, so the round reviews the whole diff where it fits. */
   ownDiffs?: OwnDiffReader;
+  /** Where a review can run in the PR's fix session workspace (src/fixsession/review.ts); absent: always read-only. */
+  workspace?: ReviewWorkspaceDeps | null;
 };
 export type OpusSummary = {
   runId: string; repo: string; candidates: number; reviewed: number; dropped: number;
@@ -90,7 +93,7 @@ const now = () => new Date().toISOString();
 const refOf = (c: { repo: string; number: number }) => `${c.repo}#${c.number}`;
 
 export function defaultOpusDeps(): OpusDeps {
-  return { querier: new Client(500), fetchDiff: ghDiff, fetchDelta: ghDelta, model: PROMPT.models[0]!, maxChars: MAX_DIFF_CHARS, checkout: (r, n, h) => checkoutForPr(r, n, h, console.log), ownDiffs: roundOwnDiffs };
+  return { querier: new Client(500), fetchDiff: ghDiff, fetchDelta: ghDelta, model: PROMPT.models[0]!, maxChars: MAX_DIFF_CHARS, checkout: (r, n, h) => checkoutForPr(r, n, h, console.log), ownDiffs: roundOwnDiffs, workspace: defaultReviewWorkspace() };
 }
 
 type Saved = { snap?: Snapshot; mode: "full" | "delta" | "carried"; base: string | null; model: string | null; review: OpusReview;
@@ -415,18 +418,20 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
       return;
     }
     const { input, snap, mode, base, baseRef } = p;
-    const checkout = (await deps.checkout?.(repo, c.number, c.head_oid)) ?? undefined;
-    if (checkout) input.repo_dir = REPO_PATH;
     input.workflow = true;
     const dir = referenceDir(repo);
     const semantic = dir ? deps.semantic ?? defaultSemanticDeps(db, input.ref) : undefined;
-    const r = await runModelStep(db, REVIEW_OPUS, input, {
-      model: deps.model, checkout, reference: checkout ? dir : undefined, ctx: { dir, semantic },
-      usage: { run: runId, agent: `opus-${refOf(c).replace("#", "-")}`, stage: "review", items: (ok) => (ok ? 1 : 0) },
-      onReply: (reply) => {
-        if (reply.fixTurn) log(`  ${refOf(c)}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`);
-        else if (reply.problems?.length) log(`  ${refOf(c)}: reply lint: ${reply.problems.length} problems, no fix turn possible`);
-      },
+    const r = await inReviewWorkspace(db, deps.workspace, c, c.head_oid, log, async (workspace) => {
+      const checkout = workspace ? undefined : (await deps.checkout?.(repo, c.number, c.head_oid)) ?? undefined;
+      if (checkout) input.repo_dir = REPO_PATH;
+      return await runModelStep(db, REVIEW_OPUS, input, {
+        model: deps.model, checkout, reference: checkout || workspace ? dir : undefined, ...(workspace && { workspace }), ctx: { dir, semantic },
+        usage: { run: runId, agent: `opus-${refOf(c).replace("#", "-")}`, stage: "review", items: (ok) => (ok ? 1 : 0) },
+        onReply: (reply) => {
+          if (reply.fixTurn) log(`  ${refOf(c)}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`);
+          else if (reply.problems?.length) log(`  ${refOf(c)}: reply lint: ${reply.problems.length} problems, no fix turn possible`);
+        },
+      });
     });
     let got: OpusReview | null = r.ok ? r.value.review : null;
     const gotText = r.ok ? r.value.text : "";

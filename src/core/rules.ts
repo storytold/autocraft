@@ -168,6 +168,17 @@ export function unsentAsk(ats: readonly string[], nowMs: number, delays: readonl
 /** Setting that holds the pipeline account's login, recorded wherever the pipeline pushes as that account. */
 export const PIPELINE_LOGIN_KEY = "pipeline_login";
 
+/**
+ * A review in its pull request's fix session workspace (src/fixsession/review.ts): the longest it waits for the workspace to get
+ * ready, and for a workspace slot within that, before it runs read-only; and the time its call gets beyond the prompt's limit for
+ * the builds and tests it runs.
+ */
+export const REVIEW_WORKSPACE_READY_MS = 10 * 60_000;
+export const REVIEW_WORKSPACE_SLOT_MS = 60_000;
+export const REVIEW_WORKSPACE_BUILD_MS = 40 * 60_000;
+/** The longest such a review's call waits in the queue for a Task Runner that runs workspace calls before the review runs read-only. */
+export const REVIEW_WORKSPACE_QUEUE_MS = 30 * 60_000;
+
 /** Build-tool (check) calls one patch-writing model call may make, and the wall time they may take in all. */
 export const CHECK_MAX_CALLS = 6;
 export const CHECK_MAX_WALL_MS = 45 * 60_000;

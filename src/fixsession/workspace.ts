@@ -123,7 +123,7 @@ export async function fixSessionEnv(db: Db, kind: FixSessionKind): Promise<strin
  * ready, or when the session ended meanwhile. The FIX_START_FAILURES-th workspace at `at` that fails to start fails the step
  * (`failed`); after that none is made at `at` (a wait) until a kubernetes environment changes.
  */
-export async function ensureWorkspace(session: FixSession, at: string, env: FixWorkspaceEnv, o: { keepTree?: boolean } = {}): Promise<WorkspaceReady | WorkspaceWait | WorkspaceFailed> {
+export async function ensureWorkspace(session: FixSession, at: string, env: FixWorkspaceEnv, o: { keepTree?: boolean; patience?: ReadyPatience } = {}): Promise<WorkspaceReady | WorkspaceWait | WorkspaceFailed> {
   if (!SHA.test(at)) throw new Error(`not a commit: ${at}`);
   const db = env.db;
   const now = env.now ?? Date.now;
@@ -176,7 +176,7 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
 
   let row: WorkspaceRow;
   for (;;) {
-    const ready = await readyRow(env, id!);
+    const ready = await readyRow(env, id!, o.patience);
     if ("pending" in ready) return pending(ready.pending);
     if ("lost" in ready) {
       if (made) {
@@ -223,11 +223,16 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
   return { kind: "ready", workspaceId: id!, baseCommit, how, why, moved, dependencies, ended, treeLost };
 }
 
+/** How long a caller waits for its workspace: in all (`limitMs`), and for a workspace slot (state requested) (`slotMs`). */
+export type ReadyPatience = { limitMs: number; slotMs: number };
+const STEP_PATIENCE: ReadyPatience = { limitMs: READY_LIMIT_MS, slotMs: READY_LIMIT_MS };
+
 /**
  * The ready row of workspace `id`, resuming it when parked. `lost`: it will not be ready (gone, failed or ended, or parked and out of
- * resumes); `pending`: it is still waiting for a slot or starting after READY_LIMIT_MS (an external wait, Workspace start).
+ * resumes); `pending`: it is still waiting for a slot or starting past the patience (READY_LIMIT_MS for a step; an external wait,
+ * Workspace start).
  */
-async function readyRow(env: FixWorkspaceEnv, id: number): Promise<WorkspaceRow | { lost: string } | { pending: string }> {
+async function readyRow(env: FixWorkspaceEnv, id: number, patience: ReadyPatience = STEP_PATIENCE): Promise<WorkspaceRow | { lost: string } | { pending: string }> {
   const now = env.now ?? Date.now;
   const from = now();
   for (let last = "";;) {
@@ -236,7 +241,10 @@ async function readyRow(env: FixWorkspaceEnv, id: number): Promise<WorkspaceRow 
     if (w.state === "ready") return w;
     if (w.state === "parked" && !await resumeWorkspace(env.db, id, now())) return { lost: `workspace ${id} is parked and could not be resumed${w.error ? `: ${w.error}` : ""}` };
     if (!LIVE_STATES.includes(w.state as WorkspaceStateName)) return { lost: `workspace ${id} is ${w.state}${w.error ? `: ${w.error}` : ""}` };
-    if (now() - from > READY_LIMIT_MS) return { pending: `workspace ${id} is still ${w.state} after ${Math.round(READY_LIMIT_MS / 60_000)} min` };
+    const waited = now() - from;
+    if (waited > patience.limitMs || (w.state === "requested" && waited > patience.slotMs)) {
+      return { pending: `workspace ${id} is still ${w.state === "requested" ? "waiting for a slot" : w.state} after ${Math.max(1, Math.round(waited / 60_000))} min` };
+    }
     if (await env.cancelled?.()) throw new WorkspaceUnavailable("cancelled while the workspace started", false);
     if (w.state !== last) {
       last = w.state;

@@ -2,7 +2,7 @@
 // prompt's time limit, times its attempts, plus the check tool's wall time for a patch call and a turn for each lint round,
 // times the items of the job. The registry's `maxMin` (src/stages/registry.ts) is the floor from the history of finished jobs;
 // the deadline is the larger of the two, so a job is never stopped while the code would still let it work.
-import { CHECK_MAX_WALL_MS, LINT_MAX_ROUNDS } from "../core/rules.ts";
+import { CHECK_MAX_WALL_MS, LINT_MAX_ROUNDS, REVIEW_WORKSPACE_BUILD_MS, REVIEW_WORKSPACE_READY_MS } from "../core/rules.ts";
 import { CLAUDE_PROMPTS, type ClaudePromptId } from "../prompts/index.ts";
 import { AREAS_MAX, FINDINGS_PER_AREA_MAX } from "../security/rules.ts";
 import { stepMaxMin } from "../stages/registry.ts";
@@ -10,8 +10,8 @@ import { stepMaxMin } from "../stages/registry.ts";
 /** How long a part of the runner's work fails before it counts as failing (the health check, and which failure it shows). */
 export const RUNNER_FAILING_MS = 60_000;
 
-/** One call per item. `lint`: follow-up turns of the same call (one per lint round). */
-type Call = { id: ClaudePromptId; lint?: boolean };
+/** One call per item. `lint`: follow-up turns of the same call (one per lint round). `workspace`: a review that may run in its PR's workspace. */
+type Call = { id: ClaudePromptId; lint?: boolean; workspace?: boolean };
 /** `items`: the job's items when its params have no `limit`. */
 type Plan = { calls: Call[]; items: number };
 
@@ -27,9 +27,9 @@ export const STEP_PLANS: Record<string, Plan> = {
   conversation: { calls: [item("conversation.turn")], items: 30 },
   "areas-propose": { calls: [item("areas.propose")], items: 1 },
   "areas-suggest": { calls: [item("areas.suggest")], items: 1 },
-  "opus-review": { calls: [item("review.opus")], items: 10 },
-  premerge: { calls: [item("premerge.opus")], items: 10 },
-  postmerge: { calls: [item("postmerge.opus")], items: 10 },
+  "opus-review": { calls: [{ id: "review.opus", workspace: true }], items: 10 },
+  premerge: { calls: [{ id: "premerge.opus", workspace: true }], items: 10 },
+  postmerge: { calls: [{ id: "postmerge.opus", workspace: true }], items: 10 },
   fixup: { calls: [item("fixup.patch", true), item("fixup.conflict", true)], items: 5 },
   cifix: { calls: [item("cifix.patch", true)], items: 5 },
   "main-fix": { calls: [item("mainfix.classify"), item("cifix.patch", true)], items: 1 },
@@ -41,12 +41,16 @@ export const STEP_PLANS: Record<string, Plan> = {
   "security-fix": { calls: [item("security.fix", true), item("security.fixcheck")], items: 1 },
 };
 
-/** Minutes one call can take: each attempt runs the first turn and the lint follow-ups at the prompt's time limit, and a patch call adds the check tool's wall time. */
+/**
+ * Minutes one call can take: each attempt runs the first turn and the lint follow-ups at the prompt's time limit, a patch call adds the
+ * check tool's wall time, and a review in its PR's workspace its build time; that review also waits for the workspace once.
+ */
 function callMin(c: Call): number {
   const p = CLAUDE_PROMPTS[c.id];
   const turns = 1 + (c.lint ? LINT_MAX_ROUNDS : 0);
   const check = "sandbox" in p && p.sandbox && "check" in p.sandbox && p.sandbox.check ? CHECK_MAX_WALL_MS / 60_000 : 0;
-  return p.limits.attempts * (turns * p.limits.timeoutSeconds / 60 + check);
+  const build = c.workspace ? REVIEW_WORKSPACE_BUILD_MS / 60_000 : 0;
+  return p.limits.attempts * (turns * p.limits.timeoutSeconds / 60 + check + build) + (c.workspace ? REVIEW_WORKSPACE_READY_MS / 60_000 : 0);
 }
 
 /** The longest the code lets a job of `step` work with `items` items (default: the plan's), in minutes, or null for a step with no model call. */
