@@ -364,6 +364,29 @@ test("a started PR that is not approved comes back with the review's recommendat
   assert.deepEqual([wf.state, wf.rec?.text, wf.rec?.parts.fix, wf.rec?.merges, wf.plan.map((p) => p.title)], ["recommending", "Fix 1, then merge.", [1], true, ["guard empty input", "typo"]]);
 });
 
+test("a hold that plans no fix and gave no recommendation comes back with its finding and the backlog, and a yes runs no review of the head again", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  await w.pr(2, { label: "feature" });
+  const on = (text: string) => runCommand(db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: 2 }] });
+  assert.equal((await on("review")).items[0]!.outcome, "run");
+  await db.run(db.k.insertInto("main.opus_reviews").values({
+    repo: "app", number: 2, head_oid: "sha2", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r",
+    public_review: JSON.stringify({ summary: "The group editor the description promises is not built.", points: [] }),
+    workflow: JSON.stringify({ outside_purpose: null, recommendation: null, hold: { class: "off-purpose", why: "Most of the promised UI is missing." } }),
+  }));
+  await advanceWorkflows(db);
+  const rec = (await liveWorkflow(db, "app", 2))!.rec!;
+  assert.ok(rec.text.includes("group editor") && !/again/i.test(rec.text), rec.text);
+  assert.equal(rec.again, undefined);
+  const stale = () => db.all(db.k.selectFrom("main.review_state").select("stale_at").where("number", "=", 2));
+  const before = await stale();
+  assert.equal((await on("yes")).items[0]!.outcome, "run");
+  await advanceWorkflows(db);
+  assert.equal((await workflowHistory(db, "app", 2)).at(-1)!.state, "backlog");
+  assert.deepEqual(await stale(), before, "the review of the head is not asked for again");
+});
+
 test("a recommendation's fix numbers follow the stored fixes, not the model's list", () => {
   const reply = JSON.stringify({
     ref: "app#1", verdict: "take-fix", sure: true, reason: "two fixes", risks: [],

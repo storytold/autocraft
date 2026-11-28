@@ -241,8 +241,11 @@ export function parsePublic(v: unknown, drop: ReadonlySet<string> = new Set()): 
  * `blocking`: whether it stops the merge of a PR a maintainer approved (class null: it does not, and is filed as a follow-up instead of made); absent counts as blocking.
  */
 export type ReviewFix = { file: string; change: string; title?: string; major?: boolean; blocking?: Blocking };
-/** What the review recommends: one sentence, and what a yes runs (the fixes it makes, by number from 1; whether it then merges or closes). */
-export type ReviewRecommendation = { text: string; fix: number[]; merge: boolean; close: boolean };
+/**
+ * What the review recommends: one sentence, and what a yes runs (the fixes it makes, by number from 1; whether it then merges or closes;
+ * `backlog`: it keeps the item open with no work planned, for a hold whose next step is a person's or the author's).
+ */
+export type ReviewRecommendation = { text: string; fix: number[]; merge: boolean; close: boolean; backlog?: true };
 /** Lines the change has outside what the pull request sets out to do, and the review's one recommendation. */
 export type ReviewWorkflow = {
   /** `checked`: the note passed the reference and reply checks when it was parsed; a note stored without it is never filed. */
@@ -271,15 +274,16 @@ export function parseReviewWorkflow(r: Record<string, unknown>, partOf: (n: numb
   // The note may be filed in the PR's public follow-up issue: one that leaks the reference or that the reply checks flagged (`drop`) is not kept.
   const note = lines && typeof o!.note === "string" && !REFERENCE_LEAK.test(o!.note) && !drop.has(o!.note) ? o!.note : "";
   const outside = lines ? { lines, note: note.replace(/\s+/g, " ").trim().slice(0, OUTSIDE_NOTE_CHARS), checked: true as const } : null;
-  const x = r.recommendation as { text?: unknown; fix?: unknown; merge?: unknown; close?: unknown } | null | undefined;
+  const x = r.recommendation as { text?: unknown; fix?: unknown; merge?: unknown; close?: unknown; backlog?: unknown } | null | undefined;
   const text = x && typeof x === "object" && typeof x.text === "string" && x.text.trim() && !REFERENCE_LEAK.test(x.text) ? firstSentence(x.text.replace(/\s+/g, " ").trim()).slice(0, RECOMMENDATION_CHARS) : null;
   const named = text && Array.isArray(x!.fix) ? [...new Set(x!.fix)] : [];
   const fix = named.map((n) => (Number.isInteger(n) ? partOf(n as number) : null));
   const close = !!text && x!.close === true && !named.length;
-  const merge = !!text && !close && x!.merge === true;
-  const usable = keepRec && !!text && fix.every((n) => n !== null) && (fix.length > 0 || merge || close);
+  const backlog = !!text && !close && x!.backlog === true && !named.length && x!.merge !== true;
+  const merge = !!text && !close && !backlog && x!.merge === true;
+  const usable = keepRec && !!text && fix.every((n) => n !== null) && (fix.length > 0 || merge || close || backlog);
   const exact = fix.every((n, i) => n === named[i]);
-  const rec = usable ? { text: exact ? text! : "", fix: fix as number[], merge, close } : null;
+  const rec = usable ? { text: exact ? text! : "", fix: fix as number[], merge, close, ...(backlog ? { backlog: true as const } : {}) } : null;
   const a = r.author_commits as { in_scope?: unknown; note?: unknown } | null | undefined;
   const author = a && typeof a === "object" && typeof a.in_scope === "boolean"
     ? { in_scope: a.in_scope, note: typeof a.note === "string" ? a.note.replace(/\s+/g, " ").trim().slice(0, OUTSIDE_NOTE_CHARS) : "" } : null;

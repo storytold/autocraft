@@ -62,6 +62,8 @@ export type Recommendation = {
   merges: boolean;
   /** A yes closes the item (the review says close); no parts are fixed and nothing merges. */
   close?: boolean;
+  /** A yes sends the item to the backlog: it stays open with no work planned (a hold whose next step is a person's or the author's). */
+  backlog?: true;
   /** How a yes closes the item, where the review says (an issue review's close). */
   closeAs?: CloseReason;
   /** An issue review's recommendation other than a close (src/issuereview): a yes implements the issue, sends it to the backlog, or asks its reporter `question`. */

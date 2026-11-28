@@ -47,11 +47,12 @@ const fixText = (fix: readonly number[], merges: boolean): string => (merges
   : t("Fix {parts}, then come back with the result.", { parts: listText(fix) }));
 
 /** The sentence for what a yes runs, when the review's own sentence does not say it. */
-export function textFor(r: { fix: readonly number[]; merges: boolean; close?: boolean; again?: "review" | "fixup" }): string {
+export function textFor(r: { fix: readonly number[]; merges: boolean; close?: boolean; backlog?: boolean; again?: "review" | "fixup" }): string {
   if (r.close) return t("Close it, as the review recommends.");
+  if (r.backlog) return t("Put it in the backlog.");
   if (r.fix.length) return fixText(r.fix, r.merges);
   if (r.again === "review") return r.merges ? t("Review it again, then merge.") : t("Review it again, then come back with the result.");
-  return r.merges ? t("Merge it.") : t("Review it again, then come back with the result.");
+  return r.merges ? t("Merge it.") : t("Leave it as it is.");
 }
 
 /** The planned parts of the review's fixes that nobody makes, dropped: the merge goes on without them. */
@@ -83,7 +84,7 @@ const ON_CONFLICT: Record<Exclude<ConflictPath, "merge">, (text: string) => stri
  * merge and waits for them: it runs nothing that could ask the same again. A PR with no review to go on from is reviewed again.
  */
 export function onConflict(rec: Recommendation, conflict: Conflict | null): Recommendation {
-  if (!conflict || rec.close || rec.answer) return rec;
+  if (!conflict || rec.close || rec.backlog || rec.answer) return rec;
   const { path } = conflict, fixes = rec.parts.fix.length > 0 || rec.again === "fixup";
   if (path === null) return fixes ? { text: textFor({ fix: [], merges: rec.merges, again: "review" }), parts: { fix: [], drop: rec.parts.drop }, merges: rec.merges, again: "review" } : rec;
   if (!fixes && !rec.merges) return rec;
@@ -98,14 +99,15 @@ export function onConflict(rec: Recommendation, conflict: Conflict | null): Reco
 /**
  * What the item comes back with when its steps are done and the merge is not approved: the review's recommendation when it gave
  * one (without the parts a person dropped; its sentence written again when the parts changed), else one built from its verdict: fix
- * the planned parts then merge, merge, close, or review again. A yes always runs something. `stop`: what the PR ran into besides the
+ * the planned parts then merge, merge, close, or, for a hold that plans no fix, the backlog. The review covers the head, so the item
+ * never comes back with a review of that head again. A yes always runs something. `stop`: what the PR ran into besides the
  * review (unapprovedStop), which the sentence names.
  */
 export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[], stop: keyof typeof STOPS | null = null, conflict: Conflict | null = null): Recommendation {
   const rec = onConflict(withFinding(recommended(review, plan), review?.finding ?? null), conflict);
   // Where the sentence is already about the conflict and who settles it, it is not said twice.
   const said = stop === "conflict" && !!conflict?.path && conflict.path !== "merge" && rec.merges;
-  return stop && !rec.close && !said ? { ...rec, text: STOPS[stop](rec.text) } : rec;
+  return stop && !rec.close && !rec.backlog && !said ? { ...rec, text: STOPS[stop](rec.text) } : rec;
 }
 
 function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Recommendation {
@@ -113,19 +115,29 @@ function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Reco
   const rec = review?.rec;
   if (rec) {
     if (rec.close) return { text: rec.text || textFor({ fix: [], merges: false, close: true }), parts: { fix: [], drop }, merges: false, close: true };
+    if (rec.backlog) return { text: rec.text || textFor({ fix: [], merges: false, backlog: true }), parts: { fix: [], drop }, merges: false, backlog: true };
     const fix = rec.fix.filter((n) => !drop.includes(n));
     // A person dropped every part the review wanted fixed: the rule below decides what is left.
-    if (!rec.fix.length || fix.length) {
-      const out: Recommendation = { text: "", parts: { fix, drop }, merges: rec.merge, ...(fix.length || rec.merge ? {} : { again: "review" as const }) };
-      return { ...out, text: rec.text && fix.length === rec.fix.length ? rec.text : textFor({ fix, merges: rec.merge, ...(out.again ? { again: out.again } : {}) }) };
+    if (fix.length || (!rec.fix.length && rec.merge)) {
+      return { text: rec.text && fix.length === rec.fix.length ? rec.text : textFor({ fix, merges: rec.merge }), parts: { fix, drop }, merges: rec.merge };
     }
   }
   const fix = planned(plan);
   if (review?.verdict === "close") return { text: textFor({ fix: [], merges: false, close: true }), parts: { fix: [], drop }, merges: false, close: true };
-  if (review && (review.verdict === "hold" || !review.sure) && !fix.length) {
-    return { text: textFor({ fix: [], merges: false, again: "review" }), parts: { fix: [], drop }, merges: false, again: "review" };
-  }
+  if (review?.verdict === "hold" && !fix.length) return held(review.finding ?? null, drop);
+  // An unsure take with nothing to fix asks whether to merge it: the person's yes is the judgement the review could not make.
   return { text: textFor({ fix, merges: true }), parts: { fix, drop }, merges: true };
+}
+
+/**
+ * A hold that plans no fix: the item goes to the backlog, open with no work planned. What it waits for (the scope a maintainer settles,
+ * the rest the author builds, other items) is not AutoCraft's to do; any command starts it again, and a bare fix makes the fix-up build
+ * what the review found (`finding`, withFinding).
+ */
+function held(finding: string | null, drop: number[]): Recommendation {
+  const said = finding?.trim() ? asSentence(clipText(finding.trim(), FINDING_CHARS)) : null;
+  const text = said ? t("The review holds it: {finding} Put it in the backlog.", { finding: said }) : t("The review holds it. Put it in the backlog.");
+  return { text, parts: { fix: [], drop }, merges: false, backlog: true };
 }
 
 /** Characters of a review's finding a bare fix hands the fix-up (the instructions take at most INSTRUCTIONS_MAX). */

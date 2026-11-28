@@ -258,8 +258,8 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   }
   // Only drops, while a recommendation is open: the recommendation without those parts, as a yes would run it.
   if (rec && drop.length && !fix.length && !entry && !instruction) {
-    // A close drops nothing: dropping parts of it could mean "close anyway" or "don't close".
-    if (rec.close) return ambiguous({ why: "conflict", words: ["close", ...named.map((p) => `drop ${p.part}`)] });
+    // A close or backlog drops nothing: dropping parts of it could mean "go ahead anyway" or "don't".
+    if (rec.close || rec.backlog) return ambiguous({ why: "conflict", words: [rec.close ? "close" : "backlog", ...named.map((p) => `drop ${p.part}`)] });
     if (merge && state.reviewFailed) return withoutReview(wf, drop, weight);
     const left = rec.parts.fix.filter((n) => !drop.includes(n));
     return accept(wf, left, [...new Set([...rec.parts.drop, ...drop])], weight, merge);
@@ -332,7 +332,7 @@ const goOn = (held: ItemWorkflow, weight: number | null): Resolved => {
 };
 
 /** A recommendation that fixes, runs, answers, closes and merges nothing: a yes to it would do nothing. */
-const runsNothing = (r: NonNullable<ItemWorkflow["rec"]>): boolean => !r.parts.fix.length && !r.again && !r.answer && !r.close && !r.merges && !r.goes && !r.issue;
+const runsNothing = (r: NonNullable<ItemWorkflow["rec"]>): boolean => !r.parts.fix.length && !r.again && !r.answer && !r.close && !r.backlog && !r.merges && !r.goes && !r.issue;
 
 /**
  * The word merge where the review failed for good at the head: the PR starts at the merge queue without that review, unless an earlier
@@ -356,6 +356,7 @@ function withoutReview(wf: ItemWorkflow, drop: number[], weight: number | null):
 function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number | null, merge = false): Resolved {
   const rec = wf.rec!;
   if (rec.close && !fix.length && !merge) return run({ end: "close", ...(rec.closeAs && { close: rec.closeAs }), how: "answered", answers: true, weight });
+  if (rec.backlog && !fix.length && !merge) return run({ end: "backlog", how: "answered", answers: true, weight });
   if (rec.issue && !fix.length && !merge) {
     switch (rec.issue.action) {
       case "implement": return run({ implements: true, how: "answered", answers: true, weight });

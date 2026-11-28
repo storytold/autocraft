@@ -158,7 +158,7 @@ function yesWhat(rec: Recommendation): string | null {
   const fix = rec.parts.fix;
   if (rec.close && !fix.length) return t("close it");
   if (rec.issue?.action === "implement") return t("implement it");
-  if (rec.issue?.action === "backlog") return t("put it in the backlog");
+  if ((rec.backlog || rec.issue?.action === "backlog") && !fix.length) return t("put it in the backlog");
   if (rec.issue?.action === "ask") return t("ask the reporter");
   if (rec.answer && !fix.length) return rec.answer.label ? t("go with “{option}”", { option: rec.answer.label }) : t("go on with the implementation");
   if (rec.waits && !rec.again) return t("approve the merge and wait");
@@ -174,7 +174,7 @@ function yesWhat(rec: Recommendation): string | null {
 export function yesClause(rec: Recommendation): string | null {
   const fix = rec.parts.fix;
   if (rec.close && !fix.length) return t("Reply to go ahead and close it.");
-  if (rec.issue?.action === "backlog") return t("Reply to go ahead and put it in the backlog.");
+  if ((rec.backlog || rec.issue?.action === "backlog") && !fix.length) return t("Reply to go ahead and put it in the backlog.");
   if (rec.issue?.action === "ask") return t("Reply to go ahead and ask the reporter; the issue is reviewed again after their answer.");
   if (rec.answer && !fix.length) {
     const what = yesWhat(rec)!;
@@ -191,7 +191,7 @@ export function yesClause(rec: Recommendation): string | null {
 /** What a yes to the recommendation runs, as the item header's next step ("fix 1, then merge"); null when it runs nothing. */
 export function yesNext(rec: Recommendation): string | null {
   const what = yesWhat(rec);
-  if ((rec.close && !rec.parts.fix.length) || (rec.waits && !rec.again) || rec.issue) return what;
+  if (((rec.close || rec.backlog) && !rec.parts.fix.length) || (rec.waits && !rec.again) || rec.issue) return what;
   return what ? (rec.merges ? t("{what}, then merge", { what }) : what) : rec.merges ? t("merge") : null;
 }
 

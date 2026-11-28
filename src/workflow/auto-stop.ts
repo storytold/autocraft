@@ -107,7 +107,7 @@ const withoutRow = (f: PrFacts): PrFacts => ({ ...f, workflow: null, endedWorkfl
 
 /** What a person reads of a recommendation and what a yes runs. */
 const said = (r: Recommendation | null, plan: readonly PlanPart[]): string =>
-  JSON.stringify(r && [r.text, r.stop ?? null, r.parts, r.merges, r.again ?? null, r.close ?? false, r.waits ?? null, plan]);
+  JSON.stringify(r && [r.text, r.stop ?? null, r.parts, r.merges, r.again ?? null, r.close ?? false, r.backlog ?? false, r.waits ?? null, plan]);
 
 /**
  * A rule row nobody answered, read again at the head its question was made at (`f`: the PR's facts there, its own row in them), as the

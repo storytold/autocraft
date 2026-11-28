@@ -170,7 +170,7 @@ const isAnswer = (p: Parsed): boolean => p.kind === "yes" || (p.kind === "comman
 /** What a yes to the workflow's open question runs, so that one yes may answer several alike questions. */
 function questionKind(wf: ItemWorkflow): string {
   const rec = openRecommendation(wf)!;
-  return JSON.stringify([wf.state, wf.blockerParams?.code ?? null, rec.merges, !!rec.close, rec.parts.fix.length > 0, rec.parts.drop.length > 0]);
+  return JSON.stringify([wf.state, wf.blockerParams?.code ?? null, rec.merges, !!rec.close, !!rec.backlog, rec.parts.fix.length > 0, rec.parts.drop.length > 0]);
 }
 
 async function focus(db: Db, keys: DiscordKeys, d: DoText, c: Conversation): Promise<Settled> {
