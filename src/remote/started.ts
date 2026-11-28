@@ -56,7 +56,8 @@ export type StartedCalls = {
   /**
    * The lowercase logins whose started work a call or job is: with `refs`, owners(refs); without (a job asked about before its
    * items are known), the logins with such a runner that have, in every one of `repos`, a live workflow AutoCraft is working
-   * on (running or waiting) whose steps include `step`'s task, or for the main-fix step that approved Fix red main there. No step: none.
+   * on (running or waiting) whose steps include `step`'s task (for the post-merge review step, or a PR whose workflow ended done through its
+   * merge lately), or for the main-fix step that approved Fix red main there. No step: none.
    */
   ownersFor: (c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; tier?: Tier }) => ReadonlySet<string>;
   /**
@@ -178,7 +179,10 @@ function buildStarted(v: RemoteView): StartedCalls {
     if (!first || rest.some((s) => !s)) return NONE;
     return new Set([...first].filter((l) => rest.every((s) => s!.has(l))));
   };
-  /** owners(refs) with `refs`; without, those of `logins` with a working live workflow in every repo whose steps include the step's task. */
+  /**
+   * owners(refs) with `refs`; without, those of `logins` with a working live workflow in every repo whose steps include the step's task, and
+   * for the post-merge review step also those with a PR in every repo whose workflow ended done through its merge within MERGED_WORK_MS.
+   */
   const startedBy = (logins: readonly string[], c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; tier?: Tier }): ReadonlySet<string> => {
     if (c.refs) return owners(c.refs, c.step, c.tier, c.repos);
     if (c.step === undefined || !c.repos.length) return NONE;
@@ -188,7 +192,8 @@ function buildStarted(v: RemoteView): StartedCalls {
     }
     const task = taskOfStep(c.step);
     const working = live.filter((w) => WORKING.has(w.state) && ENTRY_TASKS[w.entry as Entry]?.has(task));
-    return new Set(logins.filter((l) => c.repos.every((x) => working.some((w) => w.repo === x && peopleOf(w, c.tier).some((b) => b?.toLowerCase() === l)))));
+    const mergedIn = (l: string, repo: string): boolean => c.step === POSTMERGE_STEP && merged.some((p) => p.repo === repo && [p.started_by, p.approved_by].some((b) => b?.toLowerCase() === l));
+    return new Set(logins.filter((l) => c.repos.every((x) => working.some((w) => w.repo === x && peopleOf(w, c.tier).some((b) => b?.toLowerCase() === l)) || mergedIn(l, x))));
   };
   const deniedOn = (login: string, repos: readonly string[]): boolean => repos.some((x) => !canWrite(login, x));
   return {

@@ -143,14 +143,18 @@ export function loginWaitIn(v: RemoteView, c: TakerCall): { login: string; at: n
 /**
  * Whether a taker other than the runner token `exceptToken` (null: any) may take `c` on `c.tier` now: where a call that a
  * model's safety filter declined can run once more (calls.ts submitCall). A bound call counts only its user's runners and, for an
- * item workflow's bound work, the runners of a person who took it while its user's cannot run it (started.ts boundTakers).
+ * item workflow's bound work, the runners of a person who took it while its user's cannot run it (started.ts boundTakers); an unbound
+ * call also the runners of the people whose started work it is (StartedCalls.ownersFor).
  */
 export function tierTaker(v: RemoteView, c: TakerCall & { tier: Tier }, exceptToken: number | null): boolean {
-  const canWrite = canWriteOf(v.snapshot);
-  const logins = c.forLogin ? new Set([c.forLogin.toLowerCase(), ...(c.refs?.length ? startedOf(v).boundTakers({ prompt_id: c.prompt_id, refs: c.refs, forLogin: c.forLogin, tier: c.tier, refusedToken: exceptToken }) : [])]) : null;
+  const canWrite = canWriteOf(v.snapshot), s = startedOf(v);
+  const logins = c.forLogin ? new Set([c.forLogin.toLowerCase(), ...(c.refs?.length ? s.boundTakers({ prompt_id: c.prompt_id, refs: c.refs, forLogin: c.forLogin, tier: c.tier, refusedToken: exceptToken }) : [])]) : null;
+  // An unbound call also runs on a runner of the people whose started work it is, whatever their My repos, tasks or Manual only.
+  const owners = logins ? null : s.ownersFor({ repos: c.repos, ...(c.refs && { refs: c.refs }), ...(c.step !== undefined && { step: c.step }), tier: c.tier });
+  const asPerson = (r: Runner): boolean => roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x));
   return takersIn(v).some((r) => r.tokenId !== exceptToken && r.tiers.has(c.tier) && (logins
-    ? logins.has(r.login.toLowerCase()) && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x))
-    : autoTakes(r, c, canWrite)));
+    ? logins.has(r.login.toLowerCase()) && asPerson(r)
+    : autoTakes(r, c, canWrite) || (owners!.has(r.login.toLowerCase()) && asPerson(r))));
 }
 
 /** A key equal for two units exactly when the same users of `logins` take them under their item choices (task-items.ts); "" when none does. */

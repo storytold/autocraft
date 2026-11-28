@@ -12,7 +12,7 @@ import { parseStatus, STATUS_FRESH_MS, storeStatus } from "../src/remote/helpers
 import { setManualOnly } from "../src/remote/manual-only.ts";
 import { claimCall } from "../src/remote/calls.ts";
 import { PROTOCOL_VERSION } from "../src/remote/protocol.ts";
-import { NO_TAKER_MS, sweepTakers } from "../src/remote/takers.ts";
+import { NO_TAKER_MS, sweepTakers, takerTest } from "../src/remote/takers.ts";
 import { leaseSkips } from "../src/runner/leases.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "./helpers/raw-db.ts";
@@ -69,6 +69,9 @@ test("a Manual only runner is no taker for an automatic call, which is withdrawn
   await setManualOnly(db, "dave", true);
   const at = new Date(t0).toISOString();
   await db.run(db.k.insertInto("item_workflows").values({ repo: "deckcraft", number: 8, kind: "pr", entry: "merge", weight: 5, state: "running", started_by: "dave", approved_by: "dave", started_at: at, started_via: "github", plan: "[]", updated_at: at } as never));
+  // On fontcraft dave's only work is a PR his workflow merged: its post-merge review is his, before its job knows the items.
+  await db.run(db.k.insertInto("items").values({ repo: "fontcraft", number: 20, kind: "pr", state: "MERGED", title: "x", author: "dev", created_at: at }));
+  await db.run(db.k.insertInto("item_workflows").values({ repo: "fontcraft", number: 20, kind: "pr", entry: "merge", weight: 5, state: "done", started_by: "dave", approved_by: "dave", started_at: at, started_via: "github", plan: "[]", updated_at: at } as never));
   const call = (number: number) => enqueueCall(db, { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", items: [{ repo: "deckcraft", number }], level: 0, maxAttempts: 1,
     bundle: { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 60, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} } }, t0);
   const auto = await call(7), started = await call(8);
@@ -90,5 +93,9 @@ test("a Manual only runner is no taker for an automatic call, which is withdrawn
   const claim = await claimCall(db, { tokenId: token, login: "dave", role: "maintainer" },
     { requestId: "manual-claim-1", protocol: PROTOCOL_VERSION, helperVersion: "9.9.9", harness: "claude", harnessVersion: "2.1", tiers: { top: "opus" } }, async () => true, t1);
   assert.equal(claim.lease?.id, started);
+
+  const takes = takerTest(db, t1);
+  assert.ok(await takes({ prompt_id: "postmerge.opus", repos: ["fontcraft"], step: "postmerge" }), "a post-merge job of his merged PR has his runner");
+  assert.equal(await takes({ prompt_id: "review.opus", repos: ["fontcraft"], step: "opus-review" }), false, "an automatic review there has none");
   await db.close();
 });

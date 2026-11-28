@@ -28,9 +28,10 @@ const parentOf = (c: NewCall) => (eb: Eb) => (c.parentId === undefined ? eb("par
 
 /**
  * In a resumed job: adopts a call of the job's earlier runs with the same prompt, version, reuse key (src/remote/reuse-key.ts) and parent that is
- * still open or answered and unread, and returns its id. When there is none, the earlier runs' open calls with the same prompt and parent that
- * name one of its items (or name no item, like it) asked about input this call replaces (a job's item list changes between runs): the queued
- * ones are withdrawn; leased ones run on, since a later call of the run may still adopt them. At most 4 statements per call.
+ * still open or answered and unread, and returns its id. When there is none, the earlier runs' open calls with the same prompt and parent whose
+ * items are all among its own (or that name no item, like it) asked about input this call replaces (a job's item list grows between runs): the
+ * queued ones are withdrawn; leased ones run on, since a later call of the run may still adopt them. Earlier calls that name other items too end
+ * with the job. At most 4 statements per call.
  */
 function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash: string, now: number): Promise<number | null> {
   const q = queryDb(db);
@@ -56,10 +57,12 @@ function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash
     }
     const refs = c.items.map((i) => [i.repo, i.number] as const), kept = [...adoptedEarlier];
     const stale = await q.all(q.k.selectFrom("main.remote_calls").select("id").where("job_id", "=", jobId).where("since", "<", startedMs).where("prompt_id", "=", c.promptId)
-      .where((eb) => refs.length
-        ? eb.exists(schemaEb(eb).selectFrom("main.remote_call_items as ri").select(eb.lit(1).as("one")).where("ri.call_id", "=", ref<number>("remote_calls.id"))
-          .where(tupleIn(db, ["ri.repo", "ri.number"], refs, ["text", "bigint"])))
-        : eb("items", "=", "[]"))
+      .where((eb) => {
+        const items = () => schemaEb(eb).selectFrom("main.remote_call_items as ri").select(eb.lit(1).as("one")).where("ri.call_id", "=", ref<number>("remote_calls.id"));
+        return refs.length
+          ? eb.and([eb.exists(items()), eb.not(eb.exists(items().where(eb.not(tupleIn(db, ["ri.repo", "ri.number"], refs, ["text", "bigint"])))))])
+          : eb("items", "=", "[]");
+      })
       .where(parentOf(c)).where("state", "=", "queued").$if(kept.length > 0, (b) => b.where(inList(db, "id", kept, "bigint", true))));
     if (stale.length) await withdrawCalls(db, stale.map((r) => ({ id: Number(r.id), reason: RESUME_REPLACED })), { states: ["queued"], now });
     return null;
