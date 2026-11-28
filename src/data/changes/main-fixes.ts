@@ -7,7 +7,7 @@ import { num, push, refKey, rowsOf } from "./rows.ts";
 import type { MainFixRow, MainFixVerdict, RefKey } from "./types.ts";
 
 type Head = { repo: string; headSha: string };
-type MainFixDue = { rows: { check: string; state: string }[]; lintingHeads: { headSha: string; lintTask: number | null }[]; staleNeedsFix: boolean; /** The repo holds an `issue-opening` row at any head. */ opening: boolean };
+type MainFixDue = { rows: { check: string; state: string; updatedAt: string }[]; lintingHeads: { headSha: string; lintTask: number | null }[]; staleNeedsFix: boolean; /** The repo holds an `issue-opening` row at any head. */ opening: boolean };
 
 const COLS = ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "issue_number", "pr_number", "pr_url", "patch", "files", "lint_task", "lint_round", "lint_state", "session", "created_at", "updated_at"] as const;
 
@@ -49,7 +49,7 @@ export async function loadMainFixDue(db: Db, heads: (Head & { running: boolean }
   const k = queryDb(db).k as any;
   const repos = [...new Set(heads.map((h) => h.repo))];
   const [rows, linting, needs] = await db.together(() => Promise.all([
-    rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "check", "state"]).where(kx.tupleIn(db, ["repo", "head_sha"], heads.map((h) => [h.repo, h.headSha]), ["text", "text"]))
+    rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "check", "state", "updated_at"]).where(kx.tupleIn(db, ["repo", "head_sha"], heads.map((h) => [h.repo, h.headSha]), ["text", "text"]))
       .orderBy("repo").orderBy("head_sha").orderBy("check")),
     rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "lint_task"]).where(kx.inList(db, "repo", repos)).where("state", "=", "linting").orderBy("created_at").orderBy("head_sha").orderBy("check")),
     rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "state"]).distinct().where(kx.inList(db, "repo", repos)).where("state", "in", ["needs-fix", "issue-opening"])),
@@ -58,8 +58,8 @@ export async function loadMainFixDue(db: Db, heads: (Head & { running: boolean }
   const needing = withState("needs-fix"), opening = withState("issue-opening");
   const lintingBy = new Map<string, { headSha: string; lintTask: number | null }[]>();
   for (const r of linting) push(lintingBy, r.repo, { headSha: r.head_sha, lintTask: num(r.lint_task) });
-  const rowsBy = new Map<string, { check: string; state: string }[]>();
-  for (const r of rows) push(rowsBy, `${r.repo}@${r.head_sha}`, { check: r.check, state: r.state });
+  const rowsBy = new Map<string, { check: string; state: string; updatedAt: string }[]>();
+  for (const r of rows) push(rowsBy, `${r.repo}@${r.head_sha}`, { check: r.check, state: r.state, updatedAt: r.updated_at });
   for (const h of heads) out.set(`${h.repo}@${h.headSha}`, { rows: rowsBy.get(`${h.repo}@${h.headSha}`) ?? [], lintingHeads: lintingBy.get(h.repo) ?? [], staleNeedsFix: !h.running && needing.has(h.repo), opening: opening.has(h.repo) });
   return out;
 }
@@ -86,11 +86,21 @@ export async function loadOpenFixPr(db: Db, repo: string, since: string): Promis
   return r?.n === null || r?.n === undefined ? null : Number(r.n);
 }
 
-/** Rows in a state. */
-export async function countMainFixes(db: Db, f: { state: string }): Promise<number> {
+/** Rows in a state, optionally only those created at or after `since`. */
+export async function countMainFixes(db: Db, f: { state: string; since?: string }): Promise<number> {
   const k = queryDb(db).k as any;
-  const r = (await rowsOf<any>(db, k.selectFrom("main.main_fixes").select((eb: any) => eb.fn.countAll().as("n")).where("state", "=", f.state)))[0];
+  let sel = k.selectFrom("main.main_fixes").select((eb: any) => eb.fn.countAll().as("n")).where("state", "=", f.state);
+  if (f.since !== undefined) sel = sel.where("created_at", ">=", f.since);
+  const r = (await rowsOf<any>(db, sel))[0];
   return Number(r?.n ?? 0);
+}
+
+/** Removes the rows of one head and check. 1 statement. */
+export async function dropMainFix(db: Db, key: Head & { check: string }): Promise<void> {
+  const q = queryDb(db);
+  await db.write(async () => {
+    await q.run((q.k as any).deleteFrom("main.main_fixes").where("repo", "=", key.repo).where("head_sha", "=", key.headSha).where("check", "=", key.check));
+  });
 }
 
 /**

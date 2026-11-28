@@ -46,7 +46,7 @@ import { filingWakes, heldDue } from "../conversations/held.ts";
 import { defaultPerDay, lanesInOrder, limitSteps, zeroOnlySteps } from "../stages/registry.ts";
 import { premergeCandidates } from "../premerge/review.ts";
 import { pendingDefects, postmergeRepos, stuckFilings } from "../postmerge/select.ts";
-import { mainFixDueRepos } from "../mainfix/index.ts";
+import { mainFixClock, mainFixDueRepos } from "../mainfix/index.ts";
 import { statusDueIn, statusRetriesAt, statusRetriesDue } from "../prstatus/index.ts";
 import { waitsForHaiku } from "../priority/index.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
@@ -66,7 +66,6 @@ import { enqueueJobs, itemFpStep, loadLastJobPerStep, loadDeadlineStops, loadHel
 import { loadTakerSignature } from "../data/runners/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadRefereeFailureTimes } from "../data/triage/index.ts";
-import { countMainFixes } from "../data/changes/index.ts";
 import { failureDelayMs } from "../core/backoff.ts";
 import { STEP_STAGE, tripOf } from "../core/push-outcome.ts";
 import { planPass, type PlanPass } from "../core/plan-engine.ts";
@@ -914,12 +913,10 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // A red default branch in a repo approved for it: flaky failures are rerun once, code failures are recorded.
     name: "main-fix",
     perRepo: true,
-    // A rerun waits for the next reading of the head or a time limit; the clock moves with no change in the data.
-    extra: async (db) => {
-      const n = await countMainFixes(db, { state: "rerun-requested" });
-      return n ? `${n}:${Math.floor(Date.now() / 300_000)}` : "";
-    },
-    detect: async (db, { tracked }) => (await mainFixDueRepos(db, tracked)).sort().map((repo) => ({ step: "main-fix", params: { repo } })),
+    // A rerun waits for the next reading of the head or a time limit, and a failure log not readable yet is read again after the
+    // next main CI poll; the clock moves with no change in the data.
+    extra: async (db) => await mainFixClock(db, Date.now()),
+    detect: async (db, { tracked, wake }) => (await mainFixDueRepos(db, tracked, wake ? { wake } : {})).sort().map((repo) => ({ step: "main-fix", params: { repo } })),
   },
   {
     // The nightly checks of repos with the build feature on: queued once a day per repo (in data, from the last run's time), collected when their tasks end.
