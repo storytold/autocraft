@@ -2,7 +2,6 @@
 // queuer's Task Runner, that reads the issue, its comments and the thread's guidance and either plans the change or asks
 // (questions.ts). The reply is parsed strictly; an unusable reply, or an author question that the reference lint flags,
 // gets one follow-up turn in the same session. After the reply the tree is reset, so the session starts clean.
-import { createHash } from "node:crypto";
 import type { Db } from "../db/index.ts";
 import { exec } from "../fixup/git.ts";
 import { guardItem } from "../core/guard.ts";
@@ -13,6 +12,7 @@ import { permKey, standings } from "../data/access/index.ts";
 import { loadGuidanceTurns } from "../data/conversations/index.ts";
 import { startAttempts } from "../data/implement/index.ts";
 import { loadComments, loadItems } from "../data/mirror/index.ts";
+import { ensurePrompts } from "../data/prompts/index.ts";
 import { ghComment } from "../github/write.ts";
 import { githubIdentity, ownLoginTest } from "../github/identity.ts";
 import { ITEM_SERVER, itemTools } from "../itemtools/index.ts";
@@ -41,7 +41,6 @@ import { mainHeadOf, readyWorkspace, resetTree, runBoundCall, WorkspaceUnavailab
 
 export const PLAN_PROMPT_ID = "implement.plan";
 const PROMPT = CLAUDE_PROMPTS[PLAN_PROMPT_ID];
-export const PLAN_PROMPT_VERSION = createHash("sha256").update(PROMPT.template).digest("hex").slice(0, 10);
 
 // ---- the reply -------------------------------------------------------------------------------------------------
 
@@ -254,11 +253,13 @@ const ASK_TRIES = 3;
 
 /** Runs the plan call, with one follow-up turn on an unusable reply or on flagged public text. */
 async function callPlan(ctx: StepContext, o: { repo: string; number: number; sha: string; workspaceId: number; forLogin: string; input: PlanInput }): Promise<Planned> {
+  await ensurePrompts(ctx.db);
+  // The follow-up turn goes with the same text and version as the first.
   const parts = claudeParts(PLAN_PROMPT_ID, [o.input], false);
   const dir = referenceDir(o.repo);
   const servers = [...(itemTools() ? [ITEM_SERVER] : []), ...(dir ? [REFERENCE_SERVER] : [])];
   const base = {
-    workspaceId: o.workspaceId, repo: o.repo, number: o.number, baseSha: o.sha, forLogin: o.forLogin, promptId: PLAN_PROMPT_ID, promptVersion: PLAN_PROMPT_VERSION,
+    workspaceId: o.workspaceId, repo: o.repo, number: o.number, baseSha: o.sha, forLogin: o.forLogin, promptId: PLAN_PROMPT_ID, promptVersion: parts.version,
     model: PROMPT.models[0]!, tier: promptTier(PLAN_PROMPT_ID), effort: PROMPT.effort, system: parts.system, timeoutSeconds: PLAN_TIMEOUT_SEC, maxTurns: PLAN_MAX_TURNS,
     items: [{ repo: o.repo, number: o.number }], servers, ...(dir && { referenceRepo: dir.split("/").pop()! }), keepSession: true,
   };

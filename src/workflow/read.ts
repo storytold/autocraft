@@ -18,7 +18,7 @@ import type { Db } from "../db/index.ts";
 import { actRefusal } from "../github/identity.ts";
 import { t } from "../i18n/index.ts";
 import { ownerOf } from "../owners.ts";
-import { JEV_PROMPTS } from "../prompts/index.ts";
+import { jevRequestOf } from "../prompts/index.ts";
 import { runCommand, type Actor, type CommandInput, type CommandResult } from "./apply.ts";
 import { CONDITION, GUARD, parse, type ParseOptions } from "./parse.ts";
 import { addedWords, jevExact, parseTranslation, READ_ITEMS_MAX, READ_TEXT_CHARS, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
@@ -163,7 +163,7 @@ const TRANSLATE = (id: "command.read" | "interactive.command-read"): ClaudeStep<
 });
 const SCORE: JevStep<ScoreAsk, number> = {
   provider: "jev", id: "command.read.jev",
-  request: (a) => ({ item: { ref: "command" }, body: JSON.stringify({ ...JEV_PROMPTS["command.read.jev"].request, state: scoreState(a) }) }),
+  request: (a) => ({ item: { ref: "command" }, body: JSON.stringify({ ...jevRequestOf("command.read.jev"), state: scoreState(a) }) }),
   parse: (answers, _a, ctx) => {
     const p = ctx.code === 0 ? jevExact(answers) : null;
     return p === null ? null : { value: p };

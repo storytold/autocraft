@@ -1989,6 +1989,23 @@ export interface PremergeReviews {
   claims: string | null;
 }
 
+export interface PromptRevisions {
+  id: Generated<number>;
+  prompt_id: string;
+  scope: string;
+  rev: number;
+  kind: string;
+  body: string;
+  version: string;
+  default_hash: string | null;
+  follows: Generated<number>;
+  from_rev: number | null;
+  active: Generated<number>;
+  author: string;
+  at: string;
+  note: string;
+}
+
 export interface PushOutcomes {
   id: Generated<number>;
   at: string;
@@ -2919,6 +2936,7 @@ export interface DB {
   preapprovals: Preapprovals;
   premerge_followups: PremergeFollowups;
   premerge_reviews: PremergeReviews;
+  prompt_revisions: PromptRevisions;
   push_outcomes: PushOutcomes;
   release_apps: ReleaseApps;
   release_assets: ReleaseAssets;
@@ -3141,6 +3159,7 @@ export interface DB {
   "main.preapprovals": Preapprovals;
   "main.premerge_followups": PremergeFollowups;
   "main.premerge_reviews": PremergeReviews;
+  "main.prompt_revisions": PromptRevisions;
   "main.push_outcomes": PushOutcomes;
   "main.release_apps": ReleaseApps;
   "main.release_assets": ReleaseAssets;
@@ -3367,6 +3386,7 @@ export const COLUMNS = {
   preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id", "workflow_id", "reason_code", "reason_params"],
   premerge_followups: ["repo", "number", "head_oid", "issue_number", "url", "state", "at", "note"],
   premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims"],
+  prompt_revisions: ["id", "prompt_id", "scope", "rev", "kind", "body", "version", "default_hash", "follows", "from_rev", "active", "author", "at", "note"],
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
   release_apps: ["repo", "name", "stars", "updated_at"],
   release_assets: ["asset_id", "repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "first_seen", "updated_at", "gone_at"],

@@ -88,6 +88,7 @@ Reply with ONLY one JSON object:
 {"asks": "<what it asks>", "holds": "yes"|"partly"|"no"|"unclear", "claims": [{"claim": "<claim>", "status": "holds"|"fixed"|"wrong"|"unclear", "where": "<path>:<line>"}], "related": [{"ref": "#<number>", "note": "<why it matters>"}], "size": "S"|"M"|"L", "files": ["<path>"], "approach": "<how to fix it>", "risks": ["<risk>"], "recommendation": "implement"|"close"|"needs-info"|"backlog", "reason": "<why>", "close_as": "completed"|"not-planned"|"duplicate", "duplicate_of": <number>, "question": "<question for the reporter>"}
 close_as and duplicate_of only with close; question only with needs-info.
 
+{{repo_guidance}}
 <issue>
 {{issue}}
 </issue>`;

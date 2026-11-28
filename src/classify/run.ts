@@ -3,7 +3,6 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import type { ItemRef } from "../../web/src/api/types.ts";
-import { createHash } from "node:crypto";
 import { loadLiveConfig } from "../data/control/index.ts";
 import { askJevCloudflare, jevCloudflareConfig } from "../agents/jev-cloudflare.ts";
 import { JEV_UNREADABLE_SUMMARY, jevAvailable, jevEnv, jevFailure, markJevUnavailable, markJevUnreadable, markJevWorking, jevStatus } from "../agents/jev.ts";
@@ -27,7 +26,7 @@ import { defaultWorkspace } from "../sandbox/workspace.ts";
 import { runModelStep } from "../agents/step.ts";
 import { CLASSIFY_HAIKU, CLASSIFY_JEV, type ClassifyAnswer, type JevImpact } from "../agents/steps.ts";
 import type { AreaAnswer } from "../areas/parse.ts";
-import { CLAUDE_PROMPTS, JEV_ARGS, JEV_USD_PER_INPUT_TOKEN, JEV_PROMPTS, claudeArgs, claudeParts, claudePromptOf, jevPromptOf, renderAreaJev, renderJev, withoutTaskBudget, type ClassifyExtras, type ClaudeInput, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
+import { CLAUDE_PROMPTS, GUIDANCE_PROMPTS, JEV_ARGS, JEV_USD_PER_INPUT_TOKEN, JEV_PROMPTS, claudeArgs, claudeParts, jevVersionOf, renderAreaJev, renderJev, resolvedTemplate, withoutTaskBudget, type ClassifyExtras, type ClaudeInput, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
 import { stripMarks } from "../prompts/harness.ts";
 import type { DupeAsk, DupePair } from "../dupes/pair.ts";
 import { flagsOf, parseRef, refOf, type Item, type Verdict } from "./parse.ts";
@@ -38,6 +37,7 @@ import type { Db } from "../db/index.ts";
 import { loadItems as loadMirrorItems, loadRepos } from "../data/mirror/index.ts";
 import { keepEarlierUsage, loadRunsById, recordUsage, type UsageRow } from "../data/inference/index.ts";
 import { saveJevChunk, saveVerdicts as saveVerdictRows, type JevFailed, type VerdictInput } from "../data/triage/index.ts";
+import { ensurePrompts, guidanceOf } from "../data/prompts/index.ts";
 import { effect } from "../db/effects.ts";
 
 export function loadRefs(file: string): { repo: string; number: number }[] {
@@ -269,16 +269,20 @@ export function setRunner(r: Runner): () => void {
   return () => { runner = exec; };
 }
 
-const versions = new Map<string, string>();
-/** A short hash of the registered prompt text, so runs show which wording they used. */
+/**
+ * A short hash of the prompt text as it runs now (the code default or the active stored revision, src/prompts), so runs show
+ * which wording they used. A Claude call with repository guidance records its own version (claudeParts).
+ */
 export function promptVersion(id: ClaudePromptId | JevPromptId): string {
-  let v = versions.get(id);
-  if (!v) {
-    const p = id in CLAUDE_PROMPTS ? claudePromptOf(id as ClaudePromptId).template : JSON.stringify(jevPromptOf(id as JevPromptId).request);
-    v = createHash("sha256").update(p).digest("hex").slice(0, 10);
-    versions.set(id, v);
-  }
-  return v;
+  return id in CLAUDE_PROMPTS ? resolvedTemplate(id as ClaudePromptId).version : jevVersionOf(id as JevPromptId);
+}
+
+/** The repository whose guidance a call of a guidance prompt gets: its first item's, or a main-fix call's `repo@sha` ref. */
+function guidanceRepo(input: readonly unknown[]): string | undefined {
+  const r = refsOf(input)[0]?.repo;
+  if (r) return r;
+  const ref = (input[0] as { ref?: unknown } | undefined)?.ref;
+  return typeof ref === "string" ? /^([A-Za-z0-9._-]+)@[0-9a-f]{7,40}$/.exec(ref)?.[1] : undefined;
 }
 
 /** Item refs of a prompt's input: items carry repo and number, review PRs a `repo#number` ref. A run without refs is shown to operators only. */
@@ -488,6 +492,10 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
   if (docs) input = input.map((x) => ({ ...x, repo_docs: true })) as ClaudeInput[K];
   const reference = sandboxed && p.sandbox?.reference === true && opts.reference !== undefined;
   if (reference) input = input.map((x) => ({ ...x, reference: true })) as ClaudeInput[K];
+  await ensurePrompts(db);
+  const gRepo = (GUIDANCE_PROMPTS as readonly string[]).includes(id) ? guidanceRepo(input) : undefined;
+  const guidance = gRepo ? guidanceOf(gRepo) : "";
+  if (guidance) input = input.map((x) => ({ ...x, repo_guidance: guidance })) as ClaudeInput[K];
   const parts = claudeParts(id, input, sandboxed, true);
   const items = refsOf(input);
   const resume = ses?.resume;
@@ -511,9 +519,9 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
     const turn = async (stdin: string, after: number | null, lean = false, first = false): Promise<{ reply: Turned; callId: number } | "failed" | "unclaimed"> => {
       const maxWaitMs = first && opts.firstWaitMs !== undefined ? Math.min(opts.firstWaitMs, opts.maxWaitMs ?? Infinity) : opts.maxWaitMs;
       const callId = await enqueueCall(db, {
-        promptId: id, promptVersion: promptVersion(id), tier, effort: p.effort, askedModel: model, items, level, maxAttempts: p.limits.attempts, ...(after !== null && { parentId: after }), ...(reference && { referenceRepo: basename(opts.reference!) }), ...(opts.forLogin !== undefined && { forLogin: opts.forLogin }),
+        promptId: id, promptVersion: parts.version, tier, effort: p.effort, askedModel: model, items, level, maxAttempts: p.limits.attempts, ...(after !== null && { parentId: after }), ...(reference && { referenceRepo: basename(opts.reference!) }), ...(opts.forLogin !== undefined && { forLogin: opts.forLogin }),
         bundle: {
-          promptId: id, promptVersion: promptVersion(id), tier, effort: p.effort, timeoutSeconds, maxTurns: sandboxed ? (lean ? FIX_TURN_MAX_TURNS : p.sandbox!.maxTurns) : null,
+          promptId: id, promptVersion: parts.version, tier, effort: p.effort, timeoutSeconds, maxTurns: sandboxed ? (lean ? FIX_TURN_MAX_TURNS : p.sandbox!.maxTurns) : null,
           stdin: stdin === parts.stdin ? stdin : stripMarks(stdin), system: parts.system, mounts, mcpServers: servers, keepSession: persist, ...(after !== null && { resume: { parentCallId: after } }),
           // The task budget is added when a Task Runner takes the call, for a Claude Code that takes the flag (forHarness).
           hints: { claude: { args: withoutTaskBudget(lean ? noToolArgs(args) : args), ...(agents && { agents }) } },
@@ -574,8 +582,10 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
 }
 
 /** Sends a registered Jev request (src/prompts) for one item to `jev ask`; the same rule as `askClaude`. Recorded as an agent run without an account. */
-export async function askJev(id: JevPromptId, item: Item | DupePair | DupeAsk | { ref: string }, db: Db, body: string = renderJev(id, item as Item | DupeAsk), perCallUsage = true): Promise<Proc> {
+export async function askJev(id: JevPromptId, item: Item | DupePair | DupeAsk | { ref: string }, db: Db, given?: string, perCallUsage = true): Promise<Proc> {
   effect("model-call", id);
+  await ensurePrompts(db);
+  const body = given ?? renderJev(id, item as Item | DupeAsk);
   const runId = await startJevRun(db, { promptId: id, promptVersion: promptVersion(id), provider: "jev", model: "jev", items: refsOf([item]), prompt: body });
   const start = now();
   try {
