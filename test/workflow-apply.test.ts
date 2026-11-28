@@ -1,6 +1,8 @@
 // The command core of the maintainer workflow (src/workflow/apply.ts): who may act, lists of items, and stop.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { listCommand } from "../src/dash/api/commands.ts";
+import type { Req } from "../src/dash/types.ts";
 import { loadQueue } from "../src/data/runners/index.ts";
 import { enqueueCall } from "../src/remote/calls.ts";
 import { callLevel } from "../src/remote/level.ts";
@@ -61,6 +63,26 @@ test("a list with one bad item runs the others and names the one that did not ru
   assert.equal(await count(w, "main.item_workflows"), 2);
   assert.match(r.lines.at(-1)!, /#99/);
   assert.doesNotMatch(r.lines.at(-1)!, /#1\b|#2\b/);
+});
+
+test("a command sent from the dashboard to a list of items checks each item's repo on its own", async () => {
+  const w = await newRepo();
+  await w.pr(1);
+  const db = w.db;
+  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline, workflow) VALUES ('lib', ?, ?, 1, 'new')").run(OPERATOR, T0);
+  await db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('lib', 'public', 'main')").run();
+  await db.prepare("INSERT INTO items (repo, number, kind, state, title, author, head_oid, created_at, updated_at) VALUES ('lib', 2, 'pr', 'OPEN', 'PR 2', 'regular', 'sha2', ?, ?)").run(T0, T0);
+  // The maintainer may write to app only.
+  const req: Req = {
+    method: "POST", path: "/api/commands", params: {}, query: new URLSearchParams(), form: new URLSearchParams(), csrf: "", nonce: "",
+    json: { text: "review and merge", items: ["app#1", "lib#2"] },
+    user: { login: MAINT, role: "maintainer", canWrite: async (repo: string) => repo === "app", canRead: async () => true },
+  };
+  const r = await listCommand(db, req);
+  assert.deepEqual(r.items.map((o) => [`${o.repo}#${o.number}`, o.outcome]), [["app#1", "run"], ["lib#2", "refused"]]);
+  assert.match(r.items[1]!.line, /write access/);
+  assert.ok(await liveWorkflow(db, "app", 1));
+  assert.equal(await liveWorkflow(db, "lib", 2), null, "nothing started on the item the maintainer may not command");
 });
 
 test("stop ends the pre-approved merge, the queued fix-up and the item's queued model calls", async () => {

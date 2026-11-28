@@ -252,14 +252,27 @@ function ordered(b: any, q: ItemQuery, normalWeight: number) {
 const ROW_COLS = ["repo", "number", "kind", "state", "is_draft", "title", "author", "outside", "team", "labels", "priority", "size", "classified", "area",
   "comments", "reactions", "discord", "linked", "ci_state", "autocraft", "step", "step_state", "asks_me", "approved", "duplicate", "created_at", "updated_at"].map((c) => `x.${c}`);
 
+/** The items of the query's plain `items:` term as repo name and number, in the written order; null without one. */
+function listed(q: ItemQuery): (readonly [string, number])[] | null {
+  const term = q.terms.find((t) => t.key === "items" && !t.not);
+  if (!term) return null;
+  const out = term.values.flatMap((v) => {
+    const i = itemOfValue(v);
+    return i ? [[i.repo, i.number] as const] : [];
+  });
+  return out.length ? out : null;
+}
+
 /** The statements of one page of the items matching `q` and of their count (exported for measuring them). */
 export function browseStatements(db: Db, scope: BrowseScope, q: ItemQuery, o: BrowseOpts) {
   const fts = q.text ? parseSearch(q.text) : null;
   const refs = o.refs?.map((r) => [r.slice(0, r.lastIndexOf("#")), Number(r.slice(r.lastIndexOf("#") + 1))] as const);
   const matched = () => (queryDb(db).k as any).selectFrom(facts(db, scope, (eb) => (fts ? [textHit(eb, db, fts)] : [])).as("x"))
     .where((eb: any) => eb.and([...conds(db, eb, scope, q), ...(refs ? [kx.refIn(db, "x", refs)] : [])]));
-  // Hits of a search by meaning keep their order, best first. The cast keeps the positions numbers on Postgres, where bound values in a CASE are text.
-  const rows = refs ? matched().select(ROW_COLS).orderBy((eb: any) => eb.cast(kx.refCase(refs.map(([r, n], i) => [r, n, i] as const)), "integer")).orderBy("x.repo").orderBy("x.number", "desc") : ordered(matched().select(ROW_COLS), q, o.normalWeight);
+  // Hits of a search by meaning keep their order, best first, and a list of named items keeps the order it was written in unless
+  // the query sorts. The cast keeps the positions numbers on Postgres, where bound values in a CASE are text.
+  const order = refs ?? (q.sort.given ? null : listed(q));
+  const rows = order ? matched().select(ROW_COLS).orderBy((eb: any) => eb.cast(kx.refCase(order.map(([r, n], i) => [r, n, i] as const)), "integer")).orderBy("x.repo").orderBy("x.number", "desc") : ordered(matched().select(ROW_COLS), q, o.normalWeight);
   return { rows: rows.limit(o.limit).offset(o.offset), total: matched().select((eb: any) => eb.fn.countAll().as("n")) };
 }
 
