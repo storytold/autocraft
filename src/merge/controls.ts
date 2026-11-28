@@ -5,10 +5,11 @@ import { guardRepo } from "../core/guard.ts";
 import { repoInScope } from "../core/scope.ts";
 import { type Exec, exec as defaultExec } from "../fixup/git.ts";
 import { ghClosePr } from "../github/write.ts";
-import { ACTIVE_BATCH, cancelBuild, updateBatch } from "./batch-store.ts";
+import { ACTIVE_BATCH, cancelBuild } from "./batch-store.ts";
 import { slugOf } from "../owners.ts";
 import { addAudit } from "../data/control/index.ts";
-import { endBatches, getBatch, loadBatchRun } from "../data/merge/index.ts";
+import { endBatches, getBatch, loadBatchRun, updateBatches } from "../data/merge/index.ts";
+import type { BatchView } from "../data/merge/types.ts";
 import { loadPrWorkflows, loadRepoScopes } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 
@@ -33,12 +34,38 @@ export async function afterBatch(db: Db, repo: string, numbers: readonly number[
   return ` ${wait}${idle.length < numbers.length ? "; the others are rebuilt in a new batch" : ""}.`;
 }
 
-/** Marks the batch superseded and closes its integration PR, when it has one; the row goes back to its state if the close fails, so a later Stop, Remove or merge run retries. The PRs go back to the queue; the next merge run builds batches from what is eligible. */
+/** The active merge train cars built on `id`, directly or on one built on it. */
+function carsAbove(active: readonly BatchView[], id: number): BatchView[] {
+  const out: BatchView[] = [];
+  for (let level = [id]; level.length;) {
+    const next = active.filter((b) => b.below_id !== null && b.below_id !== undefined && level.includes(b.below_id) && !out.includes(b));
+    out.push(...next);
+    level = next.map((b) => b.id);
+  }
+  return out;
+}
+
+/**
+ * Marks the batch superseded and closes its integration PR, when it has one; the row goes back to its state if the close fails, so a later
+ * Stop, Remove or merge run retries. The merge train cars built on it end in the same write, so none of them can land on a car that
+ * will not, and their PRs are closed after the batch's. The PRs go back to the queue; the next merge run builds batches from what is eligible.
+ */
 async function endBatch(db: Db, by: string, id: number, why: string, comment: string, run: Exec, after = ""): Promise<{ closed: number | null }> {
   const b = (await getBatch(db, id))!;
-  await cancelBuild(db, b, by);
-  await updateBatch(db, id, new Date().toISOString(), { state: "superseded", summary: why });
-  if (b.pr_number === null) return { closed: null };
+  const above = carsAbove((await loadBatchRun(db, b.repo)).active, id);
+  for (const x of [b, ...above]) await cancelBuild(db, x, by);
+  const now = new Date().toISOString();
+  const aboveWhy = `the car below it, ${b.branch}, was ended: ${why}`;
+  await updateBatches(db, [{ id, at: now, set: { state: "superseded", summary: why } }, ...above.map((x) => ({ id: x.id, at: now, set: { state: "superseded" as const, summary: aboveWhy } }))]);
+  const restore = async () => await updateBatches(db, [b, ...above].map((x) => ({ id: x.id, at: new Date().toISOString(), set: { state: x.state, summary: x.summary } })));
+  const closeAbove = async () => {
+    const open = above.filter((x) => x.pr_number !== null);
+    if (!open.length) return;
+    const g = await guardRepo(db, b.repo, null, { operator: by });
+    if ("refused" in g) return;
+    for (const x of open) await ghClosePr({ db, login: by }, g, run, { repo: b.repo, number: x.pr_number! }, { by: "fixed-operator" }, `Closing: ${aboveWhy}. Its pull requests go back to the queue.`, { batch: x.branch });
+  };
+  if (b.pr_number === null) { await closeAbove(); return { closed: null }; }
   const g = await guardRepo(db, b.repo, null, { operator: by });
   const r = "refused" in g ? { code: 1, stdout: "", stderr: g.refused }
     : await ghClosePr({ db, login: by }, g, run, { repo: b.repo, number: b.pr_number }, { by: "fixed-operator" }, `Closing: ${comment}.${after}`, { batch: b.branch });
@@ -52,11 +79,14 @@ async function endBatch(db: Db, by: string, id: number, why: string, comment: st
         stage: b.members.map((m) => ({ repo: b.repo, number: m.number, stage: "merged", at, actor: by, note: `merge in ${b.branch} at ${m.head_oid.slice(0, 7)}` })),
         audit: [{ at, actor: by, action: "batch-end-too-late", target: `${b.repo}:${b.branch}`, details: { pr: b.pr_number } }],
       }]);
+      // The cars above stand on a car that landed: they go on.
+      if (above.length) await updateBatches(db, above.map((x) => ({ id: x.id, at: new Date().toISOString(), set: { state: x.state, summary: x.summary } })));
       return { closed: null };
     }
-    await updateBatch(db, id, new Date().toISOString(), { state: b.state, summary: b.summary });
+    await restore();
     throw new ControlError(`the batch PR #${b.pr_number} could not be closed: ${r.stderr.replace(/\s+/g, " ").trim().slice(0, 200)}`, 502);
   }
+  await closeAbove();
   return { closed: b.pr_number };
 }
 

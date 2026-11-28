@@ -1,7 +1,7 @@
 // Pure rules of the merge queue's integration batches (see batch.ts), and the batch reads other features call. The rows
 // live in the merge module (src/data/merge).
 import { cancelTasks } from "../data/build/index.ts";
-import { getBatch as loadBatch, listBatchPage, loadBatchDue, loadBatchRun, loadBatchSizes, loadMergeFacts, loadPublishFailures, loadTrains, updateBatches } from "../data/merge/index.ts";
+import { getBatch as loadBatch, listActiveBatches, listBatchPage, loadBatchDue, loadBatchRun, loadBatchSizes, loadMergeFacts, loadPublishFailures, loadTrains, updateBatches } from "../data/merge/index.ts";
 import { openItemKeys } from "../data/mirror/index.ts";
 import type { HiddenRepos } from "../data/control/types.ts";
 import type { BatchMember, BatchPatch, BatchRow, BatchView } from "../data/merge/types.ts";
@@ -39,12 +39,18 @@ export async function batchSizeOf(db: Db, repo: string): Promise<number> {
 }
 
 /**
- * The PRs an automatic merge job of each repo may start or land: its merge train's depth (1 while a note holds it to one car) times
- * its batch size. The planner gives the job this limit, so a queued job reserves only that much of the day's merges.
+ * The limit of an automatic merge job of each repo. When a new car can start (fewer cars in flight than the train's depth, 1 while a
+ * note holds it to one car, and `due` holds the repo: PRs may merge there), the train's capacity: that depth times the repo's batch
+ * size. Otherwise the PRs of its cars in flight, at least 1, so a job that only watches or lands reserves no more of the day's merges.
  */
-export async function trainCapacities(db: Db, repos: string[]): Promise<Map<string, number>> {
-  const [trains, sizes] = await db.together(() => Promise.all([loadTrains(db, repos), loadBatchSizes(db, repos)]));
-  return new Map(trains.map((t) => [t.repo, (t.note ? 1 : t.depth) * sizes.get(t.repo)!] as const));
+export async function mergeJobLimits(db: Db, repos: string[], due: ReadonlySet<string>): Promise<Map<string, number>> {
+  const [trains, sizes, active] = await db.together(() => Promise.all([loadTrains(db, repos), loadBatchSizes(db, repos), listActiveBatches(db, { repos })]));
+  return new Map(trains.map((t) => {
+    const depth = t.note ? 1 : t.depth;
+    const cars = active.filter((b) => b.repo === t.repo);
+    const start = due.has(t.repo) && cars.length < depth;
+    return [t.repo, start ? depth * sizes.get(t.repo)! : Math.max(1, cars.reduce((n, b) => n + b.members.length, 0))] as const;
+  }));
 }
 
 export async function membersOf(db: Db, batchId: number): Promise<BatchMember[]> {

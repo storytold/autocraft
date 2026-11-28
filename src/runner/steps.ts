@@ -344,7 +344,11 @@ export const STEPS: StepDef[] = [
         ctx.acted(singly.merged.length);
         return `${repo}: ${singly.merged.length} merged singly, ${singly.refused.length} refused`;
       }
-      const b = await runBatches(ctx.db, { repo, limit, onMerged: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
+      // Batches land under what the day's merge limit leaves, not under this job's share of it (the share bounds what it starts).
+      const { limitRow, usageToday } = await import("./autopilot.ts");
+      const perDay = (await limitRow(ctx.db, "merge")).perDay;
+      const dayLeft = perDay === null ? undefined : Math.max(0, perDay - await usageToday(ctx.db, "merge"));
+      const b = await runBatches(ctx.db, { repo, limit, onMerged: ctx.handled, by: byOfJob(ctx.job.requestedBy), ...(dayLeft === undefined ? {} : { dayLeft }) }, ctx.log);
       ctx.usageRun(b.runId);
       let single = { merged: [] as string[], attempted: [] as string[], refused: [] as unknown[] };
       if (limit > b.merged.length) {

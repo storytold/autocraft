@@ -108,6 +108,8 @@ export type BatchParams = {
   limit?: number;
   /** Called with the running count of PRs merged. */
   onMerged?: (merged: number) => void;
+  /** PRs the stage's daily limit leaves for today when the run starts: landing is bounded by it, not by `limit`. */
+  dayLeft?: number;
   /** Who asked; default: an operator at the command line. */
   by?: By;
 };
@@ -135,11 +137,11 @@ const isSide = (b: BatchRow): boolean => Number(b.side ?? 0) === 1;
 const rootOf = (b: BatchRow): string => b.root_sha ?? b.base_sha;
 
 /**
- * The levels of the repo's active cars (1: built on the default branch or on a car that landed; a side car stands at the level of the
- * car it replaced), the train's height (the highest level, 0 with none), its top (the highest car not beside the train, the newest of
- * a level) and the cars something is built on.
+ * The top of the repo's merge train, the car the next one is built on: the highest car not beside the train (levels count from 1, a car
+ * built on the default branch or on a car that landed; the newest of a level), or null; and the cars something is built on. Each active
+ * car, side cars too, takes one place of the train's depth.
  */
-export function trainOf(active: readonly BatchView[]): { height: number; top: BatchView | null; levelOf: (b: BatchRow) => number; built: Set<number> } {
+export function trainOf(active: readonly BatchView[]): { top: BatchView | null; built: Set<number> } {
   const byId = new Map(active.map((b) => [b.id, b]));
   const memo = new Map<number, number>();
   const levelOf = (b: BatchRow): number => {
@@ -150,13 +152,9 @@ export function trainOf(active: readonly BatchView[]): { height: number; top: Ba
     memo.set(b.id, level);
     return level;
   };
-  let height = 0, top: BatchView | null = null;
-  for (const b of active) {
-    const level = levelOf(b);
-    height = Math.max(height, level);
-    if (!isSide(b) && (!top || level > levelOf(top) || (level === levelOf(top) && b.id > top.id))) top = b;
-  }
-  return { height, top, levelOf, built: new Set(active.flatMap((b) => (b.below_id === null || b.below_id === undefined ? [] : [b.below_id]))) };
+  let top: BatchView | null = null;
+  for (const b of active) if (!isSide(b) && (!top || levelOf(b) > levelOf(top) || (levelOf(b) === levelOf(top) && b.id > top.id))) top = b;
+  return { top, built: new Set(active.flatMap((b) => (b.below_id === null || b.below_id === undefined ? [] : [b.below_id]))) };
 }
 
 
@@ -207,6 +205,10 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   let landed = 0;
   /** PRs this run may still start or land under the stage's daily limit. */
   const left = () => (params.limit === undefined ? Infinity : params.limit - landed);
+  /** PRs that may still land today: the stage's daily limit left when the run started, less what this run landed (the job's share without one). */
+  const dayLeft = () => (params.dayLeft === undefined ? left() : params.dayLeft - landed);
+  /** Batches this run opened: one superseded again in the same run is not rebuilt, so a rebuild can never loop through its own publish. */
+  const openedNow = new Set<number>();
 
   const w: Writer = { db, login: ACTOR };
   const by = params.by ?? CLI_BY;
@@ -279,6 +281,13 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       return { base: place.below.commit_sha, place, chain: [] };
     }
     const base = opts.onBase ?? place.below?.commit_sha ?? await git.fetchMain(ownerOf(repo), repo, branch);
+    // A car built on another while the default branch moved from outside must also merge cleanly with it, PR by PR, or publishing
+    // would find the conflict and rebuild it on the same car again.
+    let mainNow: string | null = null;
+    if (place.below) {
+      const head = await d.mainHead(repo, branch);
+      if (head && head !== rootOf(place.below) && head !== await landedBelow(place.below)) mainNow = await git.fetchMain(ownerOf(repo), repo, branch);
+    }
     const who = await whoAmI(d.exec);
     const author = await commitIdentity(db, repo, async () => who);
     await setPipelineLogin(db, who.login);
@@ -306,7 +315,9 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       if (approvers.unsure) { log(`  ${refOf(c.number)}: left out: GitHub could not confirm the write permission of who approved it`); continue; }
       const tree = await git.mergeTree(cur, sha);
       if (!tree) { log(`  ${refOf(c.number)}: conflicts with the batch so far; waits for the next one`); continue; }
-      cur = await git.mergeCommit(tree, [cur, sha], `Merge pull request #${c.number}`, { name: author.name, email: author.email });
+      const next = await git.mergeCommit(tree, [cur, sha], `Merge pull request #${c.number}`, { name: author.name, email: author.email });
+      if (mainNow && !await git.mergeTree(mainNow, next)) { log(`  ${refOf(c.number)}: conflicts with ${branch} at ${short(mainNow)} on top of the car below; waits for a later car`); continue; }
+      cur = next;
       chain.push({ cand: c, commit: cur, extra: !cands.includes(c) });
     }
     return { base, place, chain };
@@ -344,6 +355,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       ...(toppedUp ? { toppedUp: true } : {}), ...(parent?.opened_at ? { openedAt: parent.opened_at } : {}),
       ...(place.below ? { belowId: place.below.id, rootSha: rootOf(place.below) } : {}), ...(place.side ? { side: true } : {}),
     });
+    openedNow.add(id);
     await git.keepCar(id, tip, (await loadBatchRun(db, repo)).active.map((x) => x.id));
     if (taskId === null && skipped) await skipBuild(await getBatch(db, id), skipped, false);
     s.started.push(name);
@@ -428,6 +440,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     await closePr(b, `Closing: ${why}.${await afterBatch(db, repo, named.map((m) => m.number), named.length < b.members.length)}`);
     s.superseded.push(b.branch);
     log(`  ${b.branch}: ${why}`);
+    if (openedNow.has(b.id)) { if (keep.length) log(`  ${b.branch}: opened in this run; its PRs wait for the next run`); return; }
     if (next) await openChain(next, b.id, { toppedUp: true });
     else if (keep.length && left() > 0) await rebuild(keep, left(), b.id, b.members, { place: await placeOf(b) });
   }
@@ -567,16 +580,22 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     const optional = new Set(await optionalChecks(db, repo));
     const failing = names.filter((n) => !optional.has(n));
     const why = `upstream CI failed on the batch PR${failing.length ? `: ${vs?.state === "new" && vs.reason ? vs.reason : failing.join(", ")}` : ""}`;
+    // A red car with a car below in flight is worked out only once it is the bottom car: its tip holds the cars below, so the failure
+    // may be theirs, and a car built on its base would sit on them too.
+    if (await belowOf(b)) {
+      const note = `${why}; ${CAR_BELOW_NOTE}`;
+      if (b.summary !== note) { await updateBatch(db, b.id, at(), { summary: oneLine(note, 400) }); log(`  ${b.branch}: ${note}`); }
+      s.waiting.push(b.branch);
+      return;
+    }
     // A failure the comparison with main's found new is some member's: the base does not excuse it. A car's base is the default
     // branch under its train.
     const root = rootOf(b);
     const atBase = vs?.state === "new" ? null : await redOnMainAt(root);
     if (atBase && failing.length && failing.every((n) => atBase.has(n))) {
-      // A car with a car below in flight is rebuilt only once that one landed: it would be rebuilt on the same car.
-      const below = await belowOf(b);
       const head = await d.mainHead(repo, branch);
-      if (!below && head && head !== root) return supersede(b, members, `${failing.join(", ")} failed on ${branch} at the base too; rebuilt on ${short(head)}`);
-      const note = `${failing.join(", ")} failed on ${branch} at the base too; ${below ? "waits for the car below to land" : `waits for ${branch} to change`}`;
+      if (head && head !== root) return supersede(b, members, `${failing.join(", ")} failed on ${branch} at the base too; rebuilt on ${short(head)}`);
+      const note = `${failing.join(", ")} failed on ${branch} at the base too; waits for ${branch} to change`;
       if (b.summary !== note) { await updateBatch(db, b.id, at(), { summary: note }); log(`  ${b.branch}: ${note}`); }
       s.waiting.push(b.branch);
       return;
@@ -784,7 +803,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     if (ch.mergeable === "CONFLICTING") return supersede(b, members, `the batch PR conflicts with ${branch}`);
     const moved = await movedAway(b);
     if (moved) return supersede(b, members, moved);
-    if (members.length > left()) { log(`  ${b.branch}: ${members.length} PRs exceed the ${Math.max(left(), 0)} left of the daily limit; waits`); s.waiting.push(b.branch); return; }
+    if (members.length > dayLeft()) { log(`  ${b.branch}: ${members.length} PRs exceed the ${Math.max(dayLeft(), 0)} left of the daily limit; waits`); s.waiting.push(b.branch); return; }
     // CI still running (neither red nor green): the PRs that became eligible since it started may join, once.
     if (ci !== "success" && await topUp(b)) return;
     if (ci !== "success" || ch.mergeable !== "MERGEABLE") {
@@ -857,6 +876,13 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       leases.push(release);
     }
     try {
+      // The car below may have been stopped or removed since the wait was read: only a landed car below lets this one merge (it landed
+      // only after its own car below did).
+      if (b.below_id !== null && b.below_id !== undefined && (await getBatch(db, b.below_id))?.state !== "merged") {
+        log(`  ${b.branch}: the car below has not landed; not merged`);
+        s.waiting.push(b.branch);
+        return;
+      }
       let after: Awaited<ReturnType<typeof refreshChecks>>[number] | undefined;
       // Every member must still hold at its batched head, and the batch PR at the batch tip.
       const g = await guardBatchMerge(db, { repo, number: b.pr_number!, head: b.commit_sha }, members.map((m) => ({ number: m.number, head: m.head_oid })), by, liveRead);
@@ -899,6 +925,13 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       return open();
     }
     if (out.kind === "fail") {
+      // A red tree of a car with a car below in flight is worked out once it is the bottom car, as a red batch PR is.
+      if (await belowOf(b)) {
+        const note = `the combined tree failed at ${out.step}; ${CAR_BELOW_NOTE}`;
+        if (b.summary !== note) await updateBatch(db, b.id, at(), { summary: note });
+        s.waiting.push(b.branch);
+        return;
+      }
       // One rerun of a failed test step tells a flake from a red tree.
       if (out.step === "test" && tries < 2) {
         await updateBatch(db, b.id, at(), { task_id: await cloneTask(db, task.id), build_tries: tries + 1 });
@@ -931,8 +964,8 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   async function topUp(b: BatchView): Promise<boolean> {
     if (Number(b.topped_up ?? 0) === 1 || !b.opened_at || b.build_state === "passed" || b.retries > 0) return false;
     if (d.now().getTime() - Date.parse(b.opened_at) >= TOPUP_WINDOW_MS) return false;
-    const t = trainOf((await batchesNow()).mine), st = await trainState();
-    if (t.built.has(b.id) || t.levelOf(b) < (st.note ? 1 : st.depth)) return false;
+    const mine = (await batchesNow()).mine, st = await trainState();
+    if (trainOf(mine).built.has(b.id) || mine.length < (st.note ? 1 : st.depth) || await orphaned(b)) return false;
     const { taken, reserved } = await batched(b.members, b.id);
     const pool = await eligibleNow(taken, reserved);
     if (!pool.cands.length) return false;
@@ -945,16 +978,29 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     return true;
   }
 
+  /** The car below `b` when it ended without landing, or null. */
+  async function orphaned(b: BatchRow): Promise<BatchView | null> {
+    if (b.below_id === null || b.below_id === undefined) return null;
+    const below = await getBatch(db, b.below_id);
+    return below && !ACTIVE_BATCH.includes(below.state) && below.state !== "merged" ? below : null;
+  }
+
+  /**
+   * The one eviction rule of the train: a car whose car below ended without landing holds PRs that will not land under it. It is
+   * closed with nothing kept, its PRs go back to the queue and the train is extended again on the last car still in flight. True: evicted.
+   */
+  async function evict(b: BatchView): Promise<boolean> {
+    const below = await orphaned(b);
+    if (!below) return false;
+    await supersede(b, [], `the car below it, ${below.branch}, ended without landing`, b.members);
+    return true;
+  }
+
   async function advance(id: number, q: QueueEntry[]): Promise<void> {
     const b = await getBatch(db, id);
     if (!ACTIVE_BATCH.includes(b.state)) return;
     const members = b.members;
-    // The one eviction rule of the train: a car whose car below ended without landing holds PRs that will not land under it. Its PRs
-    // go back to the queue and the train is extended again on the last car still in flight.
-    if (b.below_id !== null && b.below_id !== undefined) {
-      const below = await getBatch(db, b.below_id);
-      if (below && !ACTIVE_BATCH.includes(below.state) && below.state !== "merged") return supersede(b, [], `the car below it, ${below.branch}, ended without landing`, members);
-    }
+    if (await evict(b)) return;
     // The batch state overrides a PR's own only while it would still be mergeable (see BATCHABLE), and its merge path must still exist.
     const keep = members.filter((m) => q.some((e) => e.number === m.number && e.head === m.head_oid && e.path !== null && (e.state === "batch-checking" || e.state === "in-batch")));
     if (keep.length < members.length) return supersede(b, keep, "a PR in the batch changed or is no longer ready");
@@ -973,9 +1019,13 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
 
   const trainState = async () => (await loadTrains(db, [repo]))[0]!;
 
-  /** Whether the default branch requires branches to be up to date before merging, by its rules and by its branch protection; null: not read. */
-  async function upToDateRules(): Promise<{ rules: boolean | null; protection: boolean | null }> {
-    let rules: boolean | null = null, protection: boolean | null = null;
+  /**
+   * What the default branch says about up-to-date branches: its rules (true: a required-checks rule asks for up-to-date branches), its
+   * classic protection's required checks (strict, loose, missing: GitHub answered 404) and, when `branchToo`, whether the branch is
+   * protected at all. Null: not read.
+   */
+  async function upToDateRules(branchToo: boolean): Promise<{ rules: boolean | null; protection: "strict" | "loose" | "missing" | null; protectedBranch: boolean | null }> {
+    let rules: boolean | null = null, protection: "strict" | "loose" | "missing" | null = null, protectedBranch: boolean | null = null;
     const r = await d.exec("gh", ["api", `repos/${slugOf(repo)}/rules/branches/${branch}`]);
     if (r.code === 0) {
       try {
@@ -985,22 +1035,37 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     }
     const p = await d.exec("gh", ["api", `repos/${slugOf(repo)}/branches/${branch}/protection/required_status_checks`]);
     if (p.code === 0) {
-      try { protection = (JSON.parse(p.stdout) as { strict?: unknown }).strict === true; } catch { /* not read */ }
-    } else if (/\bHTTP 404\b|Not Found|not protected|not enabled/i.test(`${p.stderr} ${p.stdout}`)) protection = false;
-    return { rules, protection };
+      try {
+        const strict = (JSON.parse(p.stdout) as { strict?: unknown }).strict;
+        if (typeof strict === "boolean") protection = strict ? "strict" : "loose";
+      } catch { /* not read */ }
+    } else if (/\bHTTP 404\b|Not Found|not protected|not enabled/i.test(`${p.stderr} ${p.stdout}`)) protection = "missing";
+    if (branchToo) {
+      const b = await d.exec("gh", ["api", `repos/${slugOf(repo)}/branches/${branch}`]);
+      if (b.code === 0) {
+        try {
+          const v = (JSON.parse(b.stdout) as { protected?: unknown }).protected;
+          if (typeof v === "boolean") protectedBranch = v;
+        } catch { /* not read */ }
+      }
+    }
+    return { rules, protection, protectedBranch };
   }
 
   /**
    * The depth the train runs at now, read at a car start: the repo's depth, or 1 while its note stands. Above depth 1 the branch's rules
-   * and protection are read again: a rule for up-to-date branches sets the note, and a note stays only while what set it cannot be read.
+   * and protection are read again: a rule for up-to-date branches sets the note, and a note clears only on a reading that rules out
+   * what set it. A behind car's note needs a positive one: the branch is not protected, or its rules and its readable protection
+   * both ask for no up-to-date branches (a 404 from the protection read proves nothing for it).
    */
   async function trainDepthNow(): Promise<number> {
     const t = await trainState();
     if (t.depth <= 1) return 1;
-    const r = await upToDateRules();
-    const note = r.rules ? RULES_NOTE : r.protection ? PROTECTION_NOTE
-      : t.note === RULES_NOTE ? (r.rules === null ? t.note : null)
-      : t.note !== null ? (r.protection === null ? t.note : null) : null;
+    const r = await upToDateRules(t.note === BEHIND_NOTE);
+    const note = r.rules ? RULES_NOTE : r.protection === "strict" ? PROTECTION_NOTE
+      : t.note === RULES_NOTE ? (r.rules === false ? null : t.note)
+      : t.note === PROTECTION_NOTE ? (r.protection === "loose" || r.protection === "missing" ? null : t.note)
+      : t.note !== null ? (r.protectedBranch === false || (r.rules === false && r.protection === "loose") ? null : t.note) : null;
     if (note !== t.note) { await saveTrainNote(db, repo, note, ACTOR); log(`merge ${repo}: ${note ? `one car at a time: ${note}` : `the train runs ${t.depth} cars deep again`}`); }
     return note ? 1 : t.depth;
   }
@@ -1013,10 +1078,13 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     const st = await trainState();
     let depth: number | null = null;
     for (let i = 0; i < MAX_TRAIN_DEPTH; i++) {
+      // Nothing is built on a car whose car below ended: the rule runs first, also on the cars this run opened.
+      for (const b of (await batchesNow()).mine) await evict(b);
       const mine = (await batchesNow()).mine;
       const t = trainOf(mine);
-      // With a note the train runs one car at a time: the rules are read again when the next car can start, on the default branch.
-      if (t.height >= st.depth || (st.note && t.height >= 1) || mine.length >= MAX_ACTIVE) return;
+      // Every car in flight takes a place, side cars too. With a note the train runs one car at a time: the rules are read again when
+      // the next car can start, on the default branch.
+      if (mine.length >= st.depth || (st.note && mine.length >= 1) || mine.length >= MAX_ACTIVE) return;
       const { taken, reserved } = await batched([]);
       const pool = await eligibleNow(taken, reserved);
       if (pool.backoff !== null) {
@@ -1025,7 +1093,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       }
       if (!pool.cands.length) return;
       depth ??= await trainDepthNow();
-      if (t.height >= depth) return;
+      if (mine.length >= depth) return;
       const place: Place = t.top ? { below: t.top, side: false } : ON_MAIN;
       log(`merge ${repo}: ${pool.cands.length} PRs may merge; ${place.below ? `car on ${place.below.branch}` : "batch"} of up to ${pool.max}`);
       if (await startBatch(pool.cands, pool.max, null, { place }) === null) return;
