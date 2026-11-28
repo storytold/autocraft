@@ -152,6 +152,9 @@ export const CIFIX_UNREAD_DELAYS_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000];
 /** When the next try after the `n`th (1-based) of a series is due: `delays` in turn, then the last one again for every further try. */
 export const repeatAfter = (lastMs: number, n: number, delays: readonly number[]): number => lastMs + delays[Math.min(Math.max(n, 1), delays.length) - 1]!;
 
+/** A follow-up row in state `filing` older than this was left by a job that ended (a restart) before it settled the row: it is tried again. The step's job ends within 10 minutes. */
+export const FILING_LEASE_MS = 15 * 60_000;
+
 /**
  * An ask comment that never reached GitHub (the app lane got no token, so no request went out) is recorded as
  * `comment-unsent` and asked again after these delays; one more unsent row past them is final, as `comment-failed` is.

@@ -16,7 +16,7 @@ import { changesRequestedWhy, GATE_FAILURES, failureNote } from "../merge/change
 import { parseFixes } from "../fixup/candidates.ts";
 import { tierKey, tiersOf, type AuthorRef } from "../whitelist.ts";
 import { findingsOf } from "../premerge/store.ts";
-import { defectFix, followUpDefects, stoppingDefects } from "../premerge/types.ts";
+import { defectFix, followUpDefects, NO_FILE, stoppingDefects } from "../premerge/types.ts";
 import { parsePublic } from "../review/opus-parse.ts";
 import { rereadPaceAt } from "../review/diff.ts";
 import { EXTRAS_PENDING_REASON } from "./sensitive.ts";
@@ -25,7 +25,7 @@ import { staleFrom } from "../review/discussion.ts";
 import { holdsFrom, MIN_INTERVAL_KEY, minIntervalOf, nextUtcMidnight, type HoldCheck } from "../review/gate.ts";
 import { personReviewSince, roundWaits } from "./author-round.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
-import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, OFF_DEFAULT_REASON, PIPELINE_LOGIN_KEY, RULE_SIZES, pipelineWrites, sizeOf, unsentAsk, verifyRetryAt } from "./rules.ts";
+import { BASE_NAME, FILING_LEASE_MS, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, OFF_DEFAULT_REASON, PIPELINE_LOGIN_KEY, RULE_SIZES, pipelineWrites, sizeOf, unsentAsk, verifyRetryAt } from "./rules.ts";
 import { workScore } from "./work-score.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
@@ -543,6 +543,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     const split = (rows: typeof pmFiled): { tried: string[]; waiting: string[] } => {
       const out = { tried: [] as string[], waiting: [] as string[] };
       for (const x of rows) {
+        // A row still `filing` after its lease was left by a job that ended before settling it: it is due again, not filed.
+        if (x.state === "filing" && now - Date.parse(x.at) > FILING_LEASE_MS) continue;
         const u = x.state === "unsent" ? unsentAsk(unsentTries(x), now) : "final";
         if (u === "final") out.tried.push(x.head_oid);
         else if (u) { out.waiting.push(x.head_oid); untils.push(u.until); refresh.soon(ref, u.until); }
@@ -555,7 +557,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   if (pmRow) {
     const all = findingsOf(pmRow), approved = !!wfFact?.approved, dropped = base.workflow?.overruled ?? [];
     const defects = stoppingDefects(all, approved, dropped), followUps = approved ? followUpDefects(all).length : 0;
-    base.premerge = { head: qh, at: pmRow.at, tries: pmRow.tries, lost: Number(pmRow.lost ?? 0), hasFindings: pmRow.findings !== null, unsure: pmRow.unsure !== 0, defects: defects.length, followUps, fixesSafe: parseFixes(JSON.stringify(defects.map(defectFix))).length === defects.length, minor: all.length - defects.length - followUps, error: pmRow.error ?? null };
+    base.premerge = { head: qh, at: pmRow.at, tries: pmRow.tries, lost: Number(pmRow.lost ?? 0), hasFindings: pmRow.findings !== null, unsure: pmRow.unsure !== 0, defects: defects.length, followUps, fixesSafe: defects.every((d) => defectFix(d).file !== NO_FILE) && parseFixes(JSON.stringify(defects.map(defectFix))).length === defects.length, minor: all.length - defects.length - followUps, error: pmRow.error ?? null };
     if (defects.length) {
       const defectsAt = (h: string) => { const r = d.review.premerge.get(`${ref}@${h}`); return r?.findings ? stoppingDefects(findingsOf(r), approved, dropped) : null; };
       base.premergeFixUsed = premergeFixUsedIn(patch.fixups, premergeStalledIn(patch.fixups, qh, defectsAt));
