@@ -11,7 +11,7 @@ import {
   PromptViewError, activeRow, checkSave, editStates, ensurePrompts, isClaudePrompt, isJevPrompt, listRevisions, promptDiff, repoGuidance, revisionInfo,
   rollback, saveEdit, saveReply, useRelease, type SaveResult,
 } from "../../data/prompts/index.ts";
-import { BASE_SCOPE, GUIDANCE_PROMPTS, GUIDANCE_PROMPT_ID, promptInfo, promptsReport } from "../../prompts/index.ts";
+import { BASE_SCOPE, GUIDANCE_PROMPTS, GUIDANCE_PROMPT_ID, promptInfo, promptsReport, sameTemplateOf } from "../../prompts/index.ts";
 import { mayEditBasePrompts, mayRunRepo } from "../repo-access.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
@@ -52,8 +52,8 @@ function basePromptId(req: Req): string {
 }
 
 /**
- * The prompt and scope a read names: a model prompt in the instance-wide scope, or repo.guidance with `?repo=` (the repo
- * must be visible to the caller).
+ * The prompt and scope a read names: a model prompt in the instance-wide scope (an interactive prompt that runs another's
+ * text reads that one's revisions, as its edit state does), or repo.guidance with `?repo=` (the repo must be visible to the caller).
  */
 async function scopeOf(db: Db, req: Req): Promise<{ id: string; scope: string }> {
   const repo = req.query.get("repo");
@@ -63,7 +63,8 @@ async function scopeOf(db: Db, req: Req): Promise<{ id: string; scope: string }>
     return { id: GUIDANCE_PROMPT_ID, scope: repo };
   }
   if (repo) throw new HttpError(400, `a repository has one guidance text, ${GUIDANCE_PROMPT_ID}; ${req.params.id} is instance-wide`);
-  return { id: basePromptId(req), scope: BASE_SCOPE };
+  const id = basePromptId(req);
+  return { id: isClaudePrompt(id) ? sameTemplateOf(id) ?? id : id, scope: BASE_SCOPE };
 }
 
 async function needBaseEditor(db: Db, req: Req): Promise<void> {
