@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ALL_TOOL_NAMES, TOOLS } from "../src/dash/mcp/index.ts";
+import { ALL_TOOL_NAMES, PROMPT_EDIT_TOOLS, TOOLS } from "../src/dash/mcp/index.ts";
 import { CLI_COMMANDS, MCP_ONLY, parseToolArgs } from "../worker/autocraft.mjs";
 
 const WORKER = new URL("../worker/autocraft.mjs", import.meta.url).pathname;
@@ -48,7 +48,7 @@ test("a boolean flag takes a following on/off only when no positional argument n
 
 test("commands send their tool with their arguments", async () => {
   const calls: { name: string; arguments: unknown }[] = [];
-  let tools: { name: string }[] = [...TOOLS];
+  let tools: { name: string }[] = [...TOOLS, ...PROMPT_EDIT_TOOLS];
   const server = createServer((req, res) => {
     let raw = "";
     req.on("data", (c) => (raw += c));
@@ -64,19 +64,23 @@ test("commands send their tool with their arguments", async () => {
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
-    for (const args of [["queue", "--repo", "photocraft"], ["repos"], ["fixups", "--repo", "photocraft"]]) {
+    const file = join(mkdtempSync(join(tmpdir(), "ac-prompt-")), "review.txt");
+    writeFileSync(file, "Look closer.\n⟦locked:output⟧{}⟦/locked⟧");
+    for (const args of [["queue", "--repo", "photocraft"], ["repos"], ["fixups", "--repo", "photocraft"], ["prompts", "edit", "review.opus", "--file", file, "--note", "stricter"]]) {
       const r = await cli(url, args);
       assert.equal(r.code, 0, `${args.join(" ")}: ${r.err}`);
     }
+    rmSync(file);
     assert.deepEqual(calls, [
       { name: "list_merge_queue", arguments: { repo: "photocraft" } },
       { name: "list_repos", arguments: {} },
       { name: "list_fixups", arguments: { repo: "photocraft" } },
+      { name: "edit_prompt", arguments: { id: "review.opus", body: "Look closer.\n⟦locked:output⟧{}⟦/locked⟧", note: "stricter" } },
     ]);
     // A tool the credential lacks gets one line.
     tools = [...TOOLS];
     assert.equal((await cli(url, ["queue", "nope"])).code, 2);
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 4);
   } finally { server.close(); }
 });
 
@@ -84,7 +88,7 @@ test("help prints the grouped overview; --all adds the task commands", async () 
   const r = await cli(null, ["help"]);
   assert.equal(r.code, 0);
   const headings = r.out.split("\n").filter((l) => /^[A-Z][a-z]+( [a-z]+)*$/.test(l));
-  assert.deepEqual(headings, ["Setup", "Runner", "Merge queue", "Model calls", "Settings", "Items", "Other"]);
+  assert.deepEqual(headings, ["Setup", "Runner", "Merge queue", "Model calls", "Settings", "Prompts", "Items", "Other"]);
   assert.match(r.out, /^ {2}autocraft do <item> "<command>" /m);
   assert.doesNotMatch(r.out, /autocraft work/);
   assert.match((await cli(null, ["help", "--all"])).out, /^Task commands[^\n]*\n {2}autocraft work /m);

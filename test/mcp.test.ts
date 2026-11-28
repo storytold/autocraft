@@ -234,7 +234,7 @@ describe("transport", () => {
     assert.equal(await note.text(), "");
   });
 
-  test("initialize names the server and its instructions; tools/list gives a maintainer the read tools, the model-call picks and their own settings tools", async () => {
+  test("initialize names the server and its instructions; tools/list gives a maintainer the read tools, the model-call picks, their own settings tools and the prompt tools", async () => {
     const t = await tokenFor("maint");
     const init = await rpc(t, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } });
     assert.equal(init.body.result.protocolVersion, "2025-06-18");
@@ -242,7 +242,7 @@ describe("transport", () => {
     assert.match(init.body.result.instructions, /untrusted/);
     assert.equal((await rpc(t, "initialize", { protocolVersion: "1999-01-01" })).body.result.protocolVersion, "2025-06-18");
     const tools = (await rpc(t, "tools/list")).body.result.tools.map((x: { name: string }) => x.name).sort();
-    assert.deepEqual(tools, ["get_item", "help", "list_fixups", "list_merge_queue", "list_model_calls", "list_repos", "my_items", "my_settings", "pick_model_call", "set_my_settings", "unpick_model_call"]);
+    assert.deepEqual(tools, ["edit_prompt", "get_item", "get_prompt", "help", "list_fixups", "list_merge_queue", "list_model_calls", "list_prompts", "list_repos", "my_items", "my_settings", "pick_model_call", "prompt_diff", "prompt_history", "rollback_prompt", "set_my_settings", "unpick_model_call"]);
     assert.equal((await rpc(t, "no/such")).body.error.code, -32601);
   });
 });
