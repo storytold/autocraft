@@ -3,7 +3,7 @@
 // again on the last car still in flight. GitHub and git are faked (test/world-db.ts), one PR per car from #900 up.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { batchSizeOf } from "../src/merge/batch-store.ts";
+import { batchSizeOf, trainCapacities } from "../src/merge/batch-store.ts";
 import { runBatches, type BatchDeps } from "../src/merge/batch.ts";
 import { saveTrainDepth } from "../src/data/merge/index.ts";
 import { world, type World } from "./world-db.ts";
@@ -57,6 +57,7 @@ async function setup(depth: number) {
 
 test("a car starts on the tip of the car below while that one's CI runs, waits for it, and lands right after it in the same run", async () => {
   const t = await setup(2);
+  assert.ok((await trainCapacities(t.w.db, ["app"])).get("app")! > await batchSizeOf(t.w.db, "app"), "a merge job of a two-car train may take more than one batch");
   await t.ready(1);
   await t.run();
   await t.ready(2);

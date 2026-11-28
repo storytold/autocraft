@@ -175,7 +175,14 @@ function Members({ b }: { b: BatchDetail }) {
 }
 
 function EventLink({ e }: { e: BatchEvent }) {
-  if (e.batchId !== undefined) return <Link to={batchPath(e.batchId)} className="text-accent-ink hover:underline">Batch #{e.batchId}</Link>;
+  if (e.batchId !== undefined) {
+    return (
+      <>
+        <Link to={batchPath(e.batchId)} className="text-accent-ink hover:underline">Batch #{e.batchId}</Link>
+        {e.pr && <a href={safeHref(e.pr.url)} target="_blank" rel="noopener noreferrer" className={ext}>PR #{e.pr.number}</a>}
+      </>
+    );
+  }
   if (e.taskId !== undefined) return <Link to={`/envs/${e.taskId}`} className="text-accent-ink hover:underline">Task #{e.taskId}</Link>;
   return null;
 }

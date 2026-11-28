@@ -1149,8 +1149,10 @@ export interface BatchEvent {
   kind: BatchEventKind;
   summary: string;
   by: string | null;
-  /** Another batch (parent or child) or the batch's sandbox task, when the event names one. */
+  /** Another batch (parent, child or the merge train car below) or the batch's sandbox task, when the event names one. */
   batchId?: number;
+  /** The batch PR of the batch the event names, when it has one. */
+  pr?: { number: number; url: string };
   taskId?: number;
   /** A member PR the event is about. */
   number?: number;

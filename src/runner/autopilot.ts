@@ -30,7 +30,7 @@ import { embedDue } from "../embed/store.ts";
 import { selectFixups } from "../fixup/select.ts";
 import { approvedRepos } from "../core/repo-approvals.ts";
 import { ciApproveRepos } from "../merge/ci-approval.ts";
-import { batchesDue, publishBackoffs } from "../merge/batch-store.ts";
+import { batchesDue, publishBackoffs, trainCapacities } from "../merge/batch-store.ts";
 import { trackedNames } from "../repos.ts";
 import { inFlightNow, ownLane, planned, type Planned } from "../core/select.ts";
 import { isQueueState } from "../core/plan.ts";
@@ -622,11 +622,14 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         }
         return false;
       };
-      for (const repo of flightFirst(plans, [...new Set([...due, ...batches.keys()])].sort())) {
+      const repos = flightFirst(plans, [...new Set([...due, ...batches.keys()])].sort());
+      // A job may start or land what the repo's train holds; the day's limit left caps it when it is queued (jobLimit).
+      const capacity = repos.length ? await trainCapacities(db, repos) : new Map<string, number>();
+      for (const repo of repos) {
         const poll = batches.has(repo);
         if (poll && await later("merge", repo)) continue;
         // A batch its repo left behind is closed wherever the repo is tracked.
-        out.push({ step: "merge", params: { repo }, ...(poll ? { poll, scope: "cleanup" as const } : {}) });
+        out.push({ step: "merge", params: { repo, limit: capacity.get(repo)! }, ...(poll ? { poll, scope: "cleanup" as const } : {}) });
       }
       const waiting = (await filterSeq([...ciWaits.keys()], async (repo) => !await later("checks", repo))).sort();
       for (const repo of waiting) out.push({ step: "checks", params: { repo }, poll: true, gate: { step: "merge", params: { repo }, poll: true } });
