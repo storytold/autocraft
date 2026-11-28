@@ -6,15 +6,18 @@ import assert from "node:assert/strict";
 import { decidePr, implementOffWait } from "../src/core/decide.ts";
 import { loadPrFacts } from "../src/core/facts.ts";
 import { prFacts } from "./world.ts";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SCRATCH } from "./scratch.ts";
 import { world } from "./world-db.ts";
 import { insertWorkflow } from "../src/workflow/store.ts";
 import { setFeature } from "../src/build/features.ts";
 import { exec as realExec, type Exec, type ExecResult } from "../src/fixup/git.ts";
-import { DIFF_FLAGS } from "../src/implement/diff.ts";
+import { DIFF_FLAGS, workspaceDiff } from "../src/implement/diff.ts";
+import type { KubeApi } from "../src/build/kube-api.ts";
+import { WS_POD_PATH } from "../src/build/workspace.ts";
 import { lastPush, openImplementationPr } from "../src/implement/pr.ts";
 import { pushRevision, runRevise, type ReviseDeps } from "../src/implement/revise.ts";
 import { implementationById, roundsOf, setImplementationState, startImplementation } from "./implement-rows.ts";
@@ -192,4 +195,77 @@ test("a revision whose tree reset failed resets again after Try again, and never
   await runRevise(run, "app", 5, deps);
   assert.equal(await stuckOn(), "workspace-lost", "the reset is still due after Try again, and asks again when it still fails");
   assert.equal(touched, 0, "no turn ran and nothing reached the workspace without the reset");
+});
+
+test("a revision's push goes out only when its start was checked to hold the change last pushed", async () => {
+  let w = await (await world()).repo();
+  for (const n of [21, 23]) w = await (await w.pr(n + 1)).issue(n);
+  const db = w.db;
+  // Each workspace runs the real in-pod helper on a scratch /work of its own, a copy of one whose tree holds the revision's change.
+  const top = mkdtempSync(join(SCRATCH, "impl-push-guard-"));
+  const dir = join(top, "work");
+  for (const d of ["src", "home", ".ws/calls"]) mkdirSync(join(dir, d), { recursive: true });
+  const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", ...args], { cwd: join(dir, "src"), encoding: "utf8" }).trim();
+  git("init", "-q", "-b", "main");
+  writeFileSync(join(dir, "src/lib.rs"), "pub fn a() {}\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  writeFileSync(join(dir, "src/lib.rs"), "pub fn a() -> u8 { 2 }\n");
+  const helper = new URL("../deploy/container/ws", import.meta.url).pathname;
+  // Paths in the scripts AutoCraft runs there too.
+  const local = (p: string, root: string) => p.replace(/\/work(?=\/|$|\s|")/g, root);
+  const api = {
+    listPods: async (_ns: string, selector: string) => {
+      const id = /craft\.build\/workspace=(\d+)/.exec(selector)![1]!;
+      return [{ metadata: { name: `ws-${id}`, labels: { "craft.build/workspace": id } }, status: { phase: "Running" } }];
+    },
+    exec: async (_ns: string, pod: string, _c: string, argv: string[], o: { stdin?: Buffer }) => {
+      const root = join(top, pod);
+      if (!existsSync(root)) cpSync(dir, root, { recursive: true });
+      // The helper's commands, and the fixed commands AutoCraft runs in the pod beside it.
+      const [cmd, ...args] = argv[0] === WS_POD_PATH ? ["sh", helper, ...argv.slice(1)] : argv;
+      const p = spawn(cmd!, args.map((a) => local(a, root)), { env: { ...process.env, WS_ROOT: root } });
+      const out: Buffer[] = [];
+      p.stdout.on("data", (b: Buffer) => out.push(b));
+      p.stdin.end(Buffer.isBuffer(o.stdin) ? o.stdin : undefined);
+      const code = await new Promise<number | null>((r) => p.on("close", r));
+      return { exitCode: code, stdout: Buffer.concat(out), stderr: Buffer.alloc(0), truncated: false };
+    },
+  } as unknown as KubeApi;
+  await createEnv(db, { id: "pods", label: "Pods", kind: "kubernetes", slots: 2, settings: { image: "autocraft:test" } }, "op");
+
+  const pushed = "d".repeat(64);
+  // A revision whose session reported and whose checks came back clean on the tree: the next step is the push.
+  const revision = async (n: number, verified: string | undefined) => {
+    const ws = await createWorkspace(db, { repo: "app", baseSha: base, envId: "pods", owner: "test" });
+    await moveWorkspace(db, ws, ["requested"], "ready", { pod: `ws-${ws}`, base_commit: base });
+    const d = await workspaceDiff(db, api, ws);
+    assert.ok(d.ok, d.ok ? "" : d.reason);
+    const impl = await startImplementation(db, { repo: "app", number: n, queuedBy: "op", textHash: "h", baseSha: base });
+    await setImplementationState(db, impl.id, "revising", { prNumber: n + 1, branch: `autocraft/app-${n}`, workspaceId: ws, diffHash: pushed });
+    const req: ReviseRound = { prNumber: n + 1, head: "b".repeat(40), from: "c".repeat(40), review: true, ci: false, message: "fix", ...(verified && { verified }) };
+    const report = { status: "done", summary: "Fixed", changes: [], tests_run: [], shots: [], deviations: [] };
+    const checks = { round: 1, base, diffStat: "1 file", files: ["src/lib.rs"], crates: [], findings: [], notes: [], noVerdict: [], needsDependency: false, clean: true, diffHash: createHash("sha256").update(Buffer.from(d.diff)).digest("hex") };
+    await addRounds(db, impl.id, [{ kind: "revise", result: req }, { kind: "session", callId: 7, result: { purpose: "fresh", outcome: "done", report } }, { kind: "checks", result: checks }]);
+    return impl;
+  };
+  let calls = 0;
+  const deps = {
+    // The push stops at its first GitHub call; reaching it is what counts here.
+    exec: async (): Promise<ExecResult> => { calls++; return { code: 1, stdout: "", stderr: "offline" }; },
+    root: join(top, "cache"), api: () => api, pod: () => ({}),
+  } as unknown as ReviseDeps;
+  const run = { db, log: () => {}, progress: async () => {}, cancelled: async () => false, stopping: async () => false, startedMs: Date.now(), by: "pipeline" } as unknown as BuildRun;
+  const kindsOf = async (id: number) => (await roundsOf(db, id)).map((r) => `${r.kind}${r.kind === "refusal" ? `:${(r.result as { kind: string }).kind}` : ""}`);
+
+  const stale = await revision(21, "e".repeat(64));
+  await runRevise(run, "app", 21, deps);
+  assert.equal(calls, 0, "a revision that did not start from the change last pushed is not pushed");
+  assert.ok((await kindsOf(stale.id)).includes("retry"), "it starts over on the change last pushed");
+
+  const checked = await revision(23, pushed);
+  await runRevise(run, "app", 23, deps);
+  assert.ok(calls > 0, "a revision checked at its start goes to the push");
+  assert.deepEqual((await kindsOf(checked.id)).slice(-1), ["refusal:push"], "the push itself ran, and its failure is one a later run tries again");
 });

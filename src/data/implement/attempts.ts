@@ -4,7 +4,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { addAudit } from "../control/index.ts";
 import { COLUMN_TYPE, ENDED, IMPL_COLS, columnsOf, json, ofRow, type ImplRow } from "./rows.ts";
-import { reviseCopy, type AttemptGuidance, type AttemptStep, type Implementation, type ImplementationState, type RefKey, type ReviseRound, type StartAttempt } from "./types.ts";
+import { reviseCopy, type AttemptGuidance, type AttemptStep, type Implementation, type ImplementationState, type RefKey, type RetryRound, type ReviseRound, type StartAttempt } from "./types.ts";
 
 const now = () => new Date().toISOString();
 const refOf = (r: { repo: string; number: number }): RefKey => `${r.repo}#${r.number}`;
@@ -105,8 +105,12 @@ export async function restartAttempt(db: Db, o: { id: number; reason: string; qu
   });
 }
 
-/** "Try again" on a stuck revision: copies the newest `revise` round with the guidance appended and moves `stuck` to `revising`; false when there is no revise round or the attempt is not stuck. */
-export async function retryRevision(db: Db, o: { id: number; guidance?: AttemptGuidance; at?: string }): Promise<boolean> {
+/**
+ * "Try again" on a stuck revision: copies the newest `revise` round with the guidance appended and moves `stuck` to `revising`;
+ * false when there is no revise round or the attempt is not stuck. A `retry` round with `reset` and `person` comes first, so
+ * the revision starts over on the change last pushed and the stopped session's edits are dropped.
+ */
+export async function retryRevision(db: Db, o: { id: number; guidance?: AttemptGuidance; by?: string | null; at?: string }): Promise<boolean> {
   const at = o.at ?? now();
   const q = queryDb(db);
   return await db.write(async () => {
@@ -118,7 +122,9 @@ export async function retryRevision(db: Db, o: { id: number; guidance?: AttemptG
     if (moved.changes !== 1) return false;
     const note = o.guidance?.text.trim();
     const message = note ? `${was.message}\n\nA maintainer's note on this revision:\n<guidance>\n${note.slice(0, 4000).replace(/</g, "\\u003c")}\n</guidance>` : was.message;
+    const retry: RetryRound = { cause: "try-again", detail: null, runner: false, from: "stuck", to: "revising", reset: true, person: true, by: o.by ?? o.guidance?.by ?? null };
     await q.run(q.k.insertInto("main.implementation_rounds").values([
+      { implementation_id: o.id, kind: "retry", call_id: null, result: json(retry), at },
       ...(note ? [{ implementation_id: o.id, kind: "guidance", call_id: null, result: json({ by: o.guidance!.by, text: note.slice(0, 4000) }), at }] : []),
       { implementation_id: o.id, kind: "revise", call_id: null, result: json({ ...reviseCopy(was), message } satisfies ReviseRound), at },
     ]));

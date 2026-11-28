@@ -89,9 +89,10 @@ export type AskFailedRound = { planRound: number; error: string };
 export type StartFailedRound = { error: string };
 /**
  * A `retry` round: the stuck cause AutoCraft retries itself, its detail, whether a Task Runner lost the call, the states it went
- * from and to, and `reset` for a revision that starts over on a tree reset to the change last pushed.
+ * from and to, and `reset` for a revision that starts over on a tree reset to the change last pushed. `person`: the round of a
+ * person's Try again on a stuck revision (`by` answered), which resets the tree too; it is no retry of AutoCraft's own.
  */
-export type RetryRound = { cause: string; detail: string | null; runner: boolean; from: string; to: string; reset?: boolean };
+export type RetryRound = { cause: string; detail: string | null; runner: boolean; from: string; to: string; reset?: boolean; person?: true; by?: string | null };
 export type PlanQuestion = { audience: QuestionAudience; text: string; options: { label: string; hint: string }[]; recommended: string | null };
 
 /**

@@ -206,6 +206,10 @@ export function implementationLines(c: Ctx, d: ImplementationData | null, line: 
       out.push(t);
     } else if (r.kind === "retry") {
       const x = r.result as Partial<RetryRound> | null;
+      if (x?.person) {
+        out.push(line(id, r.at, "harness", "AutoCraft", "job", "Tried again on a person's answer; the revision starts over on the change last pushed"));
+        continue;
+      }
       const t = line(id, r.at, "harness", "AutoCraft", "job", "Stopped on a failure of AutoCraft's own; it goes on by itself after a wait");
       t.tone = "warn";
       if (c.staff && x?.detail) t.lines = [x.detail];

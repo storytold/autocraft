@@ -8,7 +8,8 @@
 // runs after a backoff (start-retry.ts), and only the stop after the retries asks. Three implementations in a row on a repo
 // that end stuck on the item's own cause, or failed without a PR, trip the repo's Implement breaker (`implement:<repo>`) until a
 // person resumes it; a stop of our own neither counts nor breaks that row. Three issues in a row whose implementations stopped
-// on failures of our own after their retries trip it too; that trip lifts itself after a backoff for one probe implementation.
+// on failures of our own after their retries trip it too; that trip lifts itself after a backoff, and the next implementation
+// that stops on our own failures trips it again.
 import type { Db } from "../db/index.ts";
 import { addAudit, liftTrips, loadTrip, loadTrips, tripStage } from "../data/control/index.ts";
 import { loadImplementFacts, loadStuckStreaks, restartAttempt, retryRevision } from "../data/implement/index.ts";
@@ -232,9 +233,9 @@ const hhmm = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
  * Trips `implement:<repo>` when the repo's last finished implementations since its last resume stopped on failures of our own
  * after using up their own retries, on STUCK_IN_A_ROW different issues in a row: AutoCraft's own machinery is broken on the
  * repo, and every further attempt would run its sessions for nothing. One issue's repeated attempts count once. A stop on the
- * item's own cause is left out of this row; a PR or a stop that asked before its retries breaks it. After the trip lifted itself
- * (liftOwnTrips), the first implementation to finish is the probe: when it stops the same way, the trip comes back at once.
- * The trip lifts itself IMPLEMENT_OWN_TRIP_LIFT_MS after it tripped, which its reason says.
+ * item's own cause is left out of this row; a PR or a stop that asked before its retries breaks it. The trip lifts itself
+ * IMPLEMENT_OWN_TRIP_LIFT_MS after it tripped, which its reason says (liftOwnTrips), and every queued implementation on the repo
+ * may start again. Until one of them gets through, the next one that stops the same way trips it again at once.
  */
 export async function tripIfOwnInARow(db: Db, repo: string, at = new Date().toISOString()): Promise<boolean> {
   const key = tripKey("implement", repo);
@@ -250,9 +251,9 @@ export async function tripIfOwnInARow(db: Db, repo: string, at = new Date().toIS
   // The probe failed: nothing finished since the lift got through.
   const probeFailed = t?.clearedBy === OWN_TRIP_LIFTER && streak.length > 0 && streak.length === rows.length;
   if (!probeFailed && issues.size < STUCK_IN_A_ROW) return false;
-  const lift = `AutoCraft lifts the pause for one probe implementation at ${hhmm(Date.parse(at) + IMPLEMENT_OWN_TRIP_LIFT_MS)} UTC`;
+  const lift = `the pause lifts at ${hhmm(Date.parse(at) + IMPLEMENT_OWN_TRIP_LIFT_MS)} UTC`;
   const reason = probeFailed && issues.size < STUCK_IN_A_ROW
-    ? `The probe implementation in ${repo} ${OWN_TRIP_MARK} after its retries; ${lift}`
+    ? `The first implementation in ${repo} to finish after the pause lifted ${OWN_TRIP_MARK} after its retries; ${lift}`
     : `${STUCK_IN_A_ROW} issues in a row in ${repo} ${OWN_TRIP_MARK} after their retries; ${lift}`;
   const tripped = await tripStage(db, [{ key, reason, evidence: streak.map((r) => `${repo}#${r.number} attempt ${r.attempt}: ${r.stuck!.cause}`), at }]);
   return tripped.length > 0;
@@ -260,7 +261,7 @@ export async function tripIfOwnInARow(db: Db, repo: string, at = new Date().toIS
 
 /**
  * Lifts the repo trips of the Implement breaker that failures of our own tripped (tripIfOwnInARow), IMPLEMENT_OWN_TRIP_LIFT_MS
- * after each tripped, for one probe implementation. Other trips of `implement:<repo>` (stops on the item's own cause in a row,
+ * after each tripped. Other trips of `implement:<repo>` (stops on the item's own cause in a row,
  * red pushes) are left to a person's resume. The sync run calls it, with the pipeline on or off. Returns the keys lifted.
  */
 export async function liftOwnTrips(db: Db, now = Date.now()): Promise<string[]> {
@@ -316,7 +317,7 @@ export async function applyStuckAnswer(db: Db, a: Attempt, o: { at?: string } = 
   };
   if (answer.option === STUCK_OPTIONS.tryAgain.key && offered(answer.option) && impl.prNumber !== null) {
     const ok = await db.write(async () => {
-      if (!await retryRevision(db, { id: impl.id, guidance, at })) return false;
+      if (!await retryRevision(db, { id: impl.id, guidance, by: answer.by, at })) return false;
       await addAudit(db, [{ login: ACTOR, action: "implement-retry", target: ref, details: { from: impl.id, to: impl.id, pr: impl.prNumber, by: answer.by }, at }]);
       return true;
     });

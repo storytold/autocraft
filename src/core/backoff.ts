@@ -37,7 +37,7 @@ const IMPLEMENT_RETRY_DELAYS_MIN = [15, 60, 180] as const;
 export const implementRetryDelayMs = (n: number): number => IMPLEMENT_RETRY_DELAYS_MIN[Math.min(Math.max(n, 1), IMPLEMENT_RETRY_DELAYS_MIN.length) - 1]! * 60_000;
 
 /**
- * How long the repo's Implement breaker stays tripped by failures of AutoCraft's own before it lifts by itself for one probe
- * implementation (src/implement/stuck.ts): 3 hours after the trip, the longest wait of an implementation's own retries.
+ * How long the repo's Implement breaker stays tripped by failures of AutoCraft's own before it lifts by itself
+ * (src/implement/stuck.ts): 3 hours after the trip, the longest wait of an implementation's own retries.
  */
 export const IMPLEMENT_OWN_TRIP_LIFT_MS = 3 * 3600_000;

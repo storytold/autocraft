@@ -15,10 +15,13 @@ export { IMPLEMENT_RETRIES, IMPLEMENT_START_RETRIES };
 
 type R = { kind: RoundKind; at: string; result?: unknown };
 
-/** The rounds after the newest question, answer or guidance round: what AutoCraft did on its own since a person last spoke. */
+/**
+ * The rounds after the newest question, answer or guidance round, or a person's Try again (a `retry` round with `person`): what
+ * AutoCraft did on its own since a person last spoke.
+ */
 const sincePerson = <T extends R>(rounds: readonly T[]): T[] => {
   let from = 0;
-  rounds.forEach((r, i) => { if (r.kind === "question" || r.kind === "answer" || r.kind === "guidance") from = i + 1; });
+  rounds.forEach((r, i) => { if (r.kind === "question" || r.kind === "answer" || r.kind === "guidance" || (r.kind === "retry" && retryOf(r).person === true)) from = i + 1; });
   return rounds.slice(from);
 };
 

@@ -1177,11 +1177,11 @@ async function sync(args: string[]): Promise<void> {
       if (pollsMainCi) await chore("main-ci", () => mainCi.run(), stuck);
       // Release download and star counts for the Downloads report; one failing repo is logged and skipped.
       if (chores) await chore("releases", async () => void await (await import("./downloads/poll.ts")).pollReleasesIfDue(db, undefined, Date.now(), (l) => console.log(l)), stuck);
-      // Implement breakers that failures of AutoCraft's own tripped lift themselves after their backoff, for one probe implementation.
+      // Implement breakers that failures of AutoCraft's own tripped lift themselves after their backoff.
       if (chores) {
         await chore("implement: breaker lift", async () => {
           const lifted = await (await import("./implement/stuck.ts")).liftOwnTrips(db);
-          if (lifted.length) console.log(`implement: lifted ${lifted.join(", ")} for a probe implementation`);
+          if (lifted.length) console.log(`implement: lifted ${lifted.join(", ")}`);
         }, stuck);
       }
       // GitHub App installations on accounts that are not allowed owners.
