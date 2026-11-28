@@ -5,6 +5,8 @@ export type FixSessionKind = "pr" | "security";
 /** The step a turn works for: its allowed files and its stored row come from it. */
 export type FixStep = "fixup" | "cifix" | "conflict" | "security";
 export const FIX_STEPS: readonly FixStep[] = ["cifix", "fixup", "conflict", "security"];
+/** The step a turn was sent for: a maintainer's `fix <instructions>` runs in the fix-up step with its own gate, so its turns are apart. */
+export type FixTurnStep = FixStep | "maintainer";
 export type FixTurnPurpose = "start" | "step" | "findings" | "lint" | "undo" | "report" | "fresh";
 export type FixTurnOutcome = "queued" | "done" | "failed" | "unclaimed" | "withdrawn";
 /** Why a session ended: closed (its PR was closed or merged), stopped (a person ended its workflow), idle, turns (the turn cap), or a caller's reason. */
@@ -35,7 +37,7 @@ export type FixSessionPatch = {
 };
 
 export type FixTurn = {
-  id: number; sessionId: number; step: FixStep; purpose: FixTurnPurpose;
+  id: number; sessionId: number; step: FixTurnStep; purpose: FixTurnPurpose;
   head: string | null; callId: number | null; parentId: number | null;
   outcome: FixTurnOutcome;
   /** The session's report as stored (JSON parsed); null when none or unreadable. */
@@ -47,7 +49,7 @@ export type FixTurn = {
   createdAt: string; settledAt: string | null;
 };
 
-export type NewFixTurn = { sessionId: number; step: FixStep; purpose: FixTurnPurpose; head?: string | null; callId?: number | null; parentId?: number | null };
+export type NewFixTurn = { sessionId: number; step: FixTurnStep; purpose: FixTurnPurpose; head?: string | null; callId?: number | null; parentId?: number | null };
 
 /** How a turn ended; fields left out stay as they are. */
 export type FixTurnSettle = {

@@ -1536,7 +1536,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS fix_sessions_live ON fix_sessions(kind, repo, 
 CREATE TABLE IF NOT EXISTS fix_session_turns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,
-  step TEXT NOT NULL,                 -- fixup | cifix | conflict | security
+  step TEXT NOT NULL,                 -- fixup | maintainer | cifix | conflict | security
   purpose TEXT NOT NULL,              -- start | step | findings | lint | undo | report | fresh
   head TEXT,                          -- the commit the turn's workspace base held
   call_id INTEGER,                    -- remote_calls.id

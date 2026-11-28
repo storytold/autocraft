@@ -15,7 +15,7 @@ import { WS_POD_PATH } from "../src/build/workspace.ts";
 import { createWorkspace, moveWorkspace } from "../src/build/workspaces.ts";
 import type { CheckRound } from "../src/implement/checks.ts";
 import type { Outcome } from "../src/remote/calls.ts";
-import type { StepGate } from "../src/fixsession/gates.ts";
+import { runGate, type StepGate } from "../src/fixsession/gates.ts";
 import type { StepTurn } from "../src/fixsession/messages.ts";
 import { ensureSession, loadSessions, turnsOf, updateSession, type FixSessionKind } from "../src/fixsession/store.ts";
 import { prStep, runStep, type StepEnv, type StepSpec } from "../src/fixsession/turn.ts";
@@ -118,8 +118,8 @@ const ready = () => (shared ??= setup());
 const base = (head: string) => ({ ref: "app#9", title: "Fix a", head });
 const fixupTurn = (head: string): StepTurn => ({ ...base(head), step: "fixup", reason: "a returns the wrong value", fixes: [{ file: LIB, change: "return 1" }], allowed: [LIB], newFilesIn: ["crates/app"], diff: "" });
 const cifixTurn = (head: string): StepTurn => ({ ...base(head), step: "cifix", failure: [{ check: "ci", steps: [{ job: "test", step: "cargo test", log: `error[E0308] at ${LIB}:1` }] }], allowed: [LIB] });
-const fixupGate = (): StepGate => ({ step: "fixup", allowed: [LIB], newFilesIn: ["crates/app"], scripts: null });
-const cifixGate = (): StepGate => ({ step: "cifix", allowed: [LIB], scripts: null });
+const fixupGate = (): StepGate => ({ step: "fixup", allowed: [LIB], newFilesIn: ["crates/app"], packages: ["crates/app"], scripts: null });
+const cifixGate = (): StepGate => ({ step: "cifix", allowed: [LIB], scripts: null, guard: async () => null });
 
 test("a change outside what its step allows gets one undo turn and is then refused, for a fix-up, a CI fix and a security fix", async () => {
   const s = await ready();
@@ -178,4 +178,16 @@ test("a refused fix-up edit left in the pod never reaches the next step: the CI 
   assert.doesNotMatch(cifix.diff, /util\.rs|AGENTS/);
   assert.equal(s.queued.at(-1)!.parentId, 5000 + before + 2, "the CI fix continues the session of the fix-up's last turn");
   assert.ok(existsSync(join(root, "repo-docs/AGENTS.txt")), "the default branch's AGENTS.md is in the workspace, outside the tree");
+});
+
+test("a fix-up's pod diff keeps its CRLF lines as written, and a new file belongs to its innermost package", async () => {
+  const crlf = `diff --git a/${LIB} b/${LIB}\nindex 1111111..2222222 100644\n--- a/${LIB}\n+++ b/${LIB}\n@@ -1 +1 @@\n-pub fn a() -> u8 { 0 }\r\n+pub fn a() -> u8 { 1 }\r\n`;
+  const gate: StepGate = { step: "fixup", allowed: [LIB], newFilesIn: ["crates/app"], packages: ["crates/app", "crates/app/inner"], scripts: null };
+  const ok = await runGate(gate, crlf, null);
+  assert.ok(ok.ok);
+  assert.equal(ok.patch, crlf, "the patch is the diff as git wrote it");
+  const nested = `diff --git a/crates/app/inner/src/new.rs b/crates/app/inner/src/new.rs\nnew file mode 100644\nindex 0000000..3333333\n--- /dev/null\n+++ b/crates/app/inner/src/new.rs\n@@ -0,0 +1 @@\n+pub fn n() {}\n`;
+  const refused = await runGate(gate, nested, null);
+  assert.ok(!refused.ok && refused.problems.some((p) => p.includes("inner/src/new.rs")), "a file inside another package is not the PR's crate's");
+  assert.ok((await runGate({ ...gate, newFilesIn: ["crates/app/inner"] }, nested, null)).ok);
 });

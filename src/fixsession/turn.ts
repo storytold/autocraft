@@ -19,22 +19,23 @@ import { runChecks, statOf, workspacePod, type CheckRound, type Pod } from "../i
 import { workspaceDiff } from "../implement/diff.ts";
 import { CLAUDE_PROMPTS, claudeParts } from "../prompts/index.ts";
 import { promptTier } from "../remote/bundle.ts";
+import { leaseItem } from "../runner/leases.ts";
 import { repoDocsFor } from "../sandbox/repo-docs.ts";
 import { runGate, type GateOk, type StepGate } from "./gates.ts";
 import {
   checksMessage, LOST_REPLY_MESSAGE, REPORT_MESSAGE, stepMessage, undoMessage,
-  type FixSessionTask, type FixStep as TaskStep, type HistoryNote, type HistoryTurn, type StepTurn,
+  type FixSessionTask, type HistoryNote, type HistoryTurn, type StepTurn,
 } from "./messages.ts";
 import { FIX_FOLLOW_UP_CALL, FIX_SESSION_CALL, parseFixReport, parseSecurityReport, SESSION_DIFF_MAX_BYTES, SESSION_REPO_DOCS, type SecurityReport } from "./report.ts";
 import {
   addTurn, endSession, ensureSession, lastTurn, loadSessions, SESSION_MAX_TURNS, settleTurn, turnsOf, updateSession,
-  type FixSession, type FixStep, type FixTurn, type FixTurnPurpose,
+  type FixSession, type FixTurn, type FixTurnPurpose, type FixTurnStep,
 } from "./store.ts";
 import { ensureWorkspace, WORKSPACE_SESSION_KIND, type FixWorkspaceEnv } from "./workspace.ts";
 
 export type FixPromptId = "fix.session" | "security.session";
-/** The step a turn works for, with a maintainer's `fix <instructions>` apart from the review's fixes. */
-export type GateStep = TaskStep | "security";
+/** The step a turn works for, with a maintainer's `fix <instructions>` apart from the review's fixes; turns are stored under it. */
+export type GateStep = FixTurnStep;
 
 /** A lease lost with its Task Runner goes back to the queue once, onto the same workspace. */
 const CALL_ATTEMPTS = 2;
@@ -47,16 +48,15 @@ const STEP_TURNS_MAX = 10;
 /** Calls in a row that end without a reply before the step fails. */
 const MISSES_MAX = 2;
 const AGENTS_FILE = `${SESSION_REPO_DOCS}/AGENTS.txt`;
+/** The purposes of a step's opening turn: the backward counts of a resumed step stop there. */
+const OPENING: readonly FixTurnPurpose[] = ["start", "step"];
 /** The reasons of a diff that was read but cannot be used (workspaceDiff, collectDiff): the change is refused, not the step failed. */
 const CHANGE_REFUSAL = /over \d+ MiB|not UTF-8/;
 
-/** The stored step of a turn: a maintainer's fix is a fix-up. */
-export const storedStep = (s: GateStep): FixStep => (s === "maintainer" ? "fixup" : s);
-
-export type FixTurnResult = TurnResult<SecurityReport> & { step: FixStep; head: string; parentId?: number };
+export type FixTurnResult = TurnResult<SecurityReport> & { step: GateStep; head: string; parentId?: number };
 export type FixRound = { id: number; callId: number | null; sessionId: number; result: FixTurnResult };
 export type FixTurnRequest = {
-  session: FixSession; workspaceId: number; step: FixStep; purpose: FixTurnPurpose; head: string; stdin: string;
+  session: FixSession; workspaceId: number; step: GateStep; purpose: FixTurnPurpose; head: string; stdin: string;
   promptId: FixPromptId; items: ItemRef[]; by: string;
   /** A follow-up: the call whose harness session it continues. It keeps that session's system prompt and version. */
   parentId?: number;
@@ -176,7 +176,8 @@ export type StepResult =
   /** The report says done and the tree holds no change. */
   | { kind: "empty"; report: SecurityReport; callId: number }
   | { kind: "refused"; problems: string[]; report: SecurityReport; callId: number; diff: string | null }
-  | { kind: "ok"; gate: GateOk; diff: string; diffHash: string; report: SecurityReport; callId: number; turnId: number };
+  /** `base`: the workspace's base commit, which the diff is against (the tree of `spec.head`). */
+  | { kind: "ok"; gate: GateOk; diff: string; base: string; diffHash: string; report: SecurityReport; callId: number; turnId: number };
 export type StepOutcome = StepResult & { session: FixSession; workspaceId: number | null; turns: FixTurnResult[]; checks: CheckRound[] };
 
 /** The default branch's AGENTS.md of `repo` from the docs cache, or null. */
@@ -226,17 +227,31 @@ async function inputTokens(db: Db, callId: number): Promise<number> {
 const historyTurn = (t: FixTurnResult, files: string[]): HistoryTurn | null =>
   t.step === "security" ? null : { step: t.step, head: t.head, outcome: t.report ? `${t.outcome} (${t.report.status})` : t.outcome, files, summary: t.report?.summary ?? null };
 
+/** The work lease a step holds on an item's fix session for as long as it runs (src/runner/leases.ts). */
+export const fixSessionLease = (s: Pick<FixSession, "kind" | "repo" | "number">): string => `fixsession:${s.kind}:${s.repo}#${s.number}`;
+
 /**
  * Runs one step on the session: the workspace ready at `spec.head` (a new step starts from a clean tree), the turns, AutoCraft's
  * checks (findings go back at most CHECK_FOLLOW_UPS times), the diff and the step's gates (a refusal goes back once as an undo
- * turn). A turn a job before this one queued for the same step and head is adopted on the tree it worked on. NoTakerError,
- * WaitLimitError, halts and WorkspaceUnavailable pass through.
+ * turn). A turn a job before this one queued for the same step and head is adopted on the tree it worked on. The step holds the
+ * item's fix session lease throughout; while another job holds it the step waits. NoTakerError, WaitLimitError, halts and
+ * WorkspaceUnavailable pass through.
  */
 export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec): Promise<StepOutcome> {
+  const release = await leaseItem(env.db, fixSessionLease(session), env.log);
+  if (!release) return { kind: "wait", reason: "another job works this fix session", session, workspaceId: session.workspaceId, turns: [], checks: [] };
+  try {
+    return await leasedStep(env, session, spec);
+  } finally {
+    await release();
+  }
+}
+
+async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Promise<StepOutcome> {
   const db = env.db;
   const calls = env.calls ?? realCalls;
   const store = STORES[session.kind];
-  const step = storedStep(spec.step);
+  const step = spec.step;
   const items = spec.items ?? [{ repo: session.repo, number: session.number }];
   const by = env.by ?? "autocraft";
   let s = session;
@@ -285,22 +300,26 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
   const check = env.checks ?? runChecks;
   // The adopted turn goes on only on the tree it worked on; on a new or remade workspace the step starts over.
   const kept = resume && !ws.treeLost;
-  if (!kept) {
-    round = r = null;
-    const docs = await putRepoDocs(env, ws.workspaceId, await (env.agents ?? ((repo) => defaultAgents(db, repo)))(s.repo));
-    if (docs) env.log(`fix session ${s.id}: the repository's AGENTS.md was not put in the workspace (${docs})`);
-  }
-  // Counts of this step's follow-ups so far, from the adopted turn back to the step's first.
-  let checkTurns = 0, undone = false, reportAsked = false;
+  if (!kept) round = r = null;
+  // This step's turns so far, from the adopted turn back to the step's opening turn (purpose start or step).
+  let sent = 0, checkTurns = 0, undone = false, reportAsked = false;
   if (kept) {
     for (const t of (await turnsOf(db, s.id)).reverse()) {
       if (t.step !== step || t.head !== spec.head) break;
+      sent++;
       if (t.purpose === "findings") checkTurns++;
       if (t.purpose === "undo") undone = true;
       if (t.purpose === "report") reportAsked = true;
-      if (t.purpose === "step" || t.purpose === "start") break;
+      if (OPENING.includes(t.purpose)) break;
     }
   }
+  // Contributor code runs in the pod, so the maintainers' rules are written again before every turn.
+  let agents: string | null | undefined;
+  const docs = async (): Promise<void> => {
+    if (agents === undefined) agents = await (env.agents ?? ((repo) => defaultAgents(db, repo)))(s.repo);
+    const bad = await putRepoDocs(env, ws.workspaceId, agents);
+    if (bad) env.log(`fix session ${s.id}: the repository's AGENTS.md was not put in the workspace (${bad})`);
+  };
 
   type Next = { purpose: FixTurnPurpose; message: string | null };
   const opening = async (): Promise<Next> => ({
@@ -308,7 +327,7 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
     message: spec.message({ moved: ws.moved ? { from: ws.moved.from, diffStat: await env.movedStat?.(ws.moved.from, ws.moved.to).catch(() => "") ?? "" } : null }),
   });
   let next: Next | null = round ? null : await opening();
-  let sent = 0, misses = 0, retryOf: number | null = null;
+  let misses = 0, retryOf: number | null = null;
 
   for (;;) {
     if (next) {
@@ -337,10 +356,12 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
         const carry = next.purpose === "findings" || next.purpose === "undo" ? next.message : null;
         stdin = carry ? `${t.stdin}\n\n${carry}` : t.stdin;
         if (retryOf !== null) stdin = await resumePrompt(db, retryOf, stdin);
-        purpose = fresh ? "fresh" : "start";
+        // The step's opening stays its opening (start or step) on a new harness session; a later turn on one is fresh.
+        purpose = next.purpose !== "step" ? "fresh" : fresh ? "step" : "start";
       }
       retryOf = null;
       const req: FixTurnRequest = { session: s, workspaceId: ws.workspaceId, step, purpose, head: spec.head, stdin, promptId: spec.promptId, items, by, ...(follow && next.message !== null && { parentId: s.lastCallId! }), ...(prompt && { prompt }) };
+      await docs();
       round = await queueTurn(db, calls, store, req);
       sent++;
       env.log(`fix session ${s.id}: turn ${round.callId} (${purpose}, ${spec.step}) queued${req.parentId !== undefined ? ` on the session of call ${req.parentId}` : ""}`);
@@ -389,7 +410,7 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
     }
     if (diff === "") return done({ kind: "empty", report, callId }, ws.workspaceId);
     const g = diff === null ? { ok: false as const, problems: [(d as { reason: string }).reason] } : await runGate(spec.gate(pod), diff, report);
-    if (g.ok) return done({ kind: "ok", gate: g, diff: diff!, diffHash, report, callId, turnId: cur.id }, ws.workspaceId);
+    if (g.ok) return done({ kind: "ok", gate: g, diff: diff!, base: ws.baseCommit, diffHash, report, callId, turnId: cur.id }, ws.workspaceId);
     env.log(`fix session ${s.id}: the ${spec.step} gates refused the change: ${g.problems.join("; ")}`);
     if (undone) return done({ kind: "refused", problems: g.problems, report, callId, diff }, ws.workspaceId);
     undone = true;

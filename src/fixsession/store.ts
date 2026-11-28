@@ -9,7 +9,7 @@ import {
   type EndedFixSession, type EndGuard, type FixSession, type FixSessionEnd, type FixSessionKind, type FixSessionPatch, type FixTurn, type FixTurnOutcome, type FixTurnSettle, type NewFixTurn,
 } from "../data/fixsession/index.ts";
 
-export type { EndedFixSession, FixSession, FixSessionEnd, FixSessionKind, FixSessionPatch, FixStep, FixTurn, FixTurnOutcome, FixTurnPurpose, FixTurnSettle, NewFixTurn } from "../data/fixsession/index.ts";
+export type { EndedFixSession, FixSession, FixSessionEnd, FixSessionKind, FixSessionPatch, FixStep, FixTurn, FixTurnOutcome, FixTurnStep, FixTurnPurpose, FixTurnSettle, NewFixTurn } from "../data/fixsession/index.ts";
 
 /** A session without a write for this long ends: its workspace is not kept for work that may not come. */
 export const SESSION_IDLE_MS = 24 * 3600_000;
