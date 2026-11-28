@@ -28,8 +28,8 @@ import { jevRequestOf } from "../prompts/index.ts";
 import { runCommand, type Actor, type CommandInput, type CommandResult } from "./apply.ts";
 import { askedQuestion, CONDITION, GUARD, parse, type ParseOptions } from "./parse.ts";
 import { addedWords, jevScore, NONE_CHOICE, parseTranslation, READ_ITEMS_MAX, READ_MARGIN, READ_RUN_SCORE, READ_SECOND_SCORE, READ_TEXT_CHARS, readState, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
-import { ASK_CHOICE, candidatesFor, choiceCriteria, jevChoice, type Candidate, type Choice, type ChoiceItem } from "./read-choice.ts";
-import { isLive, optionNamed } from "./resolve.ts";
+import { ASK_CHOICE, candidatesFor, choiceCriteria, groupChoice, jevChoice, type Candidate, type ChoiceItem, type Distribution } from "./read-choice.ts";
+import { isLive, optionNamed, resolve, type ItemState } from "./resolve.ts";
 import { MEANING_WORDS, recommendationText } from "./status.ts";
 import { openRecommendation, shownWorkflow, type ItemRef, type Parsed, type Surface } from "./types.ts";
 
@@ -70,7 +70,7 @@ export type ChooseAsk = { ask: ReadAsk; candidates: Candidate[] };
 
 /** What tests replace: Jev's choice, the translate call and Jev's score (each null: no answer). */
 export type ReadDeps = {
-  choose?: (db: Db, ask: ChooseAsk) => Promise<Choice | null>;
+  choose?: (db: Db, ask: ChooseAsk) => Promise<Distribution | null>;
   /** `ownOnly`: only the sender's own Task Runner may read it (a quiet item). */
   translate?: (db: Db, ask: ReadAsk, login: string, o: { ownOnly: boolean }) => Promise<Translation | null>;
   score?: (db: Db, ask: ScoreAsk) => Promise<number | null>;
@@ -150,13 +150,14 @@ async function mayRead(db: Db, actor: Actor, own: readonly ItemRef[]): Promise<b
 }
 
 /** The call's input: the text, and each item's kind, AutoCraft's work on it and an open question with its plan parts (left out on a quiet item). */
-async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boolean; choice: ChoiceItem[] }> {
+async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boolean; choice: ChoiceItem[]; states: ItemState[] }> {
   const refs = read.own.slice(0, READ_ITEMS_MAX).map((i) => ({ repo: i.repo.split("/").pop()!, number: i.number }));
   const keys = refs.map((r) => `${r.repo}#${r.number}`);
   // Quiet over every item of the message, not only those the call describes: one quiet item keeps the text on the sender's own Task Runner.
   const [items, history, quiet] = await Promise.all([loadItems(db, refs, "pr"), loadWorkflowHistory(db, refs), loadQuiet(db, read.own.map((i) => `${i.repo.split("/").pop()!}#${i.number}`))]);
   const out: ReadItem[] = [];
   const choice: ChoiceItem[] = [];
+  const states: ItemState[] = [];
   for (const key of keys) {
     const it = items.get(key as never);
     if (!it) continue;
@@ -165,9 +166,10 @@ async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boo
     const rec = isLive(wf) ? openRecommendation(wf) : null;
     const veiled = quiet.has(key);
     const live = isLive(wf);
+    states.push({ kind: it.kind === "pr" ? "pr" : "issue", workflow: live ? wf : null, held: wf?.state === "stopped" ? wf : null });
     choice.push({
       kind: it.kind === "pr" ? "pr" : "issue", live, held: wf?.state === "stopped", approved: !!wf?.approvedBy && live,
-      rec: rec ? { text: veiled ? null : recommendationText(rec), merges: rec.merges, fix: rec.parts.fix } : null,
+      rec: rec ? { text: veiled ? null : recommendationText(rec), merges: rec.merges } : null,
       parts: rec && !veiled ? wf!.plan.filter((p) => p.state === "planned").map((p) => ({ n: p.n, title: p.title })) : [],
     });
     out.push({
@@ -175,7 +177,7 @@ async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boo
       ...(rec && !veiled ? { question: recommendationText(rec), parts: wf!.plan.filter((p) => p.state !== "dropped").map((p) => ({ n: p.n, title: p.title })) } : {}),
     });
   }
-  return { ask: { ...(keys[0] ? { ref: keys[0] } : {}), message: read.text.slice(0, READ_TEXT_CHARS), items: out }, quiet: quiet.size > 0, choice };
+  return { ask: { ...(keys[0] ? { ref: keys[0] } : {}), message: read.text.slice(0, READ_TEXT_CHARS), items: out }, quiet: quiet.size > 0, choice, states };
 }
 
 const TRANSLATE = (id: "command.read" | "interactive.command-read"): ClaudeStep<ReadAsk, Translation> => ({
@@ -192,7 +194,7 @@ function readRequest(field: "command" | "exact" | "question", state: string, cri
   const q = req.questions[field]!;
   return JSON.stringify({ ...req, state, questions: { [field]: criteria ? { ...q, criteria } : q } });
 }
-const CHOOSE: JevStep<ChooseAsk, Choice> = {
+const CHOOSE: JevStep<ChooseAsk, Distribution> = {
   provider: "jev", id: "command.read.jev",
   request: (a) => ({ item: { ref: "command" }, body: readRequest("command", readState(a.ask), choiceCriteria(a.candidates)) }),
   parse: (answers, a, ctx) => {
@@ -228,7 +230,7 @@ async function translate(db: Db, a: ReadAsk, login: string, o: { ownOnly: boolea
   }
 }
 
-async function choose(db: Db, a: ChooseAsk): Promise<Choice | null> {
+async function choose(db: Db, a: ChooseAsk): Promise<Distribution | null> {
   try {
     const r = await runModelStep(db, CHOOSE, a);
     return r.ok ? r.value : null;
@@ -257,12 +259,32 @@ const askProposal = (text: string): string => {
 };
 
 /**
+ * What each choice would run on the items, as a key: choices with the same key are one effect (yes and the commands that spell out the
+ * open recommendation). A choice that runs nothing on some item, or names no command, has no key.
+ */
+function effectsOf(cands: readonly Candidate[], states: readonly ItemState[]): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!states.length) return out;
+  for (const c of cands) {
+    if (!c.parsed) continue;
+    const runs = states.map((st) => resolve(c.parsed!, st));
+    if (runs.some((r) => r.kind !== "run")) continue;
+    out.set(c.label, JSON.stringify(runs.map((r) => {
+      const { how: _h, answers: _a, ...what } = (r as Extract<typeof r, { kind: "run" }>).run;
+      return what;
+    })));
+  }
+  return out;
+}
+
+/**
  * Jev's choice among the commands the items can take now: undefined when Jev gave no answer, null when it chose none of them. A text
  * that names an item that is not one of the message's own only proposes it.
  */
-async function chosen(db: Db, read: ReadText, ask: ReadAsk, items: ChoiceItem[]): Promise<Reading | null | undefined> {
+async function chosen(db: Db, read: ReadText, ask: ReadAsk, items: ChoiceItem[], states: ItemState[]): Promise<Reading | null | undefined> {
   const candidates = candidatesFor(items, read.text, { asks: !!read.ask });
-  const c = await (read.deps?.choose ?? choose)(db, { ask, candidates });
+  const dist = await (read.deps?.choose ?? choose)(db, { ask, candidates });
+  const c = dist ? groupChoice(dist, candidates, effectsOf(candidates, states)) : null;
   if (!c) return undefined;
   const pick = candidates.find((x) => x.label === c.label)!;
   if (pick.label === NONE_CHOICE) return null;
@@ -278,8 +300,8 @@ async function chosen(db: Db, read: ReadText, ask: ReadAsk, items: ChoiceItem[])
 
 /** The command a model reads in the text: Jev's choice, or when Jev gives no answer, Haiku's translation checked by the parser and scored; null when there is none. */
 export async function readCommand(db: Db, login: string, read: ReadText): Promise<Reading | null> {
-  const { ask, quiet, choice } = await askOf(db, read);
-  const picked = await chosen(db, read, ask, choice);
+  const { ask, quiet, choice, states } = await askOf(db, read);
+  const picked = await chosen(db, read, ask, choice, states);
   if (picked !== undefined) return picked;
   const tr = await (read.deps?.translate ?? translate)(db, ask, login, { ownOnly: quiet });
   if (!tr?.command) return null;

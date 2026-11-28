@@ -70,7 +70,7 @@ test("Jev's choice among the item's commands runs only when it is sure and well 
   const labels: string[][] = [];
   const choose = (score: number, second: number): ReadDeps["choose"] => async (_db, a) => {
     labels.push(a.candidates.map((c) => c.label));
-    return { label: "review", score, second: { label: "merge", score: second } };
+    return { review: score, merge: second };
   };
   let translated = 0;
   const haiku: ReadDeps = { translate: async () => { translated++; return { command: "review", confidence: 0.5 }; }, score: async () => 0.95 };
