@@ -7,9 +7,12 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
-import { createEnv } from "../src/build/envs.ts";
+import { createEnv, updateEnv } from "../src/build/envs.ts";
+import { endWorkspace, moveWorkspace } from "../src/build/workspaces.ts";
 import { addFixupRequests } from "../src/data/workflow/index.ts";
+import { loadSessions } from "../src/fixsession/store.ts";
 import { setFixSessions } from "../src/fixsession/switch.ts";
+import { ensureWorkspace, fixWorkspaceReading, WorkspaceUnavailable } from "../src/fixsession/workspace.ts";
 import { runFixup } from "../src/fixup/index.ts";
 import { CLIPPY_ARTIFACT } from "../src/prepush/index.ts";
 import { carriedReviews } from "../src/review/carry.ts";
@@ -163,4 +166,42 @@ test("a commit that holds a file outside the session's change is refused, and a 
   assert.match(t.out.join("\n"), /the fix session's tree is at fffffff, not at/);
   assert.deepEqual(await t.rows(), [], "nothing is recorded");
   assert.deepEqual(pushes(t.w.log), []);
+});
+
+test("a session workspace that fails to start a second time at the head fails the step, and none is made there again until the head or an environment changes", async () => {
+  const s = await sessionWorld(README);
+  s.pod.model(() => ({ [README]: "# App\n- two\n" }));
+  // The session's pod is gone, and every new one fails to start (the launcher's part).
+  await endWorkspace(s.db, s.session.workspaceId!);
+  const failing = setInterval(() => {
+    void s.db.all(s.db.k.selectFrom("workspaces").select("id").where("state", "=", "requested")).then(async (rows) => {
+      for (const r of rows) await moveWorkspace(s.db, Number(r.id), ["requested"], "failed", { error: "the pod did not start" });
+    }).catch(() => {});
+  }, 20);
+  try {
+    const made = async () => (await s.db.all(s.db.k.selectFrom("workspaces").select("id").where("owner", "=", `fix session ${s.session.id}`))).length;
+    await s.run();
+    assert.deepEqual(await s.rows(), [], `the first start failure is a wait: ${s.out.join("\n")}`);
+    await s.run();
+    const [row] = await s.rows();
+    assert.equal(row?.state, "failed", s.out.join("\n"));
+    assert.equal(s.pod.queued.length, 0, "no turn ran");
+    const reading = await fixWorkspaceReading(s.db), count = await made();
+    // Planned again (its second try), the step makes no new workspace at this head, records nothing, and the lane's reading stays.
+    await s.run();
+    assert.equal(await made(), count, "no workspace is made at the same head");
+    assert.equal((await s.rows()).length, 1, "nothing more is recorded");
+    assert.equal(await fixWorkspaceReading(s.db), reading, "the lane is not woken");
+    // An edited environment wakes the lane, and the step starts a workspace at the head again.
+    await updateEnv(s.db, "pods", { label: "Pods 2" }, "op");
+    assert.notEqual(await fixWorkspaceReading(s.db), reading, "the lane is woken");
+    await s.run();
+    assert.equal(await made(), count + 1, `a workspace is made after the edit: ${s.out.join("\n")}`);
+    // At a new head the session gets a workspace too.
+    const now = (await loadSessions(s.db, [s.session.id])).get(s.session.id)!;
+    await assert.rejects(ensureWorkspace(now, "e".repeat(40), { db: s.db, api: s.pod.api, log: () => {}, pollMs: 20 }), WorkspaceUnavailable);
+    assert.equal(await made(), count + 2, "a workspace is made at the new head");
+  } finally {
+    clearInterval(failing);
+  }
 });

@@ -64,6 +64,7 @@ import { pushesAreUnsettled } from "./unsettled.ts";
 import { POOL_MAX, pool } from "../classify/run.ts";
 import { diffFiles, type DiffFile } from "../fixsession/gates.ts";
 import { fixSessionsOn } from "../fixsession/switch.ts";
+import { endStepPod } from "../fixsession/park.ts";
 import { defaultSessionDeps, sessionFixup, sessionPatch, storedSessionPatch, type FixSessionDeps } from "./session.ts";
 
 export { MAX_ATTEMPTS, type FixCandidate, type FixSelection } from "./candidates.ts";
@@ -200,8 +201,8 @@ class Recorder {
   }
 
   /** Stored patches whose Plan no longer lists the push (head moved, a Hold or Close answer, approval revoked) are dropped. */
-  async dropUnlisted(repo: string, listed: number[]): Promise<void> {
-    await dropUnlistedPatches(this.db, "fixup", repo, new Set(listed));
+  async dropUnlisted(repo: string, listed: number[]): Promise<{ repo: string; number: number }[]> {
+    return await dropUnlistedPatches(this.db, "fixup", repo, new Set(listed));
   }
 
   /** A fixups row and a stages row: `hold` for the two states that need a person, else the PR's `take` stage with a note. */
@@ -260,7 +261,13 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   const titles = new Map([...await loadItems(db, [...sel.lint, ...sel.fix].map(refPair), "card")].map(([k, r]) => [k, (r.title ?? "").slice(0, 300)]));
   const titleOf = (c: { repo: string; number: number }) => titles.get(refOf(c)) ?? "";
   const rec = new Recorder(db, at);
-  await rec.dropUnlisted(repo, sel.listed);
+  /** A fix-up's step on the PR's fix session ended (it did not wait): the pod is parked, or kept live for a pending lint follow-up. */
+  const endStep = async (number: number): Promise<void> => {
+    const deps = (d.fixSession ?? defaultSessionDeps)(db);
+    if (deps) await endStepPod({ ...deps, db, log }, { repo, number });
+  };
+  // A stored change the plan no longer lists has no lint follow-up any more.
+  for (const x of await rec.dropUnlisted(repo, sel.listed)) await endStep(x.number);
 
   // Not approved for comments: no GitHub write, recorded once per head.
   for (const c of sel.cannotPush) {
@@ -372,6 +379,8 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
     let pushed = false;
     /** A fix session's wait: the item is neither handled nor a try. */
     let deferHandled = false, waited = false;
+    /** The item worked on the PR's fix session (a turn, or a change a turn stored): its pod's hold ends with the item. */
+    let onSession = false, halted = false;
     const fail = async (state: "failed" | "refused" | "rejected" | "superseded", raw: string) => {
       const reason = scrubReason(raw, d.root);
       await rec.fixup(c, state, reason, files);
@@ -452,6 +461,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       if (c.lint) {
         const res = await readLint(db, c.lint.task ?? -1);
         if (res.kind === "pending") { log(`  ${ref}: the lint task is still running`); return; }
+        onSession = c.lint.sessionTurn !== null;
         if (res.kind === "infra-failed") {
           if (c.lint.state === "requeued") { await fail("failed", `lint: ${res.reason}`); return; }
           const again = await queueLintFor(db, { step: "fixup", repo, number: c.number, head, base: pr.baseRefOid ?? null, patch: c.lint.patch });
@@ -491,12 +501,12 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
           const got = await sessionPatch({ db, deps: sessionDeps!, git, log, by: params.by === undefined || params.by === "pipeline" ? "pipeline" : params.by.operator, ...(c.lint && findings.length && { lint: { findings, patch: c.lint.patch, sessionTurn: c.lint.sessionTurn } }) }, c, task);
           if (got.kind === "wait") {
             // Nothing recorded and no try: the step runs again once the session's lease is free or its workspace moves (the lane's
-            // planner reading, fixWorkspaceReading).
+            // planner reading, fixWorkspaceReading), or once a person goes on with a stopped item.
             waited = true;
             log(`  ${ref}: waiting: ${got.reason}`);
             return;
           }
-          if (got.kind === "skip") { log(`  ${ref}: skipped: ${got.reason}; tried again later`); return; }
+          onSession = true;
           if (got.kind !== "ok") { await fail(got.kind, got.reason); return; }
           v = got;
           split = { diff: got.patch, changes: got.changes };
@@ -605,13 +615,17 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
         : await ghComment(gw, g, d.exec, "fixup-comment", { repo, number: c.number, pr: true }, note, body, { run: runId, to: commit });
       if (cm.code !== 0) log(`  ${ref}: comment failed: ${oneLine(cm.stderr)}`);
     } catch (e) {
-      if (isHalt(e)) throw e;
+      if (isHalt(e)) { halted = true; throw e; }
       if (pushed) { log(`  ${ref}: after the push: ${scrubReason(oneLine(String((e as Error).message ?? e)), d.root)}`); return; }
       await fail("failed", oneLine(String((e as Error).message ?? e)));
     } finally {
-      if (deferHandled && !waited) params.onHandled?.(++handled.n);
-      if (waited) counted = false;
-      try { await release(); } finally { giveBack(); }
+      try {
+        if (onSession && !waited && !halted) await endStep(c.number);
+      } finally {
+        if (deferHandled && !waited) params.onHandled?.(++handled.n);
+        if (waited) counted = false;
+        try { await release(); } finally { giveBack(); }
+      }
     }
   };
   // Items of one PR run one after the other inside one pool item; PRs run side by side.

@@ -173,7 +173,7 @@ test("lint findings on a session's CI fix go back to that session, an unclaimed 
   assert.equal(second?.state, "linting", out.join("\n"));
   assert.equal(second!.lint_round, 2);
   assert.notEqual(second!.lint_task, first!.lint_task);
-  assert.deepEqual((await turnsOf(db, live.id)).map((t) => [t.purpose, t.outcome]), [["start", "done"], ["lint", "unclaimed"], ["fresh", "done"]]);
+  assert.deepEqual((await turnsOf(db, live.id)).map((t) => [t.purpose, t.outcome]), [["start", "done"], ["lint", "unclaimed"], ["lint", "done"]]);
   assert.equal(log.filter((l) => l === "push").length, 0, "nothing is pushed while lint has findings");
 
   // 3. Lint clean: the push changes only the CI fix's file, and the pod is parked.

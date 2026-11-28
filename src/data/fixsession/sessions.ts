@@ -37,14 +37,28 @@ export async function loadLiveFixSession(db: Db, kind: FixSessionKind, repo: str
 }
 
 /**
- * The workspaces of live fix sessions of `kind` that are neither ready nor parked, as `id:state` sorted by id: a step that waited for
- * one runs again when it moves (fixWorkspaceReading). 1 statement.
+ * The workspaces of live fix sessions of `kind` that are neither ready nor parked, as `id:state`, and those at another commit than
+ * their session's head, as `id:state@commit`, sorted by id: a step that waited for one runs again when it moves
+ * (fixWorkspaceReading). 1 statement.
  */
 export async function loadFixWorkspaceWaits(db: Db, kind: FixSessionKind): Promise<string> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.fix_sessions as fs").innerJoin("main.workspaces as w", "w.id", "fs.workspace_id")
-    .select(["w.id", "w.state"]).where("fs.kind", "=", kind).where("fs.state", "=", "live").where("w.state", "not in", ["ready", "parked"]).orderBy("w.id"));
-  return rows.map((r: Raw) => `${Number(r.id)}:${r.state}`).join(",");
+    .select(["w.id", "w.state", "w.base_sha", "fs.head"]).where("fs.kind", "=", kind).where("fs.state", "=", "live")
+    .where((eb) => eb.or([eb("w.state", "not in", ["ready", "parked"]), eb.and([eb("fs.head", "is not", null), eb("w.base_sha", "<>", eb.ref("fs.head"))])])).orderBy("w.id"));
+  return rows.map((r: Raw) => `${Number(r.id)}:${r.state}${r.head !== null && r.base_sha !== r.head ? `@${String(r.base_sha).slice(0, 12)}` : ""}`).join(",");
+}
+
+/**
+ * Workspaces of `owner` (a fix session) at `head` that failed before they were ever ready, failed after `since` when given: the
+ * session's start failures at that head. 1 statement.
+ */
+export async function countFixStartFailures(db: Db, owner: string, head: string, since: string | null): Promise<number> {
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom("main.workspaces").select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("owner", "=", owner).where("base_sha", "=", head).where("state", "=", "failed").where("base_commit", "is", null)
+    .$if(since !== null, (b) => b.where("state_at", ">", since!)));
+  return Number(r?.n ?? 0);
 }
 
 /** Sessions by id. 1 statement. */

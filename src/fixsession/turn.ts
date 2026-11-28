@@ -324,6 +324,7 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
   }
   const ws = await ensureWorkspace(s, spec.head, env, { keepTree: resume || !!spec.lint });
   if (ws.kind === "wait") return done({ kind: "wait", reason: ws.reason }, s.workspaceId);
+  if (ws.kind === "failed") return done({ kind: "failed", reason: ws.reason }, s.workspaceId);
   if (!await reload()) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, ws.workspaceId);
   const pod = env.pod?.(ws.workspaceId) ?? workspacePod(db, ws.workspaceId, env.cancelled, env.api);
   const check = env.checks ?? runChecks;
@@ -396,8 +397,9 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
         const carry = next.purpose === "findings" || next.purpose === "undo" ? next.message : null;
         stdin = carry ? `${t.stdin}\n\n${carry}` : t.stdin;
         if (retryOf !== null) stdin = await resumePrompt(db, retryOf, stdin);
-        // The step's opening stays its opening (start or step) on a new harness session; a later turn on one is fresh.
-        purpose = next.purpose !== "step" ? "fresh" : fresh ? "step" : "start";
+        // The step's or lint round's opening stays its opening (start, step or lint) on a new harness session, so a resumed step's
+        // backward counts stop there; a later turn on one is fresh.
+        purpose = next.purpose === "lint" ? "lint" : next.purpose !== "step" ? "fresh" : fresh ? "step" : "start";
       }
       retryOf = null;
       const req: FixTurnRequest = { session: s, workspaceId: ws.workspaceId, step, purpose, head: spec.head, stdin, promptId: spec.promptId, items, by, ...(follow && next.message !== null && { parentId: s.lastCallId! }), ...(prompt && { prompt }) };

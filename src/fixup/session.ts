@@ -7,9 +7,8 @@ import type { Db } from "../db/index.ts";
 import { guardedApi, inClusterApi } from "../build/kube-api.ts";
 import { prPackages, runGate, type GateResult, type StepGate } from "../fixsession/gates.ts";
 import type { StepTurn } from "../fixsession/messages.ts";
-import { loadSessions } from "../fixsession/store.ts";
 import { lintParent, prStep, runStep, type StepEnv, type StepOutcome } from "../fixsession/turn.ts";
-import { openSession, parkSession, WorkspaceUnavailable } from "../fixsession/workspace.ts";
+import { openSession, WorkspaceUnavailable } from "../fixsession/workspace.ts";
 import type { FixCandidate } from "./candidates.ts";
 import type { Git } from "./git.ts";
 import type { BuildScripts } from "./patch.ts";
@@ -51,12 +50,12 @@ export type SessionPatch =
   /** Recorded as today's shapes: refused (the gates refused the change after its undo turn), failed (no change to push). */
   | { kind: "failed" | "refused"; reason: string }
   /**
-   * Nothing recorded, and the item is no try: another job works the session (runStep left a skip on the session's lease), or the
-   * workspace is starting or cannot be had now (registry wait FIX_WORKSPACE_WAIT; the lane's planner reading wakes the step).
+   * Nothing recorded, and the item is no try: another job works the session (runStep left a skip on the session's lease), the
+   * workspace is starting or cannot be had now (registry wait FIX_WORKSPACE_WAIT), or its tree is at another head (the lane's planner
+   * reading, fixWorkspaceReading, wakes the step on either); or the session ended meanwhile (its PR closed, a person stopped it),
+   * so the plan lists the item again only once a person goes on with it.
    */
-  | { kind: "wait"; reason: string }
-  /** Nothing recorded: the session ended meanwhile (the PR closed, a person stopped it) or its tree is at another head. */
-  | { kind: "skip"; reason: string };
+  | { kind: "wait"; reason: string };
 
 export type SessionRun = {
   db: Db; deps: FixSessionDeps; git: Git; log: (line: string) => void; by: string;
@@ -67,38 +66,31 @@ export type SessionRun = {
 /**
  * Runs the fix-up as a step of the PR's fix session and returns the gated change. With lint findings the follow-up goes on the
  * session of the turn that wrote the stored change, on the tree as head plus that change; when that session is gone, or its runner
- * does not take the follow-up, a fresh session gets the task with the findings and the tree as it is. The session's pod is parked
- * once the step has nothing pending (the lint task runs elsewhere).
+ * does not take the follow-up, a fresh session gets the task with the findings and the tree as it is. Unless it waited, the caller
+ * ends the step's hold on the pod (endStepPod: parked, or kept live for a pending lint follow-up).
  */
 export async function sessionPatch(r: SessionRun, c: FixCandidate, t: SessionFixup): Promise<SessionPatch> {
   const { db, git } = r;
   const opened = await openSession(db, "pr", c.repo, c.number, { head: t.turn.head });
-  if ("refused" in opened) return { kind: "skip", reason: "a person stopped the item's workflow" };
+  if ("refused" in opened) return { kind: "wait", reason: "a person stopped the item's workflow" };
   const session = opened.session;
   const env: StepEnv = {
     ...r.deps, db, log: r.log, by: r.by,
     movedStat: async (from, to) => (await git.git(["diff", "--stat", from, to])).stdout.trim().split("\n").pop() ?? "",
   };
   const spec = prStep(db, t.turn, () => t.gate, r.lint ? { lint: { findings: r.lint.findings, patch: r.lint.patch, parentId: await lintParent(db, session, r.lint.sessionTurn) } } : {});
-  let out: StepOutcome | null = null;
+  let out: StepOutcome;
   try {
     out = await runStep(env, session, spec);
   } catch (e) {
     // The workspace did not get ready (or the job was cancelled while it started): a wait on the workspace, never a try.
     if (e instanceof WorkspaceUnavailable) return { kind: "wait", reason: `the fix session's workspace: ${e.message}` };
     throw e;
-  } finally {
-    if (out?.kind !== "wait") {
-      const id = out?.session.id ?? session.id;
-      const now = (await loadSessions(db, [id])).get(id);
-      if (now?.state === "live") await parkSession(env, now).catch((e: unknown) => r.log(`  fix session ${id}: parking the workspace: ${(e as Error).message}`));
-    }
   }
   switch (out.kind) {
     case "wait":
-      return { kind: "wait", reason: out.reason };
     case "ended":
-      return { kind: "skip", reason: out.reason };
+      return { kind: "wait", reason: out.reason };
     case "failed":
       return { kind: "failed", reason: `fix session: ${out.reason}` };
     case "report":
@@ -109,7 +101,7 @@ export async function sessionPatch(r: SessionRun, c: FixCandidate, t: SessionFix
       return { kind: "refused", reason: out.problems.join("; ") };
     case "ok": {
       // The change must be on the head the fix-up applies it to; another one means the branch moved meanwhile.
-      if (out.baseSha !== t.turn.head) return { kind: "skip", reason: `the fix session's tree is at ${out.baseSha.slice(0, 7) || "no commit"}, not at ${t.turn.head.slice(0, 7)}` };
+      if (out.baseSha !== t.turn.head) return { kind: "wait", reason: `the fix session's tree is at ${out.baseSha.slice(0, 7) || "no commit"}, not at ${t.turn.head.slice(0, 7)}` };
       return { kind: "ok", patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed, changes: out.report.changes, turnId: out.turnId };
     }
   }

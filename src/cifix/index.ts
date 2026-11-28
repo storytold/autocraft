@@ -52,7 +52,7 @@ import { MAX_PUSHES_PER_PR, MAX_TRIES_PER_PR, type CifixCandidate } from "./cand
 import { selectCifix } from "./select.ts";
 import { formattingOnly, guardPatch, TEST_PATH } from "./guard.ts";
 import { ownFailure } from "../mainci/no-new.ts";
-import { askCiText, askText, commentText, commitMessage } from "./template.ts";
+import { ASK_TOO_LARGE_REASON, askCiText, askText, commentText, commitMessage } from "./template.ts";
 import { formatDiffPaths, matchPrFiles, triage, unrelatedTests } from "./triage.ts";
 import { CIFIX_ASK_REASON } from "../core/rules.ts";
 import { CheckTool, applyCheck, refusal } from "../checktool/index.ts";
@@ -73,8 +73,8 @@ import { CIFIX_SESSION_RULES, type CifixGate } from "../fixsession/gates.ts";
 import type { CifixTurn, FixStep as TurnStep } from "../fixsession/messages.ts";
 import { fixSessionsOn } from "../fixsession/switch.ts";
 import { lintParent, prStep, runStep, type StepEnv, type StepOutcome } from "../fixsession/turn.ts";
-import { openSession, parkSession, WorkspaceUnavailable } from "../fixsession/workspace.ts";
-import { loadLiveFixSession } from "../data/fixsession/index.ts";
+import { endStepPod } from "../fixsession/park.ts";
+import { openSession, WorkspaceUnavailable } from "../fixsession/workspace.ts";
 
 export { MAX_TRIES, type CifixCandidate } from "./candidates.ts";
 export { selectCifix } from "./select.ts";
@@ -213,8 +213,8 @@ class Recorder {
   }
 
   /** Stored patches whose Plan no longer lists the push (head moved, a Hold or Close answer, approval revoked) are dropped. */
-  async dropUnlisted(repo: string, listed: number[]): Promise<void> {
-    await dropUnlistedPatches(this.db, "cifix", repo, new Set(listed));
+  async dropUnlisted(repo: string, listed: number[]): Promise<{ repo: string; number: number }[]> {
+    return await dropUnlistedPatches(this.db, "cifix", repo, new Set(listed));
   }
 
   /**
@@ -414,7 +414,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   }
   const d = deps ?? defaultDeps();
   const rec = new Recorder(db, at);
-  await rec.dropUnlisted(repo, sel.listed);
+  const dropped = await rec.dropUnlisted(repo, sel.listed);
   const gw: Writer = { db, login: ACTOR, ...d.lane };
   const git = new Git(d.exec, d.root, repo);
   const titles = new Map([...await loadItems(db, [...sel.work, ...sel.collect.map((x) => x.c), ...sel.lint].map((c) => ({ repo: c.repo, number: c.number })), "card")].map(([k, r]) => [k, (r.title ?? "").slice(0, 300)]));
@@ -428,15 +428,18 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     if (!d.session) throw new Error("fix sessions are on for cifix, but this job has no fix session environment");
     return (sessionEnv ??= { movedStat: async (from, to) => (await git.git(["diff", "--stat", from, to])).stdout.trim().split("\n").pop() ?? "", ...d.session(db, log) });
   };
-  /** Parks the PR's fix session pod: its CI fix has nothing pending (pushed, posted, recorded failed). */
-  const parkLive = async (c: CifixCandidate): Promise<void> => {
+  /** The CI fix's step on the PR's fix session ended (it did not wait): the pod is parked, or kept live for a pending lint follow-up. */
+  const endStep = async (c: { number: number }): Promise<void> => {
+    let env: StepEnv;
     try {
-      const live = await loadLiveFixSession(db, "pr", repo, c.number);
-      if (live) await parkSession(envOf(), live);
-    } catch (e) {
-      log(`  ${refOf(c)}: the fix session's workspace was not parked: ${scrubReason(oneLine(String((e as Error).message ?? e)), d.root)}`);
+      env = envOf();
+    } catch {
+      return;
     }
+    await endStepPod(env, { repo, number: c.number });
   };
+  // A stored change the plan no longer lists has no lint follow-up any more.
+  if (sessions) for (const x of dropped) await endStep(x);
 
   /** Why `readPr` returned null for a PR; items run at once, so it is kept per PR. */
   const gone = new Map<number, string>();
@@ -531,8 +534,8 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       }
     }
     if (!canPush) {
-      const shownPatch = folded ?? v.patch;
-      const cm = await ghAskComment(gw, d.exec, "cifix-comment", g, codeNote, askText(checkName, shownPatch), { run: runId, head: c.head });
+      const ask = askText(checkName, folded ?? v.patch);
+      const cm = await ghAskComment(gw, d.exec, "cifix-comment", g, codeNote, ask.text, { run: runId, head: c.head });
       if (cm.code !== 0) {
         // Not sent: nothing reached GitHub, so the step tries again after a backoff. Otherwise GitHub may have posted it.
         const reason = `the comment ${cm.sent === false ? "was not sent" : "failed"}: ${scrubReason(oneLine(cm.stderr), d.root)}`;
@@ -541,6 +544,13 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
         await rec.set(c, kind, cm.sent === false ? "comment-unsent" : "comment-failed", reason, { files: v.files });
         summary.failed.push({ ref, reason });
         log(`  ${ref}: ${reason}`);
+        return "done";
+      }
+      if (!ask.whole) {
+        // The comment names the files only: nobody can apply the fix from it, so a person takes the failure on.
+        await rec.set(c, kind, "cannot-push", ASK_TOO_LARGE_REASON, { files: v.files });
+        summary.held.push({ ref, reason: ASK_TOO_LARGE_REASON });
+        log(`  ${ref}: held: ${ASK_TOO_LARGE_REASON}`);
         return "done";
       }
       await rec.set(c, kind, "asked", null, { files: v.files });
@@ -645,21 +655,10 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
    * The CI fix in the PR's fix session: the session edits the tree in its workspace at the head (the step's task, or with `lint`
    * the lint findings on its stored change), and the diff that passes the step's gates goes the patch's way from the Opus check on:
    * stored and linted, then pushed or posted. `stored`: a lint task is pending; `wait`: the session cannot work now (its workspace,
-   * its environment, or another job on it), nothing is recorded and the PR does not count as handled; `done`: nothing is pending,
-   * and the workspace's pod is parked.
+   * its environment, another job on it, or its tree at another commit than the head), nothing is recorded and the PR does not count
+   * as handled; `done`: nothing is pending. Unless it waited, the caller ends the step's hold on the pod (endStep).
    */
   const fixInSession = async (c: CifixCandidate, pr: PrNode, failure: CiFailure, lint?: { patch: string; findings: string[]; sessionTurn: number | null }): Promise<"stored" | "wait" | "done"> => {
-    let r: "stored" | "wait" | "done";
-    try {
-      r = await sessionStep(c, pr, failure, lint);
-    } catch (e) {
-      if (!isHalt(e)) await parkLive(c);
-      throw e;
-    }
-    if (r === "done") await parkLive(c);
-    return r;
-  };
-  const sessionStep = async (c: CifixCandidate, pr: PrNode, failure: CiFailure, lint?: { patch: string; findings: string[]; sessionTurn: number | null }): Promise<"stored" | "wait" | "done"> => {
     const ref = refOf(c);
     const fail = async (state: "failed" | "refused", raw: string): Promise<"done"> => {
       const reason = scrubReason(raw, d.root);
@@ -698,7 +697,8 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       guard: async (patch) => (await guardApplied(git, d.root, head, patch, [])) ?? (patch.length > CHECK_PATCH_CAP ? `the change is over the ${CHECK_PATCH_CAP} character limit for the check` : null),
     };
     const opened = await openSession(db, "pr", repo, c.number, { head });
-    if ("refused" in opened) { summary.skipped.push(ref); log(`  ${ref}: skipped: a person stopped the item's workflow`); return "done"; }
+    // Nothing recorded: the item is planned again once a person goes on with its workflow.
+    if ("refused" in opened) return wait("a person stopped the item's workflow");
     const base = prStep(db, turn, () => gate, lint ? { lint: { findings: lint.findings, patch: lint.patch, parentId: await lintParent(db, opened.session, lint.sessionTurn) } } : {});
     const spec = { ...base, message: (o: { moved: { from: string; diffStat: string } | null }) => base.message({ moved: o.moved && ours?.from === o.moved.from ? null : o.moved }) };
     let out: StepOutcome;
@@ -718,12 +718,9 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       case "empty": return await fail("failed", "the session reported a fix and changed nothing");
       case "refused": return await fail("refused", out.problems.join("; "));
       case "ok": {
-        if (out.baseSha !== head) {
-          // The change was made on another commit than the one it would be pushed onto: nothing is recorded, and the next job runs the step again.
-          summary.skipped.push(ref);
-          log(`  ${ref}: skipped: the fix session's tree is at ${short(out.baseSha) || "no commit"}, not the head ${short(head)}`);
-          return "done";
-        }
+        // The change was made on another commit than the one it would be pushed onto: nothing is recorded, and the step runs again
+        // once the workspace moves (fixWorkspaceReading lists a session workspace off its session's head).
+        if (out.baseSha !== head) return wait(`the fix session's tree is at ${short(out.baseSha) || "no commit"}, not the head ${short(head)}`);
         const v: Fix = { patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed };
         const check = async (patch: string): Promise<string | null> => {
           const checkout = (await d.checkout?.(repo, c.number, head)) ?? undefined;
@@ -807,7 +804,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   const workOne = async (c: CifixCandidate): Promise<void> => {
     const ref = refOf(c);
     // A PR that only waits for rerun results, or for its fix session, is not counted as handled (it does not use the step's limit).
-    let counted = false;
+    let counted = false, stepEnded = false;
     const handle = () => { if (!counted) { counted = true; params.onHandled?.(++handled); } };
     try {
       const pr = await readPr(c);
@@ -895,15 +892,16 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
         return;
       }
       if (await pushesAreUnsettled(db, repo, log)) { handle(); return; }
-      if (await fixCode(c, pr, failure) !== "wait") handle();
+      if (await fixCode(c, pr, failure) !== "wait") { handle(); stepEnded = sessions; }
     } catch (e) {
       if (isHalt(e)) throw e;
-      if (sessions) handle();
+      if (sessions) { handle(); stepEnded = true; }
       const reason = scrubReason(oneLine(String((e as Error).message ?? e)), d.root);
       await rec.set(c, "code", "failed", reason);
       summary.failed.push({ ref, reason });
       log(`  ${ref}: failed: ${reason}`);
     }
+    if (stepEnded) await endStep(c);
   };
 
   if (collect.length || work.length) mkdirSync(d.root, { recursive: true });
@@ -986,7 +984,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     } finally {
       // With fix sessions a PR counts as handled once its lint result was acted on; a wait leaves it for a later job.
       if (sessions && (left === "pending" || left === "done")) params.onHandled?.(++handled);
-      if (sessions && (left === "done" || left === "gone")) await parkLive(c);
+      if (sessions && left !== "wait" && left !== "running") await endStep(c);
     }
   });
   await each(work, (c) => c.number, workOne);

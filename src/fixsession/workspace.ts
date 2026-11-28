@@ -15,7 +15,7 @@ import {
   resumeWorkspace, type WorkspaceStateName,
 } from "../build/workspaces.ts";
 import { implementEnv, WorkspaceUnavailable } from "../implement/workspace.ts";
-import { loadFixWorkspaceWaits } from "../data/fixsession/index.ts";
+import { countFixStartFailures, loadFixWorkspaceWaits } from "../data/fixsession/index.ts";
 import { endIdle, ensureSession, updateSession, type EndedFixSession, type FixSession, type FixSessionKind } from "./store.ts";
 
 export { WorkspaceUnavailable };
@@ -24,6 +24,11 @@ export { WorkspaceUnavailable };
 export const FIX_WORKSPACE_WAIT = "Fix session workspace";
 /** workspace_sessions.kind of a fix session's model calls. */
 export const WORKSPACE_SESSION_KIND: Record<FixSessionKind, "fix" | "security-fix"> = { pr: "fix", security: "security-fix" };
+/**
+ * Workspaces of one session at one head that fail to start before the step fails (a counted try); after that the session makes none
+ * at that head until a build environment changes. A new head has its own count.
+ */
+export const FIX_START_FAILURES = 2;
 /** A session's pod lives this long from its start; a session idle for a day ends anyway (store.ts SESSION_IDLE_MS). */
 export const FIX_WORKSPACE_DEADLINE_SEC = 24 * 3600;
 const SRC = "/work/src";
@@ -51,6 +56,8 @@ export type FixWorkspaceEnv = {
 
 /** The step waits (registry wait FIX_WORKSPACE_WAIT): no environment can hold the session's workspace now. */
 export type WorkspaceWait = { kind: "wait"; wait: typeof FIX_WORKSPACE_WAIT; reason: string };
+/** The session's workspace failed to start FIX_START_FAILURES times at the commit: the step fails. */
+export type WorkspaceFailed = { kind: "failed"; reason: string };
 /**
  * created: a new workspace; kept: the live one, already at the commit, tree as it was (keepTree); resumed: a parked one brought back
  * at the commit with its tree (keepTree); reseeded: a live one moved to the commit, or started anew at it; remade: a new one for one
@@ -74,12 +81,27 @@ export type WorkspaceReady = {
 
 /**
  * The planner's reading for the lanes of PR fix steps (fix-up, CI fix): the workspaces of PR fix sessions that are starting or
- * failed, and the kubernetes environments a workspace can run in. A step that waited for its workspace records nothing, so its job
- * handled nothing; it runs again when this changes (the workspace gets ready or fails, an environment is enabled or disabled).
+ * failed, the kubernetes environments a workspace can run in, and when one was last changed. A step that waited for its workspace
+ * records nothing, so its job handled nothing; it runs again when this changes (the workspace gets ready or fails, an environment is
+ * enabled, disabled or edited). A session out of starts at a head lets go of its failed workspace once and makes no new one there,
+ * so the reading then stays as it is.
  */
 export async function fixWorkspaceReading(db: Db): Promise<string> {
-  const envs = (await listEnvs(db)).filter((e) => e.kind === "kubernetes" && e.enabled && !e.settings?.warmWriter).map((e) => `${e.id}${e.confidential ? "*" : ""}`).sort();
-  return `${await loadFixWorkspaceWaits(db, "pr")}|${envs.join(",")}`;
+  const k = await loadEnvs(db, { kind: "kubernetes" });
+  const envs = k.filter((e) => e.enabled && !envSettings(e).warmWriter).map((e) => `${e.id}${e.confidential ? "*" : ""}`).sort();
+  return `${await loadFixWorkspaceWaits(db, "pr")}|${envs.join(",")}|${envsChangedAt(k) ?? ""}`;
+}
+
+/** When a person last changed a kubernetes environment (made, enabled, disabled or edited one), or null when there is none. */
+const envsChangedAt = (k: readonly { updatedAt: string | null; createdAt: string }[]): string | null =>
+  k.reduce<string | null>((m, e) => { const t = e.updatedAt ?? e.createdAt; return m === null || t > m ? t : m; }, null);
+
+/** The workspace owner of a fix session's workspaces. */
+const ownerOf = (session: Pick<FixSession, "id">): string => `fix session ${session.id}`;
+
+/** The session's workspaces at `at` that failed to start since a kubernetes environment last changed. */
+async function startFailures(db: Db, session: Pick<FixSession, "id">, at: string): Promise<number> {
+  return await countFixStartFailures(db, ownerOf(session), at, envsChangedAt(await loadEnvs(db, { kind: "kubernetes" })));
 }
 
 /** The environment a session's workspace runs in: implementations' for a PR, a confidential one for a security fix (none: a wait). */
@@ -97,9 +119,10 @@ export async function fixSessionEnv(db: Db, kind: FixSessionKind): Promise<strin
  * a pod with a helper too old to reseed) is ended and made again from the warm copy, once per call; one still waiting for a slot or
  * starting past the ready limit is a wait. When the tree changed and its Cargo.lock files differ from the warm version's, the
  * dependencies are fetched through the environment's crate mirror. Throws WorkspaceUnavailable when the workspace does not get
- * ready, or when the session ended meanwhile.
+ * ready, or when the session ended meanwhile. The FIX_START_FAILURES-th workspace at `at` that fails to start fails the step
+ * (`failed`); after that none is made at `at` (a wait) until a kubernetes environment changes.
  */
-export async function ensureWorkspace(session: FixSession, at: string, env: FixWorkspaceEnv, o: { keepTree?: boolean } = {}): Promise<WorkspaceReady | WorkspaceWait> {
+export async function ensureWorkspace(session: FixSession, at: string, env: FixWorkspaceEnv, o: { keepTree?: boolean } = {}): Promise<WorkspaceReady | WorkspaceWait | WorkspaceFailed> {
   if (!SHA.test(at)) throw new Error(`not a commit: ${at}`);
   const db = env.db;
   const now = env.now ?? Date.now;
@@ -108,12 +131,27 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
   let id = session.workspaceId;
   let how: WorkspaceHow = "created", why: string | null = null, ended: number | null = null, made = false, treeLost = false;
 
-  const make = async (reason: string | null): Promise<WorkspaceWait | null> => {
+  /**
+   * The session is out of starts at `at`: the step fails once, on the failed workspace the session still holds, which it then lets
+   * go of (its reading in fixWorkspaceReading moves once); after that it waits for a new head or an environment change.
+   */
+  const outOfStarts = async (failures: number): Promise<WorkspaceWait | WorkspaceFailed> => {
+    const cur = id !== null ? await getWorkspace(db, id) : undefined;
+    if (cur?.state === "failed" && cur.base_sha === at) {
+      if (!await updateSession(db, session.id, { workspaceId: null }, now())) throw gone();
+      env.log(`fix session ${session.id}: workspace ${cur.id} failed to start, start failure ${failures} at ${short(at)}; the step fails`);
+      return { kind: "failed", reason: `the fix session's workspace failed to start ${failures} times at ${short(at)}${cur.error ? `: ${cur.error}` : ""}` };
+    }
+    return pending(`the fix session's workspace failed to start ${failures} times at ${short(at)}; a new one starts on a new head or once a build environment is enabled or edited`);
+  };
+  const make = async (reason: string | null): Promise<WorkspaceWait | WorkspaceFailed | null> => {
     const envId = await fixSessionEnv(db, session.kind);
     if (typeof envId !== "string") return envId;
+    const failures = await startFailures(db, session, at);
+    if (failures >= FIX_START_FAILURES) return await outOfStarts(failures);
     if (id !== null && await endWorkspace(db, id, now())) ended = id;
     const nid = await db.write(async () => {
-      const w = await createWorkspace(db, { repo: session.repo, baseSha: at, envId, limits: { deadlineSec: FIX_WORKSPACE_DEADLINE_SEC }, owner: `fix session ${session.id}` }, now());
+      const w = await createWorkspace(db, { repo: session.repo, baseSha: at, envId, limits: { deadlineSec: FIX_WORKSPACE_DEADLINE_SEC }, owner: ownerOf(session) }, now());
       if (await updateSession(db, session.id, { workspaceId: w, head: at }, now())) return w;
       await endWorkspace(db, w, now());
       return null;
@@ -140,7 +178,11 @@ export async function ensureWorkspace(session: FixSession, at: string, env: FixW
     const ready = await readyRow(env, id!);
     if ("pending" in ready) return pending(ready.pending);
     if ("lost" in ready) {
-      if (made) throw new WorkspaceUnavailable(ready.lost);
+      if (made) {
+        const failures = await startFailures(db, session, at);
+        if (failures >= FIX_START_FAILURES) return await outOfStarts(failures);
+        throw new WorkspaceUnavailable(ready.lost);
+      }
       const wait = await make(ready.lost);
       if (wait) return wait;
       continue;
