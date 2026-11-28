@@ -73,7 +73,7 @@ import type { CifixGate } from "../fixsession/gates.ts";
 import type { CifixTurn, FixStep as TurnStep } from "../fixsession/messages.ts";
 import { fixSessionsOn } from "../fixsession/switch.ts";
 import { prStep, runStep, type StepEnv, type StepOutcome } from "../fixsession/turn.ts";
-import { FIX_WORKSPACE_WAIT, openSession, parkSession } from "../fixsession/workspace.ts";
+import { openSession, parkSession } from "../fixsession/workspace.ts";
 import { loadLiveFixSession } from "../data/fixsession/index.ts";
 
 export { MAX_TRIES, type CifixCandidate } from "./candidates.ts";
@@ -166,7 +166,7 @@ export type CifixSummary = {
   failed: { ref: string; reason: string }[]; held: { ref: string; reason: string }[];
   /** Asks that threw: nothing is stored for them, so the next job tries them again. */
   unasked: { ref: string; reason: string }[];
-  /** Fix sessions whose workspace is not ready (registry wait FIX_WORKSPACE_WAIT): nothing is recorded, and a later job goes on. */
+  /** Fix sessions that wait (their workspace is not ready, registry wait FIX_WORKSPACE_WAIT, or another job works the session): nothing is recorded, and a later job goes on. */
   waiting: { ref: string; reason: string }[];
 };
 
@@ -685,7 +685,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     log(`  ${ref}: fix session ${out.session.id}: ${out.turns.length} turns, ${out.kind}`);
     if (out.kind === "wait") {
       summary.waiting.push({ ref, reason: out.reason });
-      log(`  ${ref}: waiting (${FIX_WORKSPACE_WAIT}): ${out.reason}`);
+      log(`  ${ref}: waiting: ${out.reason}`);
       return;
     }
     let left: "stored" | "done" = "done";
@@ -949,7 +949,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     }
   });
   await each(work, (c) => c.number, workOne);
-  log(`cifix ${repo}: ${summary.pushed.length} pushed, ${summary.asked.length} commented, ${summary.queued.length} formatter runs queued, ${summary.infra.length} infra, ${summary.skipped.length} skipped, ${summary.failed.length + summary.unasked.length} failed, ${summary.held.length} held${summary.waiting.length ? `, ${summary.waiting.length} waiting for a fix session workspace` : ""}; run ${runId}`);
+  log(`cifix ${repo}: ${summary.pushed.length} pushed, ${summary.asked.length} commented, ${summary.queued.length} formatter runs queued, ${summary.infra.length} infra, ${summary.skipped.length} skipped, ${summary.failed.length + summary.unasked.length} failed, ${summary.held.length} held${summary.waiting.length ? `, ${summary.waiting.length} waiting on a fix session` : ""}; run ${runId}`);
   return summary;
 }
 

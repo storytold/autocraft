@@ -1014,7 +1014,7 @@ export const STEPS: StepDef[] = [
       const r = await runCifix(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), approved: approvedLane(ctx.params), ...onlyPr(ctx.params), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       const acted = r.pushed.length + r.asked.length + r.queued.length + r.failed.length + r.held.length + r.infra.length;
       ctx.acted(acted + r.unasked.length);
-      const line = `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} commented, ${r.queued.length} formatter runs queued, ${r.infra.length} infrastructure failures, ${r.failed.length + r.unasked.length} failed or refused, ${r.held.length} held${r.waiting.length ? `, ${r.waiting.length} waiting for a fix session workspace (${r.waiting[0]!.reason})` : ""}`;
+      const line = `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} commented, ${r.queued.length} formatter runs queued, ${r.infra.length} infrastructure failures, ${r.failed.length + r.unasked.length} failed or refused, ${r.held.length} held${r.waiting.length ? `, ${r.waiting.length} waiting on a fix session (${r.waiting[0]!.reason})` : ""}`;
       // Asks that failed are all this job had: the failure backoff spaces their next try (and skips the write pacing's message).
       if (r.unasked.length && !acted) throw new Error(`${r.unasked[0]!.reason}; ${r.unasked[0]!.ref} not asked; ${line}`);
       return line;
