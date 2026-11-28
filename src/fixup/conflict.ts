@@ -28,7 +28,11 @@ import { BASE_NAME, type ConflictCandidate } from "./conflict-state.ts";
 import type { Git } from "./git.ts";
 import { dropSessions, sessionAsk, storeSessions, type Kept, type SessionLedger } from "../prepush/resume.ts";
 import { noteLive, type FixupDeps, type FixupSummary, type PrNode } from "./index.ts";
-import { answerText, buildScriptsAt, conflictView, endNewline, hasMarkers, locateInHead, parseResolution, resolvablePath, spliceSections, type ConflictFile, type ConflictSection } from "./patch.ts";
+import { answerText, buildScriptsAt, conflictView, endNewline, hasMarkers, locateInHead, parseResolution, resolvablePath, spliceSections, type BuildScripts, type ConflictFile, type ConflictSection, type Resolution } from "./patch.ts";
+import { conflictSeed, sessionResolution, type ConflictShown } from "./conflict-session.ts";
+import { defaultSessionDeps } from "./session.ts";
+import { fixSessionsOn } from "../fixsession/switch.ts";
+import { endStepPod } from "../fixsession/park.ts";
 import { ensureAuthorWrites } from "./author-permission.ts";
 import { longLivedOf, pushable } from "./pushable.ts";
 import { conflictAskText, conflictCommentCount, conflictCommentText, mergeMessage } from "./template.ts";
@@ -177,6 +181,45 @@ export async function askConflict(db: Db, x: ConflictRun, c: ConflictCandidate):
   }
 }
 
+/**
+ * The conflicted files of a merge tree as the resolver and the fix session get them: each file's sections (numbered across the
+ * files) with their context, within the size caps. `hold`: refused for the same reason at every run for this head.
+ */
+export async function conflictShown(git: Git, tree: string, head: string, baseSha: string, files: string[], scripts: BuildScripts): Promise<{ ok: true; shown: ConflictShown[] } | { ok: false; reason: string; hold: boolean }> {
+  const hold = (reason: string) => ({ ok: false as const, reason, hold: true });
+  if (!files.length) return hold("the merge is not clean but names no conflicted file");
+  if (files.length > MAX_CONFLICT_FILES) return hold(`${files.length} files conflict, over the limit of ${MAX_CONFLICT_FILES}`);
+  let allSections = 0;
+  const shown: ConflictShown[] = [];
+  let nextId = 1;
+  for (const path of files) {
+    if (!resolvablePath(path, scripts)) return hold(`${path} is not a file a conflict resolution may touch`);
+    const f = await git.file(tree, path);
+    if (!f.ok) return { ok: false, reason: f.reason, hold: !!f.tooLarge };
+    if (!hasMarkers(f.content)) return hold(`${path} conflicts without content markers`);
+    if (f.content.includes("\uFFFD")) return hold(`${path} is not UTF-8`);
+    const crlf = f.content.includes("\r\n");
+    const content = crlf ? f.content.replace(/\r\n/g, "\n") : f.content;
+    if (content.includes("\r") || (crlf && /(?<!\r)\n/.test(f.content))) return hold(`${path} has mixed or bare CR line endings`);
+    const view = conflictView(path, content, nextId);
+    if (!view) return hold(`${path} has malformed conflict markers`);
+    const headFile = await git.file(head, path);
+    // Marker-shaped lines of a side's own text would split the sections elsewhere than git did.
+    const baseFile = await git.file(baseSha, path);
+    if ((headFile.ok && hasMarkers(headFile.content)) || (baseFile.ok && hasMarkers(baseFile.content))) return hold(`${path} has lines shaped like conflict markers of its own`);
+    if (headFile.ok) locateInHead(view, headFile.content.replace(/\r\n/g, "\n"));
+    nextId += view.sections.length;
+    const size = view.sections.reduce((n, s) => n + s.before.length + s.ours.length + s.theirs.length + s.after.length, 0);
+    if (size > SECTIONS_CAP || view.sections.some((s) => s.ours.length + s.theirs.length > SECTION_CAP)) return hold(`the conflict sections of ${path} are over the size limit`);
+    allSections += size;
+    if (allSections > ALL_SECTIONS_CAP) return hold(`the conflict sections of the ${files.length} conflicted files are over the ${ALL_SECTIONS_CAP} character limit`);
+    // The check gets each section with its resolution, which is at most as long as the longer side plus three lines: refused here, before the claim, when even that bound is too big.
+    if (checkSize(checkSections([view], (s) => (s.ours.length > s.theirs.length ? s.ours : s.theirs))) > CHECK_PATCH_CAP) return hold(`the conflict sections of ${path} are over the ${CHECK_PATCH_CAP} character limit for the check`);
+    shown.push({ view, content, mode: f.mode, crlf });
+  }
+  return { ok: true, shown };
+}
+
 /** Merges the base branch into one PR and pushes the merge commit. */
 export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate): Promise<void> {
   const ref = refOf(c);
@@ -184,6 +227,8 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
   let baseSha: string | null = null;
   // The push is recorded: what fails after it (the comment) changes nothing about it.
   let merged = false;
+  /** A fix session's wait: the item is neither handled nor a try. The item worked on the PR's fix session: its pod's hold ends with it. */
+  let deferHandled = false, waited = false, onSession = false, halted = false;
   const fail = async (state: "failed" | "refused" | "rejected" | "superseded", raw: string) => {
     const reason = x.scrub(raw);
     await record(db, x.at(), c, state, reason, files, baseSha);
@@ -209,7 +254,10 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
     const writes = pr.headRepository ? await ensureAuthorWrites(db, x.repo, c.number, pr.headRepository.nameWithOwner) : "no";
     if (writes === "unknown") { x.log(`  ${ref}: skipped: the author's permission could not be read yet`); return; }
     if (!pr.headRepository || !pushable(pr.headRepository.nameWithOwner, x.repo, pr.maintainerCanModify, pr.headRefName, await longLivedOf(db, x.repo), !!pr.headRef?.branchProtectionRule, writes === "yes")) { x.log(`  ${ref}: skipped: the branch is no longer pushable`); return; }
-    x.onHandled?.(++x.handled.n);
+    // In a fix session the item counts as handled once it is known not to wait (see the finally below).
+    const sessions = await fixSessionsOn(db, "conflict", x.repo);
+    if (sessions) deferHandled = true;
+    else x.onHandled?.(++x.handled.n);
     const git = x.git();
     const head = await git.fetchPr(ownerOf(x.repo), x.repo, c.number);
     if (head !== c.head) { x.log(`  ${ref}: skipped: fetched head ${short(head)} is not the reviewed ${short(c.head)}`); return; }
@@ -228,8 +276,10 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
     // Refused for the same reason at every run for this head: recorded as a skip so the head is not tried again, and never claimed.
     const refuse = async (reason: string) => { await held("skipped", reason); };
     /** Clippy findings on a stored resolution: it is resolved again with them, as a patch is in Fix-up. */
-    let again: { diff: string; findings: string[] } | null = null;
+    let again: { diff: string; full: string; findings: string[] } | null = null;
     let formatDiff: string | null = null;
+    /** The fix session turn whose change the stored resolution is (null: the resolver's). */
+    let sessionTurn: number | null = null;
     if (c.lint) {
       // The stored resolution is rebuilt on the same two parents, then gated on its lint task.
       files = c.lint.files;
@@ -247,10 +297,11 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       const resolutionDiff = await git.diffText(merge.tree, tree);
       const res = await readLint(db, c.lint.task ?? -1, { against: resolutionDiff });
       if (res.kind === "pending") { x.log(`  ${ref}: the lint task is still running`); return; }
+      onSession = c.lint.sessionTurn !== null;
       if (res.kind === "infra-failed") { await fail("failed", `lint: ${res.reason}`); return; }
       const verdict = lintVerdict(res.findings, c.lint.round);
       if (verdict.action === "fail") { await fail("rejected", `${findingsWord(res.findings)} remain after ${c.lint.round} rounds: ${oneLine(verdict.first.message)}`); return; }
-      if (verdict.action === "ask") again = { diff: resolutionDiff.slice(0, PREVIOUS_CAP), findings: verdict.texts };
+      if (verdict.action === "ask") again = { diff: resolutionDiff.slice(0, PREVIOUS_CAP), full: resolutionDiff, findings: verdict.texts };
       else { const note = testsNoteOf(verdict, res.testsNote); if (note) x.log(`  ${ref}: ${note}`); }
       formatDiff = res.formatDiff;
     }
@@ -274,56 +325,56 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
     } else if (merge.clean) await x.claim(c);
     else {
       files = merge.conflicted;
-      if (!files.length) { await refuse("the merge is not clean but names no conflicted file"); return; }
-      if (files.length > MAX_CONFLICT_FILES) { await refuse(`${files.length} files conflict, over the limit of ${MAX_CONFLICT_FILES}`); return; }
-      let allSections = 0;
-      const shown: { view: ConflictFile; content: string; mode: string; crlf: boolean }[] = [];
-      let nextId = 1;
       const scripts = await scriptsOf();
       if (!scripts) { await fail("failed", "the build scripts of the branch or the base could not be read"); return; }
-      for (const path of files) {
-        if (!resolvablePath(path, scripts)) { await refuse(`${path} is not a file a conflict resolution may touch`); return; }
-        const f = await git.file(merge.tree, path);
-        if (!f.ok) { if (f.tooLarge) await refuse(f.reason); else await fail("refused", f.reason); return; }
-        if (!hasMarkers(f.content)) { await refuse(`${path} conflicts without content markers`); return; }
-        if (f.content.includes("\uFFFD")) { await refuse(`${path} is not UTF-8`); return; }
-        const crlf = f.content.includes("\r\n");
-        const content = crlf ? f.content.replace(/\r\n/g, "\n") : f.content;
-        if (content.includes("\r") || (crlf && /(?<!\r)\n/.test(f.content))) { await refuse(`${path} has mixed or bare CR line endings`); return; }
-        const view = conflictView(path, content, nextId);
-        if (!view) { await refuse(`${path} has malformed conflict markers`); return; }
-        const headFile = await git.file(head, path);
-        // Marker-shaped lines of a side's own text would split the sections elsewhere than git did.
-        const baseFile = await git.file(baseSha, path);
-        if ((headFile.ok && hasMarkers(headFile.content)) || (baseFile.ok && hasMarkers(baseFile.content))) { await refuse(`${path} has lines shaped like conflict markers of its own`); return; }
-        if (headFile.ok) locateInHead(view, headFile.content.replace(/\r\n/g, "\n"));
-        nextId += view.sections.length;
-        const size = view.sections.reduce((n, s) => n + s.before.length + s.ours.length + s.theirs.length + s.after.length, 0);
-        if (size > SECTIONS_CAP || view.sections.some((s) => s.ours.length + s.theirs.length > SECTION_CAP)) { await refuse(`the conflict sections of ${path} are over the size limit`); return; }
-        allSections += size;
-        if (allSections > ALL_SECTIONS_CAP) { await refuse(`the conflict sections of the ${files.length} conflicted files are over the ${ALL_SECTIONS_CAP} character limit`); return; }
-        // The check gets each section with its resolution, which is at most as long as the longer side plus three lines: refused here, before the claim, when even that bound is too big.
-        if (checkSize(checkSections([view], (s) => (s.ours.length > s.theirs.length ? s.ours : s.theirs))) > CHECK_PATCH_CAP) { await refuse(`the conflict sections of ${path} are over the ${CHECK_PATCH_CAP} character limit for the check`); return; }
-        shown.push({ view, content, mode: f.mode, crlf });
-      }
+      const views = await conflictShown(git, merge.tree, head, baseSha, files, scripts);
+      if (!views.ok) { if (views.hold) await refuse(views.reason); else await fail("refused", views.reason); return; }
+      const shown = views.shown;
       const prDiff = await cachedDiff(db, x.repo, c.number, head, x.d.fetchDiff);
       if (!prDiff.ok) { await fail("failed", `no diff: ${oneLine(prDiff.error)}`); return; }
-      await x.claim(c);
-      if (!x.d.resolve) { await fail("failed", "no resolver"); return; }
-      checkout = (await x.d.checkout?.(x.repo, c.number, head)) ?? undefined;
-      const body = ((await loadItems(db, [{ repo: x.repo, number: c.number }], "text")).get(refOf(c))?.body ?? "").slice(0, 4000);
-      const repoDir = checkout ? { repo_dir: REPO_PATH } : {};
       const quiet = (await loadQuiet(db, [`${x.repo}#${c.number}`])).size > 0;
+      // In a fix session the model resolves the sections in the PR's workspace, seeded from the merge with its markers.
+      const sessionDeps = sessions ? (x.d.fixSession ?? defaultSessionDeps)(db) : null;
+      if (sessions && !sessionDeps) { waited = true; x.log(`  ${ref}: waiting: this runner is not in the cluster, so it cannot reach the fix session's workspace`); return; }
+      await x.claim(c);
+      let sessionAnswers: Map<string, Map<number, string>> | null = null;
+      if (sessionDeps) {
+        // The item works on the session from here: a throw ends the step's hold on the pod too (a wait does not).
+        onSession = true;
+        const seed = await conflictSeed(git, merge.tree, head, baseSha, x.repo, c.number);
+        const lint = again && c.lint ? { findings: again.findings, patch: again.full, sessionTurn: c.lint.sessionTurn } : undefined;
+        const got = await sessionResolution({ db, deps: sessionDeps, git, log: x.log, by: x.by === "pipeline" ? "pipeline" : x.by.operator, root: x.d.root }, c.number, x.repo,
+          { ref, title: c.title, quiet, base: c.base, reason: c.reason, seed, head, baseSha, prDiff: prDiff.text, scripts, shown }, lint);
+        if (got.kind === "wait") {
+          // Nothing recorded and no try: the step runs again once the session's lease is free or its workspace moves (the lane's
+          // planner reading, fixWorkspaceReading), or once a person goes on with a stopped item.
+          waited = true;
+          x.log(`  ${ref}: waiting: ${x.scrub(oneLine(got.reason))}`);
+          return;
+        }
+        if (got.kind !== "ok") { await fail(got.kind, got.reason); return; }
+        sessionAnswers = got.answers;
+        sessionTurn = got.turnId;
+      } else if (!x.d.resolve) { await fail("failed", "no resolver"); return; }
+      checkout = (await x.d.checkout?.(x.repo, c.number, head)) ?? undefined;
+      const body = sessionAnswers ? "" : ((await loadItems(db, [{ repo: x.repo, number: c.number }], "text")).get(refOf(c))?.body ?? "").slice(0, 4000);
+      const repoDir = checkout ? { repo_dir: REPO_PATH } : {};
       const resFiles: { path: string; mode: string; content: string }[] = [];
       const keptNow: Kept = {};
-      // One resolver call and one check per file, so the size caps apply to a file, not to the whole PR. Every file must pass before anything is pushed.
+      /** A file's answers: the fix session's, or one resolver call per file, so the size caps apply to a file, not to the whole PR. */
+      const resolveFile = async (f: ConflictFile): Promise<Resolution | null> => {
+        const own = sessionAnswers?.get(f.path);
+        if (sessionAnswers) return own ? { ok: true, sections: own } : { ok: false, reason: "the fix session's change has no resolution of it" };
+        const ses = again ? sessionAsk(c.lint?.session, f.path, again.findings, new Date(x.at())) : {};
+        const reply = await x.d.resolve!(db, [{ ref, title: c.title, body, review_reason: c.reason, base: c.base, ...(quiet ? { quiet } : {}), files: [f], ...(again ? { previous: { patch: again.diff, findings: again.findings } } : {}), ...repoDir }], checkout, ses);
+        if (ses.kept) { keptNow[f.path] = ses.kept; x.ledger.hold(ses.kept); }
+        return reply === null ? null : parseResolution(reply, f.sections.map((s) => s.id));
+      };
+      // One check per file. Every file must pass before anything is pushed.
       for (const t of shown) {
         const f = t.view;
-        const ses = again ? sessionAsk(c.lint?.session, f.path, again.findings, new Date(x.at())) : {};
-        const reply = await x.d.resolve(db, [{ ref, title: c.title, body, review_reason: c.reason, base: c.base, ...(quiet ? { quiet } : {}), files: [f], ...(again ? { previous: { patch: again.diff, findings: again.findings } } : {}), ...repoDir }], checkout, ses);
-        if (ses.kept) { keptNow[f.path] = ses.kept; x.ledger.hold(ses.kept); }
-        if (reply === null) { await fail("failed", `the model gave no answer for ${f.path}`); return; }
-        const res = parseResolution(reply, f.sections.map((s) => s.id));
+        const res = await resolveFile(f);
+        if (res === null) { await fail("failed", `the model gave no answer for ${f.path}`); return; }
         if (!res.ok) { await fail("refused", `${f.path}: ${res.reason}`); return; }
         const spliced = spliceSections(t.content, f.sections.map((s) => res.sections.get(s.id)!), f.path);
         if (spliced === null) { await fail("refused", `the resolution of ${f.path} adds lines that are neither side, or declares code, imports or dependencies`); return; }
@@ -366,7 +417,7 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       const task = rs.length ? await queueLintFor(db, { step: "conflict", repo: x.repo, number: c.number, head, base: baseSha, patch, files: rs }) : null;
       if (task !== null) {
         const round = c.lint ? c.lint.round + 1 : 1;
-        await storePatch(db, { kind: "conflict", storedId: c.lint?.rowid, repo: x.repo, number: c.number, head: c.head, patch: JSON.stringify(resFiles), files, lintTask: task, lintRound: round, lintState: "pending", session: storeSessions(keptNow, new Date(x.at())), baseSha: baseSha ?? undefined, attempt: c.attempt, at: x.at() });
+        await storePatch(db, { kind: "conflict", storedId: c.lint?.rowid, repo: x.repo, number: c.number, head: c.head, patch: JSON.stringify(resFiles), files, lintTask: task, lintRound: round, lintState: "pending", session: storeSessions(keptNow, new Date(x.at())), sessionTurn, baseSha: baseSha ?? undefined, attempt: c.attempt, at: x.at() });
         x.ledger.stored(keptNow);
         x.log(`  ${ref}: resolution stored; lint task ${task} queued (round ${round})`);
         return;
@@ -399,8 +450,17 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       : await ghComment(x.gw, g, x.d.exec, "conflict-comment", { repo: x.repo, number: c.number, pr: true }, note, conflictCommentText(c.base), { run: x.runId, to: commit });
     if (cm.code !== 0) x.log(`  ${ref}: comment failed: ${oneLine(cm.stderr)}`);
   } catch (e) {
-    if (isHalt(e)) throw e;
+    if (isHalt(e)) { halted = true; throw e; }
     if (merged) { x.log(`  ${ref}: after the push: ${x.scrub(oneLine(String((e as Error).message ?? e)))}`); return; }
     await fail("failed", oneLine(String((e as Error).message ?? e)));
+  } finally {
+    try {
+      if (onSession && !waited && !halted) {
+        const deps = (x.d.fixSession ?? defaultSessionDeps)(db);
+        if (deps) await endStepPod({ ...deps, db, log: x.log }, { repo: x.repo, number: c.number }, (raw) => x.scrub(oneLine(raw)));
+      }
+    } finally {
+      if (deferHandled && !waited) x.onHandled?.(++x.handled.n);
+    }
   }
 }

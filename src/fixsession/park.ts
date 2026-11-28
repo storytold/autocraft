@@ -13,8 +13,8 @@ import { parkSession, type FixWorkspaceEnv } from "./workspace.ts";
 
 /** A change a turn of the session wrote is stored and waits for its lint task, whose findings go back to the session. */
 async function lintFollowUpPending(db: Db, s: FixSession): Promise<boolean> {
-  const turns = (await loadStoredPatches(db, [{ repo: s.repo, number: s.number }], ["fixup", "cifix"]))
-    .flatMap((p) => (p.kind !== "conflict" && p.lintTask !== null && p.sessionTurn !== null ? [p.sessionTurn] : []));
+  const turns = (await loadStoredPatches(db, [{ repo: s.repo, number: s.number }], ["fixup", "cifix", "conflict"]))
+    .flatMap((p) => (p.lintTask !== null && p.sessionTurn !== null ? [p.sessionTurn] : []));
   if (!turns.length) return false;
   return [...(await loadFixTurnsById(db, turns)).values()].some((t) => t.sessionId === s.id);
 }

@@ -36,7 +36,7 @@ export type PatchFacts = { fixups: FixupRow[]; cifixes: CifixRow[]; conflicts: C
 export type StoredPatch =
   | { kind: "fixup"; id: number; repo: string; number: number; head: string; source: FixupSource; attempt: number; patch: string; lintTask: number | null; lintRound: number; lintState: "pending" | "requeued"; session: string | null; /** The fix session turn that wrote the patch. */ sessionTurn: number | null; operatorFix: number | null; changes: string[] }
   | { kind: "cifix"; id: number; repo: string; number: number; head: string; attempt: number; patch: string; files: string[]; lintTask: number | null; lintRound: number; lintState: string; session: string | null; /** The fix session turn that wrote the patch. */ sessionTurn: number | null }
-  | { kind: "conflict"; id: number; repo: string; number: number; head: string; attempt: number; patch: string; baseSha: string; files: string[]; lintTask: number | null; lintRound: number; session: string | null };
+  | { kind: "conflict"; id: number; repo: string; number: number; head: string; attempt: number; patch: string; baseSha: string; files: string[]; lintTask: number | null; lintRound: number; session: string | null; /** The fix session turn that wrote the resolution. */ sessionTurn: number | null };
 
 export type LintingRow = { kind: PatchKind; id: number; repo: string; number: number; head: string; lintTask: number | null; unsentSibling: number };
 

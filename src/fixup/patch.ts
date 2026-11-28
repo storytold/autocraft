@@ -635,3 +635,67 @@ export function spliceSections(text: string, answers: string[], path = ""): stri
   for (let i = 0; i < resolved.length; i++) out += resolved[i]! + pieces[i + 1]!;
   return out;
 }
+
+/** Splits of an edited file into its sections' answers that answersFromFile checks, and the partial splits it walks, before it gives up. */
+const MAX_SPLITS = 64;
+const MAX_SPLIT_STEPS = 20_000;
+
+/**
+ * The answers of a conflicted file resolved in place (a fix session edits the merge tree's file in its workspace): `content` is the
+ * file with its conflict markers, `view` its conflictView, `edited` the file as the session left it (both with LF line ends). The
+ * text outside the sections must be unchanged: the edited file is the pieces between the sections in order, each section's
+ * replacement in its place, and each replacement is recovered from the pieces around it (lines between two sections may repeat
+ * inside a replacement, so the splits at line starts are tried in order). The first split whose answers keep the section rules
+ * (spliceSections) is the one returned, keyed by section id as parseResolution's.
+ */
+export function answersFromFile(content: string, view: ConflictFile, edited: string): Resolution {
+  const parsed = parseSections(content);
+  if (!parsed || parsed.sections.length !== view.sections.length || !view.sections.length) return { ok: false, reason: "the conflicted file's markers are not well formed" };
+  if (MARKER.test(edited)) return { ok: false, reason: "the file still has conflict markers" };
+  if (edited.includes("\0")) return { ok: false, reason: "the file has a NUL byte" };
+  const { pieces } = parsed;
+  const n = view.sections.length;
+  const first = pieces[0]!, last = pieces[n]!;
+  const outside: Resolution = { ok: false, reason: "lines outside the conflict sections changed; only the lines between the markers may change" };
+  if (edited.length < first.length + last.length || !edited.startsWith(first) || !edited.endsWith(last)) return outside;
+  const end = edited.length - last.length;
+  // The last piece follows a marker line, so the text before it ends a line.
+  if (last !== "" && end > first.length && edited[end - 1] !== "\n") return outside;
+  const answers: string[] = [];
+  let tried = 0, steps = 0, split = false;
+  let found: string[] | null = null;
+  /** Section `i`'s answer starts at `from` (a line start); true once a split is found or the tries are spent. */
+  const walk = (i: number, from: number): boolean => {
+    if (++steps > MAX_SPLIT_STEPS) return true;
+    if (i === n - 1) {
+      if (from > end) return false;
+      answers[i] = edited.slice(from, end);
+      split = true;
+      if (spliceSections(content, answers, view.path) !== null) { found = [...answers]; return true; }
+      return ++tried >= MAX_SPLITS;
+    }
+    const piece = pieces[i + 1]!;
+    for (let at = from; at <= end - piece.length;) {
+      const k = edited.indexOf(piece, at);
+      if (k < 0 || k > end - piece.length) break;
+      if (k === from || edited[k - 1] === "\n") {
+        answers[i] = edited.slice(from, k);
+        if (walk(i + 1, k + piece.length)) return true;
+      }
+      at = k + 1;
+    }
+    return false;
+  };
+  walk(0, first.length);
+  if (!found) return split ? { ok: false, reason: "a section's resolution adds lines that are neither side, or declares code, imports or dependencies" } : outside;
+  const out = new Map<number, string>();
+  let total = 0;
+  for (const [i, a] of (found as string[]).entries()) {
+    const id = view.sections[i]!.id;
+    if (a.length > RESOLVE_MAX_SECTION) return { ok: false, reason: `section ${id} is over the size limit` };
+    total += a.length;
+    out.set(id, a);
+  }
+  if (total > RESOLVE_MAX_TOTAL) return { ok: false, reason: "the resolved sections are over the size limit" };
+  return { ok: true, sections: out };
+}

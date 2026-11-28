@@ -26,8 +26,12 @@ export type FixupTurn = TurnBase & { step: "fixup"; reason: string; fixes: { fil
 export type MaintainerTurn = TurnBase & { step: "maintainer"; instructions: string; diff: string };
 /** A failing CI check. `allowed`: the files the log names plus the PR's changed files, never tests. `ourPush`: the head is AutoCraft's push of that step. */
 export type CifixTurn = TurnBase & { step: "cifix"; failure: { check: string; steps: { job: string; step: string; log: string }[] }[]; allowed: string[]; ourPush?: FixStep; diff?: string };
-/** A merge of the default branch: the workspace holds the merge with its conflict markers. `reason`: the review's summary of what the PR does. */
-export type ConflictTurn = TurnBase & { step: "conflict"; base: string; reason?: string; files: { path: string; sections: number }[] };
+/**
+ * A merge of the default branch: the workspace holds the merge with its conflict markers. `reason`: the review's summary of what the
+ * PR does; `diff`: the PR's diff against its base; `baseDiff`: what the default branch changed in the conflicted files since the
+ * merge base.
+ */
+export type ConflictTurn = TurnBase & { step: "conflict"; base: string; reason?: string; files: { path: string; sections: number }[]; diff: string; baseDiff: string };
 export type StepTurn = FixupTurn | MaintainerTurn | CifixTurn | ConflictTurn;
 
 /** One earlier turn of a session that is gone, for a fresh session's history note. */
@@ -41,10 +45,10 @@ export type FixSessionTask = { ref: string; repo_guidance?: string; turn: StepTu
 const json = (v: unknown): string => JSON.stringify(v, null, 1).replace(/</g, "\\u003c");
 const block = (tag: string, v: unknown): string => `<${tag}>\n${json(v)}\n</${tag}>`;
 
-/** The PR diff held to DIFF_CAP, with the sentence that says so when it was cut. */
-function capped(diff: string): { diff: string; note: string } {
+/** A diff held to DIFF_CAP, with the sentence that says so when it was cut; `what` names it there. */
+function capped(diff: string, what = "The diff"): { diff: string; note: string } {
   if (diff.length <= DIFF_CAP) return { diff, note: "" };
-  return { diff: diff.slice(0, DIFF_CAP), note: ` The diff is cut at ${DIFF_CAP} of ${diff.length} characters; read the changed files in /work/src for the rest.` };
+  return { diff: diff.slice(0, DIFF_CAP), note: ` ${what} is cut at ${DIFF_CAP} of ${diff.length} characters; read the changed files in /work/src for the rest.` };
 }
 
 const FMT = "Check formatting with cargo fmt --check, never plain cargo fmt (it rewrites files this task does not allow), then run clippy on the crates you changed and their tests.";
@@ -103,20 +107,24 @@ ${CHECKS[t.step]}
 
 ${block("pr", { ref: t.ref, title: t.title, failure: t.failure, allowed: t.allowed, ...(d && { diff: d.diff }) })}`;
     }
-    case "conflict":
-      return `The default branch (${t.base}) was merged into the pull request's branch, and the files in pr.files conflict. In them each conflict section is marked as Git marks it: a <<<<<<< line, the pull request's side (ours), a ======= line, the default branch's side (theirs), and a >>>>>>> line. Resolve every section and change nothing else:
+    case "conflict": {
+      const d = capped(t.diff), b = capped(t.baseDiff, "The base diff");
+      return `The default branch (${t.base}) was merged into the pull request's branch, and the files in pr.files conflict. In them each conflict section is marked as Git marks it: a <<<<<<< line, the pull request's side (ours), a ======= line, the default branch's side (theirs), and a >>>>>>> line. pr.diff is what the pull request changed against its base, and pr.base_diff is what the default branch changed in the conflicted files since the two branches split.${d.note}${b.note}
+
+A resolution keeps what each side changed. Read both diffs first and find, for every section, the change each side made to the lines it covers. Where the pull request rewrote lines (a doc comment, a message, a signature) and the default branch changed the same or nearby lines, the result has the pull request's rewrite with the default branch's change applied to it, or the default branch's version with the pull request's change applied to it: never one side's version alone when the other side changed something there too.
+
+Rules:
 - Edit only the files in pr.files, and in them only the sections: every line outside the markers stays as it is. Remove every marker line.
-- Keep what the pull request intends (pr.reason) and what the default branch changed; where both change the same lines, combine them so both still work.
 - Build each resolution from the lines of its two sides, each side's own lines in that side's order, plus at most three other lines.
 - Add no import, declaration, attribute, unsafe code, item macro or dependency that neither side has.
 - In a lockfile (Cargo.lock, package-lock.json, pnpm-lock.yaml, yarn.lock) a resolution is exactly one side, line for line.
 - In a manifest (Cargo.toml, package.json) a resolution holds only lines of its two sides, each under the same table and keys as in its side.
-- When a section cannot be resolved from its two sides and the repository, take the default branch's side.
-- If the merged code needs a change outside the sections to build, do not make it; say so in summary.${quietRule(t.quiet)}
+- If a section cannot be resolved so that both sides' changes are kept within these rules, or the merged code needs a change outside the sections to build, leave that section as it is and reply with status blocked, naming the file and the section in blocked_reason.${quietRule(t.quiet)}
 
 ${CHECKS[t.step]}
 
-${block("pr", { ref: t.ref, title: t.title, ...(t.reason !== undefined && { reason: t.reason }), base: t.base, files: t.files })}`;
+${block("pr", { ref: t.ref, title: t.title, ...(t.reason !== undefined && { reason: t.reason }), base: t.base, files: t.files, diff: d.diff, base_diff: b.diff })}`;
+    }
   }
 }
 

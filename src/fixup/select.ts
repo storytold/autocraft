@@ -140,7 +140,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
       out.conflictMerge.unshift({
         repo, number: f.number, head, base: f.conflict!.base, title: titleOf(f.number),
         reason: wantedFor(f), attempt: w.attempt, pushable: f.pushable,
-        lint: { rowid: w.id, round: w.lintRound, task: w.lintTask, baseSha: w.baseSha, resolved: w.patch, files: w.files, session: w.session },
+        lint: { rowid: w.id, round: w.lintRound, task: w.lintTask, baseSha: w.baseSha, resolved: w.patch, files: w.files, session: w.session, sessionTurn: w.sessionTurn },
       });
     }
   }

@@ -84,7 +84,7 @@ export async function loadStoredPatches(db: Db, keys: KeySource, kinds?: PatchKi
       .select(["c.repo", "c.number", "c.head", "c.attempt", "c.patch", "c.files", "c.lint_task", "c.lint_round", "c.lint_state", "c.session", "c.session_turn", kx.rowid("main.ci_fixes", "c").as("id")])
       .where("c.state", "=", "linting").where("c.patch", "is not", null).orderBy(kx.rowid("main.ci_fixes", "c"))) : [],
     want("conflict") ? rowsOf<any>(db, k.selectFrom("main.conflict_merges as c").innerJoin(resolveKeys(db, keys, "kk"), onKey("c"))
-      .select(["c.repo", "c.number", "c.from_head", "c.attempt", "c.patch", "c.base_sha", "c.files", "c.lint_task", "c.lint_round", "c.session", kx.rowid("main.conflict_merges", "c").as("id")])
+      .select(["c.repo", "c.number", "c.from_head", "c.attempt", "c.patch", "c.base_sha", "c.files", "c.lint_task", "c.lint_round", "c.session", "c.session_turn", kx.rowid("main.conflict_merges", "c").as("id")])
       .where("c.state", "=", "linting").where("c.patch", "is not", null).orderBy(kx.rowid("main.conflict_merges", "c"))) : [],
   ]));
   return [
@@ -98,7 +98,7 @@ export async function loadStoredPatches(db: Db, keys: KeySource, kinds?: PatchKi
     })),
     ...conflicts.map((r): StoredPatch => ({
       kind: "conflict", id: Number(r.id), repo: r.repo, number: Number(r.number), head: r.from_head, attempt: Number(r.attempt), patch: r.patch, baseSha: r.base_sha ?? "", files: strings(r.files),
-      lintTask: num(r.lint_task), lintRound: r.lint_round ?? 1, session: r.session,
+      lintTask: num(r.lint_task), lintRound: r.lint_round ?? 1, session: r.session, sessionTurn: num(r.session_turn),
     })),
   ];
 }

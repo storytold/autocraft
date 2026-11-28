@@ -13,7 +13,7 @@ export type ConflictCandidate = {
   repo: string; number: number; head: string; /** The PR's base branch name. */ base: string; title: string;
   /** The final review's reason. */ reason: string; attempt: number; pushable: boolean;
   /** A model resolution stored and linted: the collect step pushes it, or gives it up. */
-  lint?: { rowid: number; round: number; task: number | null; baseSha: string; resolved: string; files: string[]; /** The kept resolver sessions by file (src/prepush/resume.ts). */ session: string | null };
+  lint?: { rowid: number; round: number; task: number | null; baseSha: string; resolved: string; files: string[]; /** The kept resolver sessions by file (src/prepush/resume.ts). */ session: string | null; /** The fix session turn that wrote it, or null. */ sessionTurn: number | null };
 };
 export { MAX_CONFLICT_TRIES, conflictAskRetryAtOf, conflictBucketOf, mergesToday, triesIn } from "../data/changes/index.ts";
 export type { ConflictBucket, ConflictRow } from "../data/changes/index.ts";
