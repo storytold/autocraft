@@ -127,7 +127,35 @@ test("an approved PR whose review has a major finding, or says hold, gets a fix-
   }
 });
 
-test("a hold the fix-ups do not resolve asks, after the tries, whether to merge it as it is; a yes merges past the review the person was shown", async () => {
+test("an approved PR whose blocking fix the fix-up refused for its size asks to make it again, never to drop it, and makes it by itself once that refusal is superseded", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  const pass = async () => { await advanceWorkflows(db); await untilQuiet(db, [() => advancePreapprovals(db)], 3); await advanceWorkflows(db); };
+  await review(w, { head: "sha1", verdict: "take-fix", at: new Date().toISOString(), fixes: [
+    { file: "src/alt.rs", change: "keep the text box centred", title: "alt text box regression", blocking: { class: "regression", why: "the box worked on main" } },
+    { file: "src/alt.rs", change: "rename the helper", title: "helper name", blocking: { class: null, why: "naming only" } },
+  ] });
+  await pass();
+  // The merge leg sees the refusal first and stops at it.
+  await db.run(db.k.insertInto("main.fixups").values({ repo: "app", number: 1, from_head: "sha1", to_head: null, state: "too-large", reason: "the PR diff is over the 60000 character limit", files: "[]", attempt: 1, created_at: new Date().toISOString(), source: null }));
+  await untilQuiet(db, [() => advancePreapprovals(db)], 3);
+  await advanceWorkflows(db);
+  const asked = (await liveWorkflow(db, "app", 1))!;
+  assert.deepEqual([asked.state, asked.approvedBy], ["blocked", MAINT]);
+  assert.doesNotMatch(asked.rec!.text, /Drop/);
+  assert.match(asked.rec!.text, /could not make fix 1 \(alt text box regression\): .*size limit.* Make it again, then merge\./);
+  assert.deepEqual(asked.rec!.parts.fix, [1], "a yes makes the blocking fix; the minor one is a follow-up");
+
+  await db.run(db.k.updateTable("main.fixups").set({ state: "superseded" }).where("number", "=", 1).where("state", "=", "too-large"));
+  await pass();
+  const resumed = (await liveWorkflow(db, "app", 1))!;
+  assert.deepEqual([resumed.state, resumed.rec, resumed.approvedBy], ["running", null, MAINT], "the question closes by itself");
+  assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "fixup" && a.params?.source === "review"), "the fix-up runs again");
+  assert.notEqual(await legState(w), "cancelled", "a new merge leg waits for it");
+  w.close();
+});
+
+test("a hold the fix-ups do not resolve asks, after the tries, to try the fix-up again; the word merge merges past the review the person was shown", async () => {
   const w = await approvedReview();
   const db = w.db;
   const pass = async () => { await advanceWorkflows(db); await untilQuiet(db, [() => advancePreapprovals(db)], 3); await advanceWorkflows(db); };
@@ -151,11 +179,11 @@ test("a hold the fix-ups do not resolve asks, after the tries, whether to merge 
   await pushes("sha2", "sha3");
   const asked = (await liveWorkflow(db, "app", 1))!;
   assert.deepEqual([asked.state, asked.blocker, asked.approvedBy], ["blocked", "failed-twice", MAINT]);
-  assert.match(asked.rec!.text, /could not fix .* after 2 tries\. Merge it as it is\?/);
+  assert.match(asked.rec!.text, /could not fix .* in 2 tries\. Try the fix-up again, then merge\./);
   assert.equal((await w.rows("SELECT id FROM operator_fixups WHERE number = 1 AND from_head = 'sha3'")).length, 0, "no third try");
 
   await pause();
-  const r = await runCommand(db, actor, "dashboard", { parsed: parse("yes"), items: [{ repo: "app", number: 1 }] });
+  const r = await runCommand(db, actor, "dashboard", { parsed: parse("merge"), items: [{ repo: "app", number: 1 }] });
   assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
   await pass();
   assert.deepEqual([(await liveWorkflow(db, "app", 1))!.state, await legState(w)], ["running", "ci"], "the leg goes past the hold the person was shown");
@@ -164,7 +192,7 @@ test("a hold the fix-ups do not resolve asks, after the tries, whether to merge 
   assert.equal(await legState(w), "queued");
 });
 
-test("a fix-up of a screenshot regression that ends without a push asks whether to merge it as it is", async () => {
+test("a fix-up of a screenshot regression that ends without a push asks to try it again, naming its last try", async () => {
   const w = await approvedReview();
   const db = w.db;
   const pass = async () => { await advanceWorkflows(db); await untilQuiet(db, [() => advancePreapprovals(db)], 3); await advanceWorkflows(db); };
@@ -181,7 +209,7 @@ test("a fix-up of a screenshot regression that ends without a push asks whether 
   await pass();
   const wf = (await liveWorkflow(db, "app", 1))!;
   assert.deepEqual([wf.state, wf.blocker], ["blocked", "failed-twice"]);
-  assert.match(wf.rec!.text, /Merge it as it is\?/);
+  assert.match(wf.rec!.text, /the model gave no answer.*Try the fix-up again/);
 });
 
 test("a hold written without a model call on an approved PR stops it at once as other, with no fix-up", async () => {

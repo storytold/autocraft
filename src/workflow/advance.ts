@@ -46,7 +46,7 @@ import { causeWent, fixable, itemQuestion, legStop, questionFor, type Question }
 import { asksNobody } from "./asked.ts";
 import { headKey, premergeOf, recheckRuleRow, startAutoStops } from "./auto-stop.ts";
 import { blockWorkflow } from "./block.ts";
-import { checkedOtherHead, codeOf, detectBlocker, fixesFirst, LANE_STEPS, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
+import { checkedOtherHead, codeOf, detectBlocker, fixesFirst, fixUnmade, LANE_STEPS, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
 import { again as fixAgain, authorAskFor, authorUnaskable, EffectError, queueAuthorAsk, type Instruction } from "./effects.ts";
 import { premergeParts } from "./premerge.ts";
 import { afterPush, atBlocker, conflictOf, droppedOf, onConflict, planOf, textFor, withoutAuthor, type ReviewView } from "./recommend.ts";
@@ -199,12 +199,18 @@ function closeRec(finding: string | null, plan: readonly PlanPart[]): Recommenda
 }
 
 /**
- * The question once the fix-up tries since the approver last went on are used up: a yes merges it as it is, past the review or check it
- * could not satisfy (the merge leg goes past a review a person was shown, and pre-merge parts it drops are overruled).
+ * The question once the fix-up tries since the approver last went on are used up on a finding that stops the merge: it says what was not
+ * fixed and what the last try said, and a yes makes the fix again (resolve.ts). The word merge merges it as it is, past the review or check
+ * it could not satisfy (the merge leg goes past a review a person was shown, and pre-merge parts it drops are overruled).
  */
-function triedEnough(what: string, tries: number, plan: readonly PlanPart[], fix: readonly number[]): Recommendation {
-  const premerge = fix.filter((n) => plan.find((p) => p.n === n)?.premerge);
-  return { text: t("The fix-up could not fix {what} after {n} tries. Merge it as it is?", { what, n: tries }), parts: { fix: [], drop: [...new Set([...droppedOf(plan), ...premerge])] }, merges: true };
+function triedEnough(what: string, tries: number, plan: readonly PlanPart[], fix: readonly number[], last: string | null = null, instruction: Instruction | null = null): Recommendation {
+  const said = tries > 1 ? t("AutoCraft's fix-up could not fix {what} in {n} tries.", { what, n: tries }) : t("AutoCraft's fix-up could not fix {what}.", { what });
+  const lastTry = last?.trim() ? ` ${t("Its last try: {reason}", { reason: asSentence(clipText(last.trim(), FINDING_SHOWN)) })}` : "";
+  return {
+    text: `${said}${lastTry} ${t("Try the fix-up again, then merge. Write merge to merge it as it is.")}`,
+    parts: { fix: [...fix], drop: droppedOf(plan) }, merges: true, ...(fix.length ? {} : { again: "fixup" as const }),
+    triedFix: instruction ? { instruction } : {},
+  };
 }
 
 /** The question of an approved PR whose review holds it until other items are settled: no fix-up merges them, so a yes reviews it again then. */
@@ -595,6 +601,8 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   // Waiting for a person: nothing moves until they answer, the cause of their question goes, or someone else pushes past the head their question was made at. Then the
   // question goes and the item is looked at like a running one; `recHead` stays, so that the next question says why it is asked.
   let repushed = w.state === "blocked" || w.state === "recommending";
+  // The question closed because the hold that stopped the fix-up went: the merge leg that hold ended says nothing any more, and a new one starts.
+  let fixWent = false;
   // A stop at the author's commits made before they went through the review round: the round takes its place.
   if (w.state === "blocked" && w.kind === "pr" && w.blocker === "author-commits" && w.blockerParams?.round === undefined && w.rec) {
     await closeQuestion(t("the author's new commits are reviewed first, and the merge stays approved."));
@@ -611,6 +619,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     }
     const went = head && w.recHead !== null && now?.head === head ? causeWent(w.rec?.cause, now, w.approvedBy !== null) : null;
     if (went === null) return settle(base);
+    fixWent = w.rec?.cause?.code === "fix-unmade";
     await closeQuestion(went);
     repushed = false;
   }
@@ -690,7 +699,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const stopped = approved ? endedLeg(pass, w, since, resumed) : null;
   // Once CI is green at the head, a leg that red CI ended says nothing any more: a new one starts.
   // Nor does a leg the pre-merge review's defects ended, once a fix-up round repairs them at the head.
-  let ended = stopped && ((codeOf(stopped) === "ci-failed" && f?.head === head && causeWent({ code: "red-ci" }, f, approved) !== null) || (premergeStop(stopped) && premergeStopLifts(f, head))) ? null : stopped;
+  let ended = stopped && ((codeOf(stopped) === "ci-failed" && f?.head === head && causeWent({ code: "red-ci" }, f, approved) !== null) || (premergeStop(stopped) && premergeStopLifts(f, head)) || (fixWent && fixUnmade(stopped))) ? null : stopped;
   const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => {
     const o = { approved, review: view, parts: plan, conflict }, now = f?.head === head ? f : null;
     const rec = (now && ended && x.params.reason === ended.reason ? legStop(codeOf(ended), now, o) : null) ?? atBlocker(x, view, parts, w.entry === "merge");
@@ -760,7 +769,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       if (!last || !UNFIXED.includes(last.state)) return settle(patch);
       const tried = await operatorTries(db, w.repo, target, since);
       const parts = plan.filter((p) => p.premerge && p.state === "planned").map((p) => p.n);
-      return await stop({ blocker: "failed-twice", params: { step: "fix-up", count: tried, reason: t("the fix-up ended without a push") } }, plan, triedEnough(t(FIX_WHAT[cause]), tried, plan, parts));
+      return await stop({ blocker: "failed-twice", params: { step: "fix-up", count: tried, reason: t("the fix-up ended without a push") } }, plan, triedEnough(t(FIX_WHAT[cause]), tried, plan, parts, last.reason));
     }
     const reviewed = cause === "review-hold" || cause === "review-close";
     if (reviewed && stored && stored.model === null) return await stop({ blocker: "other", params: { reason: unreadReason(stored.reason), round: "too-large" } });
@@ -788,7 +797,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     }
     const tries = await operatorTries(db, w.repo, target, since);
     if (tries >= FIXUP_MAX_ATTEMPTS) {
-      const asIs = triedEnough(t(FIX_WHAT[cause]), tries, fixPlan, fix);
+      const asIs = triedEnough(t(FIX_WHAT[cause]), tries, fixPlan, fix, null, instruction);
       return await stop({ blocker: "failed-twice", params: { step: "fix-up", count: tries, reason: t("the fix-up tries are used up") } }, fixPlan, asIs);
     }
     try {

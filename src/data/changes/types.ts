@@ -80,7 +80,7 @@ export type CifixFacts = {
   /** Reads of the head's failure log that found none to read yet (`unread` rows), and when the next read is due (ms) while it waits. */
   unreads: number; readAgainAt?: number;
 };
-export type FixupAtHead = { recorded: string[]; unsent?: UnsentAsk };
+export type FixupAtHead = { recorded: string[]; unsent?: UnsentAsk; /** The reason of the head's latest hold row (too-large, cannot-push, push-denied), which says why the fix-up made nothing there. */ held?: string };
 export type ConflictBucket = "merge" | "ask" | "ask-retry" | "asked" | "held" | "unapproved" | "linting" | "capped" | "done";
 export type LintFactOf = { step: PatchKind; source: FixupSource | "carry"; ended: boolean };
 export type MadeBy = { kind: PatchKind; from: string; id: number; source: FixupSource | null; reason: string | null; ciKind: string | null };

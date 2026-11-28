@@ -5,8 +5,9 @@ import { redAtHead, unapprovedStop, unknownStuck, worksOn } from "../core/decide
 import { implementStep } from "../core/decide-item.ts";
 import type { Action, ItemFacts, Plan, PrFacts, StandingFact } from "../core/plan.ts";
 import { t } from "../i18n/index.ts";
-import { nobodyFixes, nobodyFixesFor } from "../preapproval/paths.ts";
-import { afterSteps, droppedOf, onConflict, planned, some, textFor, without, type Conflict, type ReviewView } from "./recommend.ts";
+import { fixPath, nobodyFixes, nobodyFixesFor } from "../preapproval/paths.ts";
+import { FIXUP_MAX_ATTEMPTS } from "../core/rules.ts";
+import { afterSteps, droppedOf, onConflict, planned, some, textFor, unmade, type Conflict, type ReviewView, type Unmade } from "./recommend.ts";
 import { earlierReview, listText } from "./status.ts";
 import { asSentence, clipText } from "../prose.ts";
 import type { Blocker, PlanPart, Recommendation } from "./types.ts";
@@ -81,18 +82,38 @@ const regression = (f: PrFacts, rest: string): string =>
 /** The sentence of a wait that has none of its own. */
 const waitText = (wait: string): string => t("It waits for {what}.", { what: wait.replace(/\.$/, "") });
 
-/**
- * A PR whose review asks for fixes nobody makes comes back to go on without them; null for any other. On a PR approved for merge only the
- * fixes that block it count: the others are filed as follow-ups and stop nothing.
- */
-export function withoutFixes(f: PrFacts, o: Asked): Recommendation | null {
-  const parts = planned(o.parts).filter((n) => !(o.approved && o.parts.find((p) => p.n === n)?.minor));
-  return o.review?.verdict === "take-fix" && parts.length && (o.approved ? nobodyFixes(f) : nobodyFixesFor(f)) ? without(parts, f.fixup!.fixes === 0) : null;
+/** Hold states of the fix-up at a head: a migration or a lifted limit supersedes the row, and the fix-up can run again. */
+const FIX_HOLDS = ["too-large", "cannot-push", "push-denied"] as const;
+
+/** Why the fix-up made none of the review's fixes at the head, from what it recorded there. */
+function unmadeWhy(f: PrFacts): Unmade {
+  const x = f.fixup, held = x?.held ?? "";
+  if (x?.fixes === 0 || /may not edit/.test(held)) return { why: t("the fix changes files that AutoCraft's rules do not let it edit"), author: true };
+  if (x?.recorded.includes("push-denied")) return { why: t("GitHub refused AutoCraft's push to the pull request's branch"), author: true };
+  if (!f.pushable || x?.recorded.includes("cannot-push")) return { why: t("AutoCraft cannot push to the pull request's branch"), author: true };
+  if (/diff is over/.test(held)) return { why: t("the pull request's diff is over AutoCraft's size limit for a fix-up"), author: false };
+  if (x?.recorded.includes("too-large")) return { why: t("the files the fix names are over AutoCraft's size limit for a fix-up"), author: false };
+  if ((x?.attempts ?? 0) >= FIXUP_MAX_ATTEMPTS) return { why: t("the fix-up failed {n} times", { n: x!.attempts }), author: false };
+  return { why: t("the fix-up could not run"), author: false };
 }
 
-/** A recommendation to make the review's fixes, without those nobody can make, not even for the person who says yes. */
+/**
+ * A PR whose review asks for fixes nobody makes comes back with what could not be made and why; null for any other. On a PR approved for
+ * merge only the fixes that block it count: the others are filed as follow-ups and stop nothing. A fix that blocks the merge is never dropped.
+ */
+export function withoutFixes(f: PrFacts, o: Asked, forPerson = false): Recommendation | null {
+  const minor = (n: number) => { const p = o.parts.find((x) => x.n === n); return !!p?.minor && !p.major; };
+  const own = o.approved && !forPerson;
+  const parts = planned(o.parts).filter((n) => !(own && minor(n)));
+  if (o.review?.verdict !== "take-fix" || !parts.length || !(own ? nobodyFixes(f) : nobodyFixesFor(f))) return null;
+  const hold = FIX_HOLDS.find((s) => f.fixup?.recorded.includes(s));
+  const why = { ...unmadeWhy(f), ...(f.quiet || f.authorIsPipeline ? { byHand: true } : {}) };
+  return unmade(o.parts, { blocking: parts.filter((n) => !minor(n)), minor: parts.filter(minor) }, why, o.approved, hold ? { code: "fix-unmade", state: hold } : undefined);
+}
+
+/** A recommendation to make the review's fixes, unless nobody can make them, not even for the person who says yes. */
 export const fixable = (rec: Recommendation, f: PrFacts, o: Asked): Recommendation =>
-  (rec.parts.fix.length && nobodyFixesFor(f) ? withoutFixes(f, { ...o, approved: false }) ?? rec : rec);
+  (rec.parts.fix.length && nobodyFixesFor(f) ? withoutFixes(f, o, true) ?? rec : rec);
 
 function recFor(code: WaitCode, f: PrFacts, wait: string | null, o: Asked): Recommendation {
   const parts = { fix: [] as number[], drop: droppedOf(o.parts) }, merges = o.approved;
@@ -182,10 +203,10 @@ export function questionFor(f: PrFacts, p: Plan, o: Asked): Question | null {
   if (code === "implement-question" || code === "implement-stuck" || p.state === "opus-hold" && code === "answer") return null;
   const rec = recFor(code, f, p.wait, o);
   // Blocking fixes of an approved PR that nobody can make: a fix that could not be made.
-  const unmade = o.approved && (code === "answer" || code === "ask-failed");
+  const notMade = o.approved && (code === "answer" || code === "ask-failed");
   return {
-    blocker: unmade ? "failed-twice" : "other",
-    params: { code, reason: (p.wait ?? code).replace(/^a person: /, ""), ...(unmade ? { step: "fix-up" } : {}) }, rec: rec.goes ? rec : onConflict(rec, o.conflict),
+    blocker: notMade ? "failed-twice" : "other",
+    params: { code, reason: (p.wait ?? code).replace(/^a person: /, ""), ...(notMade ? { step: "fix-up" } : {}) }, rec: rec.goes ? rec : onConflict(rec, o.conflict),
   };
 }
 
@@ -225,5 +246,12 @@ export function causeWent(cause: Recommendation["cause"], f: PrFacts | ItemFacts
     case "mergeable-stuck": return unknownStuck(f) === null && (f.mergeable === "MERGEABLE" || f.mergeable === "CONFLICTING") ? t("GitHub says whether it can be merged now.") : null;
     case "red-ci": return f.ci === "success" && !redAtHead(f) ? t("CI is green now.") : null;
     case "ci-approval-failed": return f.ci !== "unknown" && f.runs?.blocked !== "failed" && f.runs?.blocked !== "unsupported" ? t("Its CI runs wait for no approval any more.") : null;
+    case "fix-unmade": {
+      // The hold row at the head is gone (superseded); an approved PR's own fix-up runs again only while its tries last (fixupOf).
+      const r = f.review;
+      if (!r || r.verdict !== "take-fix" || r.head !== f.head || r.stale || !f.fixup || f.fixup.recorded.includes(cause.state)) return null;
+      if (approved && fixPath(f) !== "fix") return null;
+      return approved ? t("What stopped the fix-up no longer applies, so AutoCraft makes the fix again.") : t("What stopped the fix-up no longer applies.");
+    }
   }
 }

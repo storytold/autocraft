@@ -55,6 +55,9 @@ export const fixesFirst = (leg: EndedLeg): boolean => FIX_STOPS.includes(codeOf(
 /** Leg ends of a fix-up that could not be made: it failed, grew too large, or cannot run. */
 const FIX_FAILED: readonly StopCode[] = ["fix-failed", "fix-too-large", "fix-cannot-run"];
 
+/** The ended leg stopped because a fix-up could not be made. */
+export const fixUnmade = (leg: EndedLeg): boolean => FIX_FAILED.includes(codeOf(leg));
+
 /**
  * The blocker a stopped merge leg (src/preapproval) stands for, when it is no finding to fix: the author's push, a fix-up that could not be
  * made (a step that failed: `failed-twice`), or `other` for what only a person can settle, shown with its reason.
@@ -62,7 +65,7 @@ const FIX_FAILED: readonly StopCode[] = ["fix-failed", "fix-too-large", "fix-can
 export function legBlocker(leg: EndedLeg): Found {
   const code = codeOf(leg);
   if (code === "author-push" || code === "head-back") return { blocker: "author-commits", params: { reason: leg.reason } };
-  if (FIX_FAILED.includes(code)) return { blocker: "failed-twice", params: { step: "fix-up", reason: leg.reason } };
+  if (fixUnmade(leg)) return { blocker: "failed-twice", params: { step: "fix-up", reason: leg.reason } };
   return { blocker: "other", params: { reason: leg.reason } };
 }
 

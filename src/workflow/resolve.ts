@@ -362,7 +362,7 @@ function withoutReview(wf: ItemWorkflow, drop: number[], weight: number | null):
 /**
  * Runs the recommendation's plan with these parts; approves the merge when it ends in one (or `merge` was said) and nobody has. The word
  * merge runs what the recommendation runs, then merges, and never closes or backlogs the item; only where the recommendation gives a
- * pre-merge review that failed for good one more try does merge go on without it, as its text says.
+ * pre-merge review that failed for good one more try, or a fix whose tries are used up another, does merge go on without it, as its text says.
  */
 function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number | null, merge = false): Resolved {
   const rec = wf.rec!;
@@ -382,8 +382,15 @@ function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number 
   const merges = rec.merges || merge;
   const approve = merges && !wf.approvedBy;
   if (rec.answer && !fix.length) return run({ pick: rec.answer, drop, approve, merges, weight, answers: true, how: approve ? "approved" : "answered" });
+  // The word merge on a fix whose tries are used up merges it as it is: the pre-merge parts it would fix are overruled.
+  if (rec.triedFix && merge) {
+    const overruled = fix.filter((n) => wf.plan.find((p) => p.n === n)?.premerge);
+    return run({ drop: [...new Set([...drop, ...overruled])], approve, merges, weight, answers: true, how: approve ? "approved" : "answered" });
+  }
+  const again = fix.length ? "fixup" : rec.again ?? null;
   return run({
-    again: fix.length ? "fixup" : rec.again ?? null, fix, drop, approve, merges, weight, answers: true, goesOn: !!rec.goes,
+    again, fix, drop, approve, merges, weight, answers: true, goesOn: !!rec.goes,
     retryPremerge: !!rec.retriesPremerge && !merge && !fix.length, how: approve ? "approved" : "answered",
+    instruction: again === "fixup" ? rec.triedFix?.instruction ?? null : null,
   });
 }

@@ -13,6 +13,8 @@ export const MAX_CONFLICT_TRIES = 2;
 const CONFLICT_TRY_STATES = ["pushing", "merged", "failed", "refused", "rejected"];
 /** Fix-up states whose rows are the recorded outcome at a head. */
 const FIXUP_RECORDED_STATES = ["pushed", "cannot-push", "too-large", "asked", "comment-failed", "push-denied", "linting", "comment-unsent"];
+/** Fix-up states that hold a head without a try. */
+const FIXUP_HOLD_STATES = ["too-large", "cannot-push", "push-denied"];
 /** Fix-up and CI fix states of a try that failed. */
 const FAILED_TRY = ["failed", "refused", "rejected", "cannot-push", "push-denied"];
 const TASK_ENDED = ["done", "failed", "cancelled", "lost"];
@@ -118,7 +120,8 @@ export function cifixAt(rows: readonly CifixRow[], head: string, now: number, ta
 /** The recorded final states of the review's fix-ups at a head and the unsent-comment backoff. */
 export function fixupAtHead(rows: readonly FixupRow[], head: string, now: number): FixupAtHead {
   const at = byCreated(rows).filter((r) => r.source === null && r.fromHead === head && FIXUP_RECORDED_STATES.includes(r.state));
-  return { recorded: at.filter((r) => r.state !== "comment-unsent").map((r) => r.state), ...unsentOf(at.filter((r) => r.state === "comment-unsent").map((r) => r.createdAt), now) };
+  const held = at.filter((r) => FIXUP_HOLD_STATES.includes(r.state)).at(-1)?.reason;
+  return { recorded: at.filter((r) => r.state !== "comment-unsent").map((r) => r.state), ...unsentOf(at.filter((r) => r.state === "comment-unsent").map((r) => r.createdAt), now), ...(held ? { held } : {}) };
 }
 
 /**

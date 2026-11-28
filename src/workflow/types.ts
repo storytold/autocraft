@@ -82,7 +82,9 @@ export type Recommendation = {
   /** A yes runs no step of its own: the work goes on in the name of the person who says it, or AutoCraft looks again at what they settled on GitHub. */
   goes?: "on" | "look";
   /** What the question is about, which may clear without an answer: the question closes then and the item goes on. `lane`: the merge itself was refused for its approver's access. */
-  cause?: { code: "actor-gone"; lane?: true } | { code: "base-off-default" | "no-ci" | "mergeable-stuck" | "ci-approval-failed" | "red-ci" };
+  cause?: { code: "actor-gone"; lane?: true } | { code: "base-off-default" | "no-ci" | "mergeable-stuck" | "ci-approval-failed" | "red-ci" }
+    /** The fix-up made nothing at the head for a hold row in `state` (too-large, cannot-push, push-denied); it clears once that row is superseded. */
+    | { code: "fix-unmade"; state: string };
   /** The review failed for good at this head: the word merge starts the PR at the merge queue, without it. Not past what an earlier review there asks: its planned parts, or its verdict. */
   skipsReview?: { parts: number[]; verdict?: "hold" | "close" };
   /** A yes answers this question of the implementation with this option, as the person (a stuck implementation's Try again). */
@@ -93,6 +95,11 @@ export type Recommendation = {
   finding?: string;
   /** The pre-merge review failed for good at the head: a yes gives it one more try there, the word merge goes on without it. */
   retriesPremerge?: true;
+  /**
+   * The fix-up tries are used up on a finding that stops the merge: a yes makes the fix again, told `instruction` (what the review or check
+   * found) besides its parts; the word merge merges it as it is, past the pre-merge parts it would fix.
+   */
+  triedFix?: { instruction?: { text: string; review?: true } };
 };
 
 /** A question an implementation attempt asked: the attempt and the round that asked it (answers are recorded on that attempt). */
