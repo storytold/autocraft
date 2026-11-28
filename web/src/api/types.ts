@@ -3,6 +3,7 @@
 
 import type { UserSettings, UserSettingsReply } from "../../../src/remote/protocol.ts";
 import type { StepValue } from "../../../src/core/item-query.ts";
+import type { DiffLine } from "../../../src/prompts/diff.ts";
 export type RepoName = string;
 
 export interface ItemRef {
@@ -1030,7 +1031,7 @@ export interface PromptInfo {
   settings: { label: string; value: string }[];
   /** Items per call, attempts per item and the time limit per call. */
   limits: { perCall: number; attempts: number; timeoutSeconds: number };
-  /** Static text with `{{name}}` placeholders; for Jev, the request body. */
+  /** The text that runs, with its `{{name}}` placeholders; for Jev, the request body. */
   template: string;
   /** Claude without tools: the fixed text sent as `--system-prompt`; null when the call keeps the CLI's own system prompt (sandboxed) or is a Jev request. */
   system: string | null;
@@ -1042,6 +1043,124 @@ export interface PromptInfo {
   /** Exactly what would be sent on stdin for `exampleItems` (made-up items). */
   example: string;
   exampleItems: string[];
+  /** Who may change the prompt and how it stands against the release. */
+  edit: PromptEditState;
+  /** Claude: the text that runs, in its editable and locked parts (what an edit starts from); Jev: [] (edited with the Jev form). */
+  segments: PromptSegment[];
+}
+
+/** A part of a Claude prompt's text form: editable text, or a locked block (`name`) that an edit keeps as it is. */
+export interface PromptSegment {
+  locked: boolean;
+  /** The locked block's name; null for editable text. */
+  name: string | null;
+  text: string;
+}
+
+export type PromptRevisionKind = "release" | "edit" | "rollback" | "use-release";
+
+/** One stored revision of a prompt or of a repository's guidance. */
+export interface PromptRevisionInfo {
+  rev: number;
+  /** release: the release default; edit: a saved edit; rollback: an earlier revision's text again; use-release: the switch back to the release default. */
+  kind: PromptRevisionKind;
+  /** What a call of this revision records as its prompt version. */
+  version: string;
+  /** "release" for a release default. */
+  author: string;
+  at: string;
+  note: string;
+  /** The revision it was made from (an edit's starting revision, the revision a rollback copies). */
+  fromRev: number | null;
+  active: boolean;
+}
+
+export interface PromptEditState {
+  /** The active revision; null while no revision is stored (the release default runs as revision 1). */
+  rev: number | null;
+  /** The release default runs (no edit is active). */
+  following: boolean;
+  /** The active edit was made against an older release default than the running release's. */
+  newerDefault: boolean;
+  /** The active edit no longer fits the release's locked blocks or placeholders, so the release's text runs. */
+  structureChanged: boolean;
+  /** The signed-in user may save, roll back and switch this prompt to the release default. */
+  mayEdit: boolean;
+  /** The prompt receives each repository's guidance. */
+  guidanceSlot: boolean;
+  /** An interactive prompt that runs another prompt's text: its edits are made on that one. */
+  sameAs: string | null;
+}
+
+export interface PromptProblem {
+  /** Where the problem is: "body", "note", "rev", "locked block output (2)", "editable text 3", "guidance", ... */
+  where: string;
+  message: string;
+}
+
+/** A dry run of a save (POST .../check): the problems that would refuse it, the change against the text that runs now and the version it would record. */
+export interface PromptCheckReply {
+  ok: boolean;
+  problems: PromptProblem[];
+  diff: PromptDiffLine[];
+  /** The version the text would record; null when it is refused. */
+  version: string | null;
+}
+
+/** POST /api/prompts/:id, its check, and the same for a repository's guidance. `baseRev`: the active revision the edit started from (null while none is stored). */
+export interface PromptSaveBody {
+  body: string;
+  note: string;
+  baseRev: number | null;
+}
+
+/** The reply of a save, a rollback or a switch to the release default: the new revision, or the problems that refused it (nothing stored). */
+export interface PromptSaveReply {
+  ok: boolean;
+  problems: PromptProblem[];
+  rev: number | null;
+  version: string | null;
+}
+
+export type PromptDiffLine = DiffLine;
+
+/** GET /api/prompts/:id/diff?from=&to= (a revision number, "release" for the running release default, "active" for the text that runs). */
+export interface PromptDiffReply {
+  id: string;
+  scope: string;
+  from: string;
+  to: string;
+  diff: PromptDiffLine[];
+}
+
+/** GET /api/prompts/:id/history (with ?repo= for repo.guidance), newest first; [] while no revision is stored. */
+export interface PromptHistory {
+  id: string;
+  scope: string;
+  revisions: PromptRevisionInfo[];
+}
+
+/** A repository's guidance for its review and fix-writing prompts (one per repository). */
+export interface RepoGuidance {
+  repo: RepoName;
+  /** "" for none. */
+  text: string;
+  rev: number | null;
+  author: string | null;
+  at: string | null;
+  note: string | null;
+  /** The prompts that receive it. */
+  prompts: string[];
+  /** The signed-in user may change it (an operator, or a maintainer with write access on the repo). */
+  mayEdit: boolean;
+  /** Newest first. */
+  history: PromptRevisionInfo[];
+}
+
+/** GET /api/prompt-guidance: the repositories with guidance that the user can see. */
+export interface PromptGuidanceList {
+  prompts: string[];
+  repos: RepoGuidance[];
 }
 
 export interface PromptsReport {
