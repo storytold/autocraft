@@ -997,7 +997,7 @@ export const STEPS: StepDef[] = [
     name: "cifix",
     priority: 1,
     title: "Fix failing CI on wanted pull requests",
-    description: "For a take or take-fix pull request whose gate check fails at its reviewed head, reads the failed jobs' logs and sorts the failure. A formatter-only failure is fixed by running the formatter in a build environment. A code failure gets a Sonnet patch, checked by Opus, pushed to the contributor's branch or posted as a comment where the branch is closed to us. An infrastructure failure is left to the cifix-rerun step. At most two tries per head.",
+    description: "For a take or take-fix pull request whose gate check fails at its reviewed head, reads the failed jobs' logs and sorts the failure. A formatter-only failure is fixed by running the formatter in a build environment. A code failure gets a Sonnet patch, checked by Opus, pushed to the contributor's branch or posted as a comment where the branch is closed to us; with fix sessions on for the step, the pull request's fix session makes the change in its workspace, building and testing there, in place of the patch. An infrastructure failure is left to the cifix-rerun step. At most two tries per head.",
     stage: runStage("cifix"),
     requires: "operator",
     models: ["sonnet", "opus"],
@@ -1014,7 +1014,7 @@ export const STEPS: StepDef[] = [
       const r = await runCifix(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), approved: approvedLane(ctx.params), ...onlyPr(ctx.params), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       const acted = r.pushed.length + r.asked.length + r.queued.length + r.failed.length + r.held.length + r.infra.length;
       ctx.acted(acted + r.unasked.length);
-      const line = `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} commented, ${r.queued.length} formatter runs queued, ${r.infra.length} infrastructure failures, ${r.failed.length + r.unasked.length} failed or refused, ${r.held.length} held`;
+      const line = `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} commented, ${r.queued.length} formatter runs queued, ${r.infra.length} infrastructure failures, ${r.failed.length + r.unasked.length} failed or refused, ${r.held.length} held${r.waiting.length ? `, ${r.waiting.length} waiting for a fix session workspace (${r.waiting[0]!.reason})` : ""}`;
       // Asks that failed are all this job had: the failure backoff spaces their next try (and skips the write pacing's message).
       if (r.unasked.length && !acted) throw new Error(`${r.unasked[0]!.reason}; ${r.unasked[0]!.ref} not asked; ${line}`);
       return line;

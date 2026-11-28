@@ -31,7 +31,7 @@ export type CifixCandidate = {
   /** The PR author's login, whom an ask about red CI addresses. */
   author?: string | null;
   /** A stored model patch whose lint task ended: the collect step pushes it with the format changes folded in, or asks the model again with the findings. */
-  lint?: { rowid: number; round: number; task: number | null; state: string; patch: string; files: string[]; /** The kept model session that wrote the patch (src/prepush/resume.ts). */ session: string | null };
+  lint?: { rowid: number; round: number; task: number | null; state: string; patch: string; files: string[]; /** The kept model session that wrote the patch (src/prepush/resume.ts). */ session: string | null; /** The fix session turn that wrote it (fix_session_turns.id). */ sessionTurn: number | null };
 };
 
 export type CifixSelection = {

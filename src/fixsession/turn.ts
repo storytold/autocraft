@@ -22,7 +22,7 @@ import { promptTier } from "../remote/bundle.ts";
 import { repoDocsFor } from "../sandbox/repo-docs.ts";
 import { runGate, type GateOk, type StepGate } from "./gates.ts";
 import {
-  checksMessage, LOST_REPLY_MESSAGE, REPORT_MESSAGE, stepMessage, undoMessage,
+  checksMessage, lintMessage, LOST_REPLY_MESSAGE, REPORT_MESSAGE, stepMessage, undoMessage,
   type FixSessionTask, type FixStep as TaskStep, type HistoryNote, type HistoryTurn, type StepTurn,
 } from "./messages.ts";
 import { FIX_FOLLOW_UP_CALL, FIX_SESSION_CALL, parseFixReport, parseSecurityReport, SESSION_DIFF_MAX_BYTES, SESSION_REPO_DOCS, type SecurityReport } from "./report.ts";
@@ -30,7 +30,7 @@ import {
   addTurn, endSession, ensureSession, lastTurn, loadSessions, SESSION_MAX_TURNS, settleTurn, turnsOf, updateSession,
   type FixSession, type FixStep, type FixTurn, type FixTurnPurpose,
 } from "./store.ts";
-import { ensureWorkspace, WORKSPACE_SESSION_KIND, type FixWorkspaceEnv } from "./workspace.ts";
+import { ensureWorkspace, restorePatch, WORKSPACE_SESSION_KIND, type FixWorkspaceEnv } from "./workspace.ts";
 
 export type FixPromptId = "fix.session" | "security.session";
 /** The step a turn works for, with a maintainer's `fix <instructions>` apart from the review's fixes. */
@@ -141,15 +141,24 @@ export type StepSpec = {
   /** The step's gates, with the workspace's pod to read files from. */
   gate(pod: Pod): StepGate;
   items?: ItemRef[];
+  /**
+   * A lint follow-up: the step goes on from its stored change `patch` (made at `head`), which the tree gets again, with `message`
+   * (the findings) on the live session. A fresh session gets them from `task`, which then names the findings itself.
+   */
+  lint?: { patch: string; message: string };
 };
 
-/** A PR step's spec from its task turn: fix.session, with the step message on a live session. */
-export function prStep(db: Db, turn: StepTurn, gate: (pod: Pod) => StepGate, o: { lint?: string[] } = {}): StepSpec {
+/**
+ * A PR step's spec from its task turn: fix.session, with the step message on a live session. `lint`: the lint task's findings on
+ * the step's stored change, which the step continues from.
+ */
+export function prStep(db: Db, turn: StepTurn, gate: (pod: Pod) => StepGate, o: { lint?: { findings: string[]; patch: string } } = {}): StepSpec {
   return {
     step: turn.step, head: turn.head, promptId: "fix.session",
-    task: (history) => renderFixSession(db, { ref: turn.ref, turn, ...(history && { history }), ...(o.lint?.length && { lint: o.lint }) }),
+    task: (history) => renderFixSession(db, { ref: turn.ref, turn, ...(history && { history }), ...(o.lint && { lint: o.lint.findings }) }),
     message: ({ moved }) => stepMessage(turn, { later: true, ...(moved && { moved }) }),
     gate,
+    ...(o.lint && { lint: { patch: o.lint.patch, message: lintMessage(o.lint.findings) } }),
   };
 }
 
@@ -278,7 +287,7 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
     round = queued;
     if (!await settled(round, r)) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, s.workspaceId);
   }
-  const ws = await ensureWorkspace(s, spec.head, env, { keepTree: resume });
+  const ws = await ensureWorkspace(s, spec.head, env, { keepTree: resume || !!spec.lint });
   if (ws.kind === "wait") return done({ kind: "wait", reason: ws.reason }, s.workspaceId);
   if (!await reload()) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, ws.workspaceId);
   const pod = env.pod?.(ws.workspaceId) ?? workspacePod(db, ws.workspaceId, env.cancelled, env.api);
@@ -289,6 +298,11 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
     round = r = null;
     const docs = await putRepoDocs(env, ws.workspaceId, await (env.agents ?? ((repo) => defaultAgents(db, repo)))(s.repo));
     if (docs) env.log(`fix session ${s.id}: the repository's AGENTS.md was not put in the workspace (${docs})`);
+    // A lint follow-up's tree is the head plus the stored change, also when another step's turn changed the tree since.
+    if (spec.lint) {
+      const back = await restorePatch(env, ws.workspaceId, { diff: spec.lint.patch, head: spec.head });
+      if (!back.ok) return done({ kind: "failed", reason: `the stored change could not be put back in the workspace: ${back.reason}` }, ws.workspaceId);
+    }
   }
   // Counts of this step's follow-ups so far, from the adopted turn back to the step's first.
   let checkTurns = 0, undone = false, reportAsked = false;
@@ -298,12 +312,12 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
       if (t.purpose === "findings") checkTurns++;
       if (t.purpose === "undo") undone = true;
       if (t.purpose === "report") reportAsked = true;
-      if (t.purpose === "step" || t.purpose === "start") break;
+      if (t.purpose === "step" || t.purpose === "start" || t.purpose === "lint") break;
     }
   }
 
   type Next = { purpose: FixTurnPurpose; message: string | null };
-  const opening = async (): Promise<Next> => ({
+  const opening = async (): Promise<Next> => spec.lint ? { purpose: "lint", message: spec.lint.message } : ({
     purpose: "step",
     message: spec.message({ moved: ws.moved ? { from: ws.moved.from, diffStat: await env.movedStat?.(ws.moved.from, ws.moved.to).catch(() => "") ?? "" } : null }),
   });
@@ -325,8 +339,9 @@ export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec)
       let stdin: string, prompt: { system: string; version: string } | undefined, purpose = next.purpose;
       if (follow && next.message !== null) stdin = next.message;
       else {
-        // No live harness session: a new one gets the task; one that takes over also gets the history and what the tree holds.
-        const fresh = history.length > 0;
+        // No live harness session: a new one gets the task; one that takes over also gets the history and what the tree holds, as
+        // does one that continues a stored change.
+        const fresh = history.length > 0 || next.purpose === "lint";
         let diffStat = "";
         if (fresh && next.purpose !== "step") {
           const d = await collectDiff(env, ws.workspaceId);

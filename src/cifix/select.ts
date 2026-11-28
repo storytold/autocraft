@@ -46,7 +46,7 @@ export async function selectCifix(db: Db, repo: string, run?: string | null, pla
     out.listed.push(w.id);
     if (!mayRun({ facts: f, action }, by).ok || !inLane(f)) continue;
     out.lint.push({ repo, number: f.number, head, verdict: r?.verdict === "take-fix" ? "take-fix" : "take", reason: r?.reason ?? "", attempt: w.attempt, route: f.pushable ? "branch" : "comment", mayPush: pushPermission(f, "cifix").ok, mayComment: mayComment(f), rerun: false, rerunAt: null,
-      lint: { rowid: w.id, round: w.lintRound, task: w.lintTask, state: w.lintState, patch: w.patch, files: w.files, session: w.session } });
+      lint: { rowid: w.id, round: w.lintRound, task: w.lintTask, state: w.lintState, patch: w.patch, files: w.files, session: w.session, sessionTurn: w.sessionTurn } });
   }
   return out;
 }
