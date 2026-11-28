@@ -9,7 +9,7 @@ import { prPackages, runGate, type GateResult, type StepGate } from "../fixsessi
 import { lintMessage, type StepTurn } from "../fixsession/messages.ts";
 import { loadSessions, loadTurns, type FixSession } from "../fixsession/store.ts";
 import { prStep, runStep, type StepEnv, type StepOutcome, type StepSpec } from "../fixsession/turn.ts";
-import { openSession, parkSession } from "../fixsession/workspace.ts";
+import { openSession, parkSession, WorkspaceUnavailable } from "../fixsession/workspace.ts";
 import type { FixCandidate } from "./candidates.ts";
 import type { Git } from "./git.ts";
 import type { BuildScripts } from "./patch.ts";
@@ -50,7 +50,13 @@ export type SessionPatch =
   | { kind: "ok"; patch: string; files: string[]; changed: number; changes: string[]; turnId: number }
   /** Recorded as today's shapes: refused (the gates refused the change after its undo turn), failed (no change to push). */
   | { kind: "failed" | "refused"; reason: string }
-  /** Nothing recorded: the workspace or the session's runner is a wait, or the session ended (the PR closed, a person stopped it). */
+  /**
+   * Nothing recorded, and the item is no try: `lease` names the fix session's work lease when another job works the session (the
+   * step goes on once it is free); without it the workspace is still starting (registry wait FIX_WORKSPACE_WAIT). `unavailable`: no
+   * workspace can be had now (no environment for it, or it failed to start).
+   */
+  | { kind: "wait"; reason: string; lease?: string; unavailable?: true }
+  /** Nothing recorded: the session ended meanwhile (the PR closed, a person stopped it) or its tree is at another head. */
   | { kind: "skip"; reason: string };
 
 export type SessionRun = {
@@ -89,6 +95,10 @@ export async function sessionPatch(r: SessionRun, c: FixCandidate, t: SessionFix
   let out: StepOutcome | null = null;
   try {
     out = await runStep(env, session, spec);
+  } catch (e) {
+    // The workspace did not get ready (or the job was cancelled while it started): a wait on the workspace, never a try.
+    if (e instanceof WorkspaceUnavailable) return { kind: "wait", reason: `the fix session's workspace: ${e.message}`, unavailable: true };
+    throw e;
   } finally {
     if (out?.kind !== "wait") {
       const id = out?.session.id ?? session.id;
@@ -98,6 +108,7 @@ export async function sessionPatch(r: SessionRun, c: FixCandidate, t: SessionFix
   }
   switch (out.kind) {
     case "wait":
+      return { kind: "wait", reason: out.reason, ...(out.lease && { lease: out.lease }) };
     case "ended":
       return { kind: "skip", reason: out.reason };
     case "failed":

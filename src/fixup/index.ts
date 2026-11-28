@@ -58,7 +58,7 @@ import { outsideShown, shownSize, viewFile } from "./excerpt.ts";
 import { HOLD_CANNOT_PUSH, askText, commentText, commitMessage, fixupCommentEdited, fixupCommentLines, operatorCommentText } from "./template.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { ownerOf } from "../owners.ts";
-import { leaseItem } from "../runner/leases.ts";
+import { leaseItem, skipItem } from "../runner/leases.ts";
 import { isHalt, poolRoom, takersCut, takersFirst } from "../agents/call.ts";
 import { pushesAreUnsettled } from "./unsettled.ts";
 import { POOL_MAX, pool } from "../classify/run.ts";
@@ -370,6 +370,8 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
     let files = [...new Set(c.fixes.map((f) => f.file))];
     // The push is recorded: what fails after it (the comment) changes nothing about it.
     let pushed = false;
+    /** A fix session's wait: the item is neither handled nor a try. */
+    let deferHandled = false, waited = false;
     const fail = async (state: "failed" | "refused" | "rejected" | "superseded", raw: string) => {
       const reason = scrubReason(raw, d.root);
       await rec.fixup(c, state, reason, files);
@@ -391,7 +393,10 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       // GitHub says UNKNOWN while it recomputes: the value stored at this head (kept by the mirror) decides.
       if (pr.mergeable === "CONFLICTING" || (pr.mergeable !== "MERGEABLE" && await storedMergeable(db, repo, c.number, c.head) === "CONFLICTING")) { log(`  ${ref}: skipped: conflicts with the base branch; the conflict merge handles it`); return; }
       counted = true;
-      params.onHandled?.(++handled.n);
+      // In a fix session the item counts as handled once it is known not to wait (see the finally below).
+      const sessions = await fixSessionsOn(db, "fixup", repo);
+      if (!sessions) params.onHandled?.(++handled.n);
+      else deferHandled = true;
       const writes = pr.headRepository ? await ensureAuthorWrites(db, repo, c.number, pr.headRepository.nameWithOwner) : "no";
       if (writes === "unknown") { log(`  ${ref}: skipped: the author's permission could not be read yet`); return; }
       if (!pr.headRepository || !pushable(pr.headRepository.nameWithOwner, repo, pr.maintainerCanModify, pr.headRefName, await longLivedOf(db, repo), !!pr.headRef?.branchProtectionRule, writes === "yes")) {
@@ -410,9 +415,8 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
         files = [...new Set([...diff.text.matchAll(DIFF_FILE)].map((m) => m[1]!))].filter((p) => operatorEditable(p, scripts));
       }
       // In a fix session the model edits the workspace's tree: no files are shown, and the checkout serves the patch check alone.
-      const sessions = await fixSessionsOn(db, "fixup", repo);
       const sessionDeps = sessions ? (d.fixSession ?? defaultSessionDeps)(db) : null;
-      if (sessions && !sessionDeps) { log(`  ${ref}: skipped: this runner is not in the cluster, so it cannot reach the fix session's workspace; tried again later`); return; }
+      if (sessions && !sessionDeps) { waited = true; log(`  ${ref}: waiting: this runner is not in the cluster, so it cannot reach the fix session's workspace`); return; }
       // With a sandbox checkout the model reads the files itself, so they are listed by path and no size limit applies,
       // and a diff over the cap is shown as the named files' sections plus the other files by path.
       const checkout = (await d.checkout?.(repo, c.number, head)) ?? undefined;
@@ -483,6 +487,15 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
           sessionTurn = c.lint!.sessionTurn;
         } else {
           const got = await sessionPatch({ db, deps: sessionDeps, git, log, by: params.by === undefined || params.by === "pipeline" ? "pipeline" : params.by.operator, ...(c.lint && findings.length && { lint: { findings, patch: c.lint.patch, sessionTurn: c.lint.sessionTurn } }) }, c, task);
+          if (got.kind === "wait") {
+            // Nothing recorded and no try. Another job on the session was already left as a lease skip (leaseItem), so the step runs
+            // again once that lease is free. A workspace still starting (the job waited for it already) is left the same way on its
+            // own key, so the next job looks again; one that cannot be had waits for the step's input to change.
+            waited = true;
+            if (!got.lease && !got.unavailable) skipItem(`fixsession-workspace:${ref}`, log, `waiting: ${got.reason}`, ref);
+            else log(`  ${ref}: waiting: ${got.reason}`);
+            return;
+          }
           if (got.kind === "skip") { log(`  ${ref}: skipped: ${got.reason}; tried again later`); return; }
           if (got.kind !== "ok") { await fail(got.kind, got.reason); return; }
           v = got;
@@ -594,6 +607,8 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       if (pushed) { log(`  ${ref}: after the push: ${scrubReason(oneLine(String((e as Error).message ?? e)), d.root)}`); return; }
       await fail("failed", oneLine(String((e as Error).message ?? e)));
     } finally {
+      if (deferHandled && !waited) params.onHandled?.(++handled.n);
+      if (waited) counted = false;
       try { await release(); } finally { giveBack(); }
     }
   };

@@ -174,7 +174,8 @@ export type StepEnv = FixWorkspaceEnv & {
 };
 
 export type StepResult =
-  | { kind: "wait"; reason: string }
+  /** `lease`: the session's work lease, when another job holds it (the caller skips the item on that key). */
+  | { kind: "wait"; reason: string; lease?: string }
   /** The session ended meanwhile (its PR closed, a person stopped the item) or a new one was refused. */
   | { kind: "ended"; reason: string }
   | { kind: "failed"; reason: string }
@@ -246,7 +247,7 @@ export const fixSessionLease = (s: Pick<FixSession, "kind" | "repo" | "number">)
  */
 export async function runStep(env: StepEnv, session: FixSession, spec: StepSpec): Promise<StepOutcome> {
   const release = await leaseItem(env.db, fixSessionLease(session), env.log);
-  if (!release) return { kind: "wait", reason: "another job works this fix session", session, workspaceId: session.workspaceId, turns: [], checks: [] };
+  if (!release) return { kind: "wait", reason: "another job works this fix session", lease: fixSessionLease(session), session, workspaceId: session.workspaceId, turns: [], checks: [] };
   try {
     return await leasedStep(env, session, spec);
   } finally {
