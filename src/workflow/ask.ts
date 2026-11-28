@@ -1,7 +1,7 @@
 // The question a started item comes back with when nothing of it is due and a person has to move it on: its plan waits for one, or the
 // people it acts for can no longer act. Pure.
 import { needsQuestion, type StopCode, type WaitCode } from "../core/codes.ts";
-import { redAtHead, unapprovedStop, unknownStuck, worksOn } from "../core/decide.ts";
+import { redAtHead, refusalStuck, unapprovedStop, unknownStuck, worksOn } from "../core/decide.ts";
 import { implementStep } from "../core/decide-item.ts";
 import type { Action, ItemFacts, Plan, PrFacts, StandingFact } from "../core/plan.ts";
 import { t } from "../i18n/index.ts";
@@ -115,11 +115,26 @@ export function withoutFixes(f: PrFacts, o: Asked, forPerson = false): Recommend
 export const fixable = (rec: Recommendation, f: PrFacts, o: Asked): Recommendation =>
   (rec.parts.fix.length && nobodyFixesFor(f) ? withoutFixes(f, o, true) ?? rec : rec);
 
+/**
+ * Waits of an approved PR that the facts alone say, whatever its merge leg does. Asking stops the leg (block.ts), so the plan read afterwards
+ * no longer shows a wait that the leg's hand-over, hold or pre-merge review made: a question of one of those stands until it is answered.
+ */
+const LEG_FREE_WAITS: ReadonlySet<string> = new Set<WaitCode>(["conflict-person", "mergeable-unknown"]);
+
+/** Whether a question kept with only the wait `wait` that asked it may close once the plan no longer stops there (causeWent). */
+export const waitCloses = (wait: string, approved: boolean): boolean => !approved || LEG_FREE_WAITS.has(wait);
+
+/** The question of the plan's wait `code`. Its cause is its own where one says more, else the wait itself where that may close (waitCloses). */
 function recFor(code: WaitCode, f: PrFacts, wait: string | null, o: Asked): Recommendation {
+  const rec = waitRec(code, f, wait, o);
+  return rec.cause || !waitCloses(code, o.approved) ? rec : { ...rec, cause: { code: "wait", wait: code } };
+}
+
+function waitRec(code: WaitCode, f: PrFacts, wait: string | null, o: Asked): Recommendation {
   const parts = { fix: [] as number[], drop: droppedOf(o.parts) }, merges = o.approved;
   if (onGithub(code)) return { text: ON_GITHUB[code](), parts, merges, goes: "look", cause: { code } };
   const past = MERGE_PAST[code];
-  if (past) return { text: past(f), parts, merges: true };
+  if (past) return { text: past(f), parts, merges: true, ...(code === "merge-refused" ? { cause: { code } } : {}) };
   const skip = code === "answer" || code === "ask-failed" ? withoutFixes(f, o) : null;
   if (skip) return skip;
   if (code === "review-failed") return reviewFailed(o);
@@ -150,7 +165,7 @@ function reviewFailed(o: Pick<Asked, "approved" | "parts" | "review">): Recommen
 /** A conflict with the base branch that AutoCraft's merge of it could not resolve, on a PR approved for merge: someone resolves it on its branch, and a yes looks again. */
 const conflictByHand = (parts: Recommendation["parts"], merges: boolean): Recommendation => ({
   text: t("It conflicts with its base branch, and AutoCraft could not resolve the conflict. Resolve it on the pull request's branch, or ask the contributor to; the merge stays approved, and AutoCraft reviews the new commits before it merges. Reply once it is resolved."),
-  parts, merges, goes: "look",
+  parts, merges, goes: "look", cause: { code: "conflict" },
 });
 
 /**
@@ -231,9 +246,24 @@ export function itemQuestion(f: ItemFacts, o: Pick<Asked, "approved" | "parts">)
   };
 }
 
+/** What the pass reads beside an item's facts to tell whether the cause of its question went. Each reader is undefined while the pass cannot say. */
+export type CauseNow = {
+  /** When the pass began (ISO). */
+  at: string;
+  /** The state of the newest try of a fix-up request; null when it has none. */
+  fixState?: (fix: number) => string | null;
+  /** The wait the item's plan stops at with its question closed; null for none. */
+  waitNow?: () => string | null | undefined;
+  /** Whether any of the items (`repo#number`) still blocks the review. */
+  blocks?: (items: readonly string[]) => boolean | undefined;
+  /** Whether a job of the lane step `lane` ran through at `head` after the question was asked. */
+  laneDone?: (lane: string, head: string) => boolean | undefined;
+};
+
 /** Why a question whose cause clears without an answer closes: what the facts at its head say now. Null while the cause stands, or while they do not say. */
-export function causeWent(cause: Recommendation["cause"], f: PrFacts | ItemFacts, approved: boolean): string | null {
+export function causeWent(cause: Recommendation["cause"], f: PrFacts | ItemFacts, approved: boolean, now: CauseNow): string | null {
   if (!cause) return null;
+  if (cause.code === "daily-cap") return now.at >= cause.until ? t("A new day began, so the author's new commits get their review round.") : null;
   if (cause.code === "actor-gone") {
     const s = approved ? f.standing?.merge : f.standing?.work;
     if (s?.standing !== "yes" || (cause.lane && "mergeLacksAccess" in f && f.mergeLacksAccess)) return null;
@@ -251,7 +281,26 @@ export function causeWent(cause: Recommendation["cause"], f: PrFacts | ItemFacts
       const r = f.review;
       if (!r || r.verdict !== "take-fix" || r.head !== f.head || r.stale || !f.fixup || f.fixup.recorded.includes(cause.state)) return null;
       if (approved && fixPath(f) !== "fix") return null;
-      return approved ? t("What stopped the fix-up no longer applies, so AutoCraft makes the fix again.") : t("What stopped the fix-up no longer applies.");
+      return fixAgainText(approved);
     }
+    case "leg": {
+      // The try that ended the merge leg was superseded (a migration, a lifted limit): a new leg makes the fix again.
+      if (cause.state === "superseded" || now.fixState?.(cause.fix) !== "superseded") return null;
+      return fixAgainText(approved);
+    }
+    case "wait": {
+      if (!waitCloses(cause.wait, approved)) return null;
+      const wait = now.waitNow?.();
+      return wait === undefined || wait === cause.wait ? null : t("Its plan no longer waits for that.");
+    }
+    case "merge-refused": return !refusalStuck(f) ? t("What refused the merge changed since, so it can be tried again.") : null;
+    case "conflict": return f.mergeable === "MERGEABLE" ? t("It no longer conflicts with its base branch.") : null;
+    case "blocked-by": return now.blocks?.(cause.items) === false ? t("The items its review waited for no longer block it.") : null;
+    case "lane-failed":
+      if ("head" in f && f.head !== null && f.head !== cause.head) return t("It has a new commit, so the step runs there.");
+      return now.laneDone?.(cause.lane, cause.head) === true ? t("The step ran through at this commit since.") : null;
   }
 }
+
+const fixAgainText = (approved: boolean): string =>
+  (approved ? t("What stopped the fix-up no longer applies, so AutoCraft makes the fix again.") : t("What stopped the fix-up no longer applies."));

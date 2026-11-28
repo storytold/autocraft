@@ -54,9 +54,10 @@ export type ItemsByBucket = { step: string; bucket: string; items: number };
 export type EndedJob = { step: string; repo: string | null; requested_by: string; id: number; state: JobState; error: string | null; ended_at: string | null; items: number | null; acted: number | null; lease_skips: number | null; lease_skip_keys: string | null; lane_number: number | null };
 export type StreakRow = { step: string; repo: string | null; id: number; state: JobState; error: string | null; ended_at: string | null; lane_number: number | null };
 export type FpRecord = { job: number | null; fp: string };
-/** An ended job of the approved lane: the one PR it worked. */
-export type LaneRun = { repo: string; number: number; step: string; id: number; state: "done" | "failed"; endedAt: string };
 /** A live workflow whose check, or the write of what it found, failed several passes in a row: since when, and the latest error (operators only). */
+/** An ended job of the approved lane: the one PR it worked, the PR's head when it was queued (null for a job queued before jobs named it), and its error. */
+export type LaneRun = { repo: string; number: number; step: string; id: number; state: "done" | "failed"; endedAt: string; head: string | null; error: string | null };
+
 export type WorkflowFailure = { id: number; ref: string; since: string; error: string };
 export type LaneInputs = {
   live: LiveJob[];

@@ -84,7 +84,21 @@ export type Recommendation = {
   /** What the question is about, which may clear without an answer: the question closes then and the item goes on. `lane`: the merge itself was refused for its approver's access. */
   cause?: { code: "actor-gone"; lane?: true } | { code: "base-off-default" | "no-ci" | "mergeable-stuck" | "ci-approval-failed" | "red-ci" }
     /** The fix-up made nothing at the head for a hold row in `state` (too-large, cannot-push, push-denied); it clears once that row is superseded. */
-    | { code: "fix-unmade"; state: string };
+    | { code: "fix-unmade"; state: string }
+    /** The merge leg ended because the try of its fix-up request `fix` ended in `state`; it clears once that try is superseded. */
+    | { code: "leg"; fix: number; state: string }
+    /** The plan's wait `wait` asked it; it clears once the plan of the item, with the question closed, no longer stops at that wait. */
+    | { code: "wait"; wait: string }
+    /** The merge was refused for a reason nothing changed since; it clears once something did, and the merge is tried again. */
+    | { code: "merge-refused" }
+    /** The PR conflicts with its base branch; it clears once GitHub says it can be merged. */
+    | { code: "conflict" }
+    /** The review holds it for the open items `items` (`repo#number`); it clears once none of them blocks any more. */
+    | { code: "blocked-by"; items: string[] }
+    /** The day's review rounds of the author's commits are used up; it clears at `until`, the next 00:00 UTC. */
+    | { code: "daily-cap"; until: string }
+    /** Jobs of the lane step `lane` failed in a row at `head`; it clears once a job of that step runs through there, or the PR has a new head. */
+    | { code: "lane-failed"; lane: string; head: string };
   /** The review failed for good at this head: the word merge starts the PR at the merge queue, without it. Not past what an earlier review there asks: its planned parts, or its verdict. */
   skipsReview?: { parts: number[]; verdict?: "hold" | "close" };
   /** A yes answers this question of the implementation with this option, as the person (a stuck implementation's Try again). */
@@ -153,6 +167,8 @@ export const authorAsk = (wf: Pick<ItemWorkflow, "kind" | "state" | "blockerPara
 /** What the held workflow goes back to. */
 export const heldWork = (wf: Pick<ItemWorkflow, "blockerParams">): HeldWork => (wf.blockerParams?.held ?? {}) as HeldWork;
 
+export type ClosedWaits = { head: string; waits: string[] };
+
 export type ItemWorkflow = {
   id: number;
   repo: string;
@@ -175,6 +191,8 @@ export type ItemWorkflow = {
   stoppedAt: string | null;
   /** A row the automatic merge rule started: the person whose answer last ran on it. Its questions go to them (asked.ts). */
   takenBy: string | null;
+  /** The plan waits whose questions closed by themselves at `head`: one that comes back there is asked without that cause (src/workflow/advance.ts). */
+  closedWaits: ClosedWaits | null;
   blocker: Blocker | null;
   blockerParams: Record<string, unknown> | null;
   rec: Recommendation | null;

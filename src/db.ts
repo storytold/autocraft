@@ -371,6 +371,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["item_workflows", "review_asked_at", "TEXT"],
   // A row the automatic merge rule started: the person whose answer last ran on it (src/workflow/asked.ts).
   ["item_workflows", "taken_by", "TEXT"],
+  // The waits whose questions closed by themselves at one head (JSON {head, waits}, src/workflow/advance.ts): each closes so once there.
+  ["item_workflows", "closed_waits", "TEXT"],
   ["workflow_events", "seen_at", "TEXT"],
   // Why the token endpoint refused the login's refresh token ("<error>: <error_description>"), kept while the row is refresh-failed.
   ["user_tokens", "refresh_error", "TEXT"],

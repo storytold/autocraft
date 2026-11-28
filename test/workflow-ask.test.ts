@@ -14,7 +14,7 @@ import { noteMergeable, unknownOf } from "../src/merge/mergeable.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
-import { questionFor } from "../src/workflow/ask.ts";
+import { questionFor, waitCloses } from "../src/workflow/ask.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { resolve } from "../src/workflow/resolve.ts";
 import { yesClause } from "../src/workflow/status.ts";
@@ -83,6 +83,13 @@ test("a person wait of a started PR has a question that a yes runs, unless its p
     if (!gone && p.state !== "opus-close" && p.state !== "opus-hold") assert.ok(p.waitCode && needsQuestion(p.waitCode, p.waitKind!, approved) && !busy, at);
     assert.ok(yesClause(q.rec), at);
     assert.equal(approved && !q.rec.merges, false, at);
+    // Asking stops an approved PR's merge leg: a question kept with only its wait may close then only where the plan, with the leg gone
+    // and the question closed, would come back with that same wait; else the leg starts again without a yes and asks again, in a loop.
+    if (approved && q.rec.cause?.code === "wait") {
+      const wait = q.rec.cause.wait, after = factsOf({ ...rows, legs: [], workflow: { ...rows.workflow!, state: "running", blocker: null } });
+      const again = questionFor(after, decidePr(after), { approved, review: null, parts: [], conflict: null });
+      assert.ok(again?.params.code === wait || !waitCloses(wait, true), at);
+    }
     const row = { entry: w.entry, state: approved ? "blocked" : "recommending", approvedBy: w.approvedBy, plan: [], rec: q.rec, blocker: q.blocker } as unknown as ItemWorkflow;
     const r = resolve({ kind: "yes", items: [] }, { kind: "pr", workflow: row });
     assert.ok(r.kind === "run" && (r.run.again || r.run.merges || r.run.goesOn || r.run.end || r.run.fix.length), at);
@@ -218,6 +225,31 @@ test("what a person settles on GitHub is asked about; a yes looks again, and onc
     assert.deepEqual(await shown(w), ["running", null, MAINT], code);
     assert.ok(["review", "ci", "queued"].includes(String(await leg(w))), code);
     assert.match(String((await eventsOf(w.db, "app", 1)).at(-1)!.line), /closed without an answer/, code);
+    w.close();
+  }
+});
+
+test("a conflict on an approved PR that a person has to resolve is asked about while it conflicts, and the question closes by itself once GitHub says it merges; so does one kept with only the wait that asked it", async () => {
+  for (const kept of ["conflict", "wait"] as const) {
+    const w = await started("review and merge");
+    await w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "main", mergeable: "CONFLICTING", maintainer_can_modify: 0 }).where("number", "=", 1));
+    await checks(w, { mergeable: "CONFLICTING" });
+    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ maintainer_can_modify: 0 }));
+    await w.db.run(w.db.k.insertInto("main.conflict_merges").values({ repo: "app", number: 1, from_head: "sha1", to_head: null, base_sha: "base", state: "asked", attempt: 1, created_at: new Date().toISOString() }));
+    await settle(w);
+    assert.deepEqual(await shown(w), ["blocked", "conflict-person", MAINT], kept);
+    if (kept === "wait") {
+      const row = await wf(w);
+      await w.db.run(w.db.k.updateTable("main.item_workflows").set({ rec: JSON.stringify({ ...row.rec, cause: { code: "wait", wait: "conflict-person" } }) }).where("id", "=", row.id));
+    }
+    await settle(w);
+    assert.deepEqual(await shown(w), ["blocked", "conflict-person", MAINT], `${kept}: it still conflicts`);
+    await w.db.run(w.db.k.updateTable("main.items").set({ mergeable: "MERGEABLE" }).where("number", "=", 1));
+    await checks(w, { mergeable: "MERGEABLE" });
+    await settle(w);
+    assert.deepEqual(await shown(w), ["running", null, MAINT], kept);
+    assert.ok(["review", "ci", "queued"].includes(String(await leg(w))), `${kept}: ${await leg(w)}`);
+    assert.ok((await eventsOf(w.db, "app", 1)).some((e) => /closed without an answer/.test(String(e.line))), kept);
     w.close();
   }
 });

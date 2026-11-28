@@ -138,7 +138,7 @@ async function cancelRow(db: Db, leg: { id: number; repo: string; number: number
     const p = (await loadLegs(db, [{ repo: leg.repo, number: leg.number }], { activeOnly: true })).get(refOf(leg.repo, leg.number))?.find((r) => r.id === leg.id);
     if (!p || !ACTIVE.includes(p.state)) return null;
     const late = guard ? await pastCancel(db, p) : null;
-    if (late !== null) throw new Error(late);
+    if (late !== null) throw new PreapprovalRefused(late);
     return await moveRaw(db, p, "cancelled", { by, stop, via }) ? p : null;
   });
   if (!p) return false;
@@ -154,11 +154,20 @@ async function cancelRow(db: Db, leg: { id: number; repo: string; number: number
  */
 export type CheckedStep = { write: (workflowId: number) => Promise<number | null> };
 
-/** A step's refusal by rule (the PR or its state); other errors may pass on a later try. `active`: a merge leg is in progress already. `draft`: it waits for the PR to be marked ready. */
+/**
+ * A step's refusal by rule (the PR or its state); other errors may pass on a later try. `active`: a merge leg is in progress already. `draft`: it
+ * waits for the PR to be marked ready. `headChanged`: the PR's head moved since the caller read it, and a look at the new head may pass.
+ */
 export class PreapprovalRefused extends Error {
   readonly active: boolean;
   readonly draft: boolean;
-  constructor(message: string, why: "active" | "draft" | null = null) { super(message); this.active = why === "active"; this.draft = why === "draft"; }
+  readonly headChanged: boolean;
+  constructor(message: string, why: "active" | "draft" | "head-changed" | null = null) {
+    super(message);
+    this.active = why === "active";
+    this.draft = why === "draft";
+    this.headChanged = why === "head-changed";
+  }
 }
 
 /**
@@ -215,7 +224,7 @@ async function openPr(db: Db, repo: string, number: number): Promise<PrRow> {
   return it;
 }
 const needHead = (it: PrRow, ref: string): string => {
-  if (!it.head_oid) throw new Error(`${ref} has no head commit in the mirror yet`);
+  if (!it.head_oid) throw new NotYet(`${ref} has no head commit in the mirror yet`);
   return it.head_oid;
 };
 const outOfScope = (ref: string) => new PreapprovalRefused(`${ref} is outside the pipeline's scope`);
@@ -235,19 +244,19 @@ export async function checkFixup(db: Db, o: { repo: string; number: number; by: 
   if (!fact || fact.integration) throw outOfScope(ref);
   if (merge && fact.draft) throw isDraft(ref);
   const instructions = o.instructions.trim();
-  if (!instructions) throw new Error("the fix-up needs instructions");
-  if (instructions.length > INSTRUCTIONS_MAX) throw new Error(`the instructions are over ${INSTRUCTIONS_MAX} characters`);
+  if (!instructions) throw new PreapprovalRefused("the fix-up needs instructions");
+  if (instructions.length > INSTRUCTIONS_MAX) throw new PreapprovalRefused(`the instructions are over ${INSTRUCTIONS_MAX} characters`);
   const head = needHead(it, ref);
   const checks = (await loadChecks(db, [{ repo, number }])).get(ref) as PrChecksView | undefined;
-  if (fact.mergeable === "CONFLICTING" && !o.afterBase) throw new Error(`${ref} conflicts with its base branch: the conflict merge comes first`);
+  if (fact.mergeable === "CONFLICTING" && !o.afterBase) throw new PreapprovalRefused(`${ref} conflicts with its base branch: the conflict merge comes first`);
   // A person's fix-up runs as that person (mayPush, src/core/may.ts); the repo's push approval is for pushes nobody asked for.
   const may = mayPush({ kind: "fixup", repoApproval: null, workflow: null, operatorFix: true, by });
-  if (!may.ok) throw new Error(may.why);
+  if (!may.ok) throw new PreapprovalRefused(may.why);
   const writes = await ensureAuthorWrites(db, repo, number, it.head_repo);
   if (writes === "unknown") throw new NotYet("the author's permission on the repository could not be read yet; try again");
-  if (!pushable(it.head_repo, repo, checks?.head_oid === head ? checks.maintainer_can_modify : null, it.head_ref, await longLivedOf(db, repo), false, writes === "yes")) throw new Error("can't push to the contributor's branch");
-  if (!await operatorTriesLeft(db, repo, number, fact.workflow?.since)) throw new Error("the fix-up tries for this PR are used up");
-  if (await queuedOperatorFix(db, repo, number, head)) throw new Error(`a fix-up of ${ref} is already queued`);
+  if (!pushable(it.head_repo, repo, checks?.head_oid === head ? checks.maintainer_can_modify : null, it.head_ref, await longLivedOf(db, repo), false, writes === "yes")) throw new PreapprovalRefused("can't push to the contributor's branch");
+  if (!await operatorTriesLeft(db, repo, number, fact.workflow?.since)) throw new PreapprovalRefused("the fix-up tries for this PR are used up");
+  if (await queuedOperatorFix(db, repo, number, head)) throw new PreapprovalRefused(`a fix-up of ${ref} is already queued`);
   if (merge && await hasLeg(db, repo, number)) throw busy(ref);
   return {
     write: async (workflowId) => {
@@ -280,7 +289,7 @@ export async function checkMergeLeg(db: Db, o: { repo: string; number: number; b
   if (!fact || fact.integration) throw outOfScope(ref);
   if (fact.draft) throw isDraft(ref);
   const head = needHead(it, ref);
-  if (o.head !== undefined && head !== o.head) throw new Error(HEAD_CHANGED);
+  if (o.head !== undefined && head !== o.head) throw new PreapprovalRefused(HEAD_CHANGED, "head-changed");
   if (await hasLeg(db, repo, number)) throw busy(ref);
   return {
     write: async (workflowId) => {

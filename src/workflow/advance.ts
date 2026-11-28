@@ -21,7 +21,7 @@ import { loadReviewRows, type PremergeRow, type ReviewRow } from "../data/review
 import { adoptLegs, fixupRequestsAt, listWorkflows, loadFixupRequests, moveFixupRequests, loadActions, loadGoOnAt, loadLegs, moveWorkflows, recordEvents, retryActions, saveWorkflows, type GoneOn, type Preapproval, type WorkflowPatch, type WorkflowRead } from "../data/workflow/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
-import { loadLaneRuns, saveWorkflowFailures, type LaneRun, type WorkflowFailure } from "../data/jobs/index.ts";
+import { CALL_WAIT_LIMIT, loadLaneRuns, RUNNER_STOPPED, saveWorkflowFailures, type LaneRun, type WorkflowFailure } from "../data/jobs/index.ts";
 import { isFenced } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
@@ -42,13 +42,15 @@ import { t, tk } from "../i18n/index.ts";
 import { ROUND_DELTA_LARGE, ROUND_UNSEPARATED, roundsToday } from "../core/author-round.ts";
 import { partsToMake } from "../core/review-blocking.ts";
 import { verificationOf } from "../data/merge/index.ts";
+import { loadBlockerReads, openFrom, type BlockerReads } from "../review/blockers.ts";
+import { nextUtcMidnight } from "../review/discussion.ts";
 import { authorUnaskable } from "./unaskable.ts";
 import { actBlocked } from "../core/repo-approvals.ts";
-import { causeWent, fixable, itemQuestion, legStop, questionFor, type Question } from "./ask.ts";
+import { causeWent, fixable, itemQuestion, legStop, questionFor, type CauseNow, type Question } from "./ask.ts";
 import { asksNobody } from "./asked.ts";
 import { headKey, premergeOf, recheckRuleRow, startAutoStops } from "./auto-stop.ts";
 import { blockWorkflow } from "./block.ts";
-import { checkedOtherHead, codeOf, detectBlocker, fixesFirst, fixUnmade, LANE_STEPS, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
+import { checkedOtherHead, codeOf, detectBlocker, FAILED_TWICE, fixesFirst, LANE_STEPS, fixUnmade, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
 import { again as fixAgain, authorAskFor, EffectError, queueAuthorAsk, type Instruction } from "./effects.ts";
 import { premergeParts } from "./premerge.ts";
 import { afterPush, atBlocker, conflictOf, droppedOf, onConflict, planOf, textFor, withoutAuthor, type ReviewView } from "./recommend.ts";
@@ -113,8 +115,12 @@ type Pass = {
   facts: Map<string, PrFacts>;
   /** Of the issues whose workflow has no PR. */
   issues: Map<string, ItemFacts>;
-  /** The ended jobs of the approved lane per PR, oldest first. */
+  /** The items the questions of held reviews wait for (cause blocked-by). */
+  blockers: BlockerReads;
+  /** The ended jobs of each PR's approved lane, oldest first. */
   laneRuns: Map<string, LaneRun[]>;
+  /** Tells the runner to pass again at a time a question's cause goes by itself (ms). */
+  wake: (at: number) => void;
   /** The newest review row of each issue review workflow, by workflow id. */
   issueReviews: Map<number, IssueReviewRow>;
 };
@@ -142,36 +148,69 @@ const unreadReason = (reason: string): string =>
 
 const reviewAt = (pass: Pass, ref: string, head: string): ReviewRow | null => pass.reviews.get(ref)?.find((r) => r.head === head) ?? null;
 
-
-/** The steps with an approved lane (src/runner/steps.ts hasApprovedLane), by the name a failing step has in the blocker. */
-/** Failed jobs of the PR's approved lane of one step after `since`, since its last job that ran through. */
-function laneStreak(runs: readonly LaneRun[], step: string, since: string): number {
-  let n = 0;
-  for (const r of runs) if (r.step === step && r.endedAt > since) n = r.state === "failed" ? n + 1 : 0;
-  return n;
-}
-
 /**
- * Tries of a step on the PR that failed after `since`: the fix-up and CI fix rows that record a failed try, and the jobs of the PR's
- * approved lane that failed in a row, whatever their step, so a step that fails before it records a try counts too. A step whose
- * work is the contributor's now counts none: they are asked first, once, and the item waits for them; where they were asked after
- * `since` at an earlier head of ours, the tries count.
+ * Tries of a step on the PR that failed after `since`: the fix-up and CI fix rows that record a failed try. A job that ended without one
+ * (past its deadline, a crash, an outage) is no try of the item's own: the planner runs it again after its failure backoff, and the health
+ * checks show a step that keeps failing. A step whose work is the contributor's now counts none: they are asked first, once, and the item
+ * waits for them; where they were asked after `since` at an earlier head of ours, the tries count.
  */
 function failures(pass: Pass, ref: string, since: string, head: string, facts: PrFacts | undefined): { step: string; count: number }[] {
-  const p = pass.patches.get(ref), f = facts?.head === head ? facts : undefined, runs = pass.laneRuns.get(ref) ?? [];
+  const p = pass.patches.get(ref), f = facts?.head === head ? facts : undefined;
   // A CI fix row of older code that found no failure log to read was no try.
   const count = (rows: { state: string; createdAt: string; reason?: string | null }[]): number =>
     rows.filter((r) => FAILED_TRY.includes(r.state) && r.createdAt > since && !(r.state === "failed" && r.reason === CIFIX_NO_LOG_REASON)).length;
   const asked = (rows: { state: string; createdAt: string; at: string }[]): boolean => rows.some((r) => r.state === "asked" && r.createdAt > since && r.at !== head);
-  const jobs = (lane: string): number => laneStreak(runs, lane, since);
-  const of = (step: string, lane: string, rows: { state: string; createdAt: string; at: string }[], theirs: boolean) =>
-    ({ step, count: theirs && !asked(rows) ? 0 : Math.max(count(rows), jobs(lane)) });
+  const of = (step: string, rows: { state: string; createdAt: string; at: string }[], theirs: boolean) => ({ step, count: theirs && !asked(rows) ? 0 : count(rows) });
   return [
-    of("fix-up", "fixup", (p?.fixups ?? []).map((r) => ({ ...r, at: r.fromHead })), !!f && fixPath(f) === "contributor"),
-    of("CI fix", "cifix", (p?.cifixes ?? []).map((r) => ({ ...r, at: r.head })), !!f && redCiPath(f) === "contributor"),
-    ...(["opus-review", "premerge"] as const).map((lane) => ({ step: LANE_STEPS[lane]!, count: jobs(lane) })),
+    of("fix-up", (p?.fixups ?? []).map((r) => ({ ...r, at: r.fromHead })), !!f && fixPath(f) === "contributor"),
+    of("CI fix", (p?.cifixes ?? []).map((r) => ({ ...r, at: r.head })), !!f && redCiPath(f) === "contributor"),
   ];
 }
+
+/**
+ * Lane job failures that say nothing about the item: AutoCraft's own (the runner stopped or restarted, no Task Runner took the model call
+ * in time, the GitHub write pacing held it back) and its services' (an HTTP 5xx answer, a network error). They neither count nor end a
+ * streak.
+ */
+const INFRA_ERROR = /\bHTTP\/?[\d.]* ?5\d\d\b|\b5\d\d (?:Bad Gateway|Service Unavailable|Gateway Timeout|Internal Server Error)\b|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|ENOTFOUND|EAI_AGAIN/i;
+const notTheItems = (error: string | null): boolean =>
+  !!error && (error === RUNNER_STOPPED || error === CALL_WAIT_LIMIT || error.startsWith("write paced:") || INFRA_ERROR.test(error));
+
+/**
+ * Failed jobs in a row of each step of the PR's own lane at `head` since `since` (detectBlocker stops at LANE_FAILS). Decision: a job
+ * counts only at the head its params name (steps.ts HEAD_PARAM); one queued before jobs named it counts as no head and is never counted.
+ * A stop past the job's deadline or for no progress counts, as it often comes from the item's own size; the failures of notTheItems do
+ * not. A job that ran through ends the streak.
+ */
+function laneFailures(pass: Pass, ref: string, since: string, head: string): { step: string; lane: string; count: number }[] {
+  const runs = (pass.laneRuns.get(ref) ?? []).filter((r) => r.head === head && r.endedAt > since);
+  return Object.entries(LANE_STEPS).map(([lane, step]) => {
+    let count = 0;
+    for (const r of runs) if (r.step === lane) count = r.state === "done" ? 0 : notTheItems(r.error) ? count : count + 1;
+    return { step, lane, count };
+  });
+}
+
+/**
+ * Why a stop at a step that failed twice (detectBlocker) closes by itself: its tries, counted again, are fewer now (a try was superseded, or
+ * was a job's failure that counts no more). Null while they still stop it, and for every other stop.
+ */
+function recounted(pass: Pass, w: ItemWorkflow, ref: string, head: string, f: PrFacts): string | null {
+  const p = w.blockerParams;
+  if (w.blocker !== "failed-twice" || typeof p?.step !== "string" || typeof p.count !== "number" || p.reason !== undefined || p.lane !== undefined) return null;
+  const since = pass.goOn.get(w.id)?.since ?? w.startedAt;
+  const count = failures(pass, ref, since, head, f).find((x) => x.step === p.step)?.count ?? 0;
+  return count >= FAILED_TWICE ? null : t("The {step} has not failed twice since, so the work goes on.", { step: p.step });
+}
+
+/** The name under which a question's cause closes by itself at most once per head (ItemWorkflow.closedWaits): a plan wait, or a lane step's failures; null for the causes that settle for good. */
+const closeKey = (c: Recommendation["cause"]): string | null => (c?.code === "wait" ? c.wait : c?.code === "lane-failed" ? `lane:${c.lane}` : null);
+
+/** The facts as the item's plan reads them once its question closed. */
+const asRunning = (f: PrFacts): PrFacts => (f.may.workflow ? { ...f, may: { ...f.may, workflow: { ...f.may.workflow, state: "running", blocker: null } } } : f);
+
+/** The state of the newest try of the fix-up request `fix` on the PR; null when it has none. */
+const tryState = (pass: Pass, ref: string, fix: number): string | null => (pass.patches.get(ref)?.fixups ?? []).filter((r) => r.operatorFix === fix).at(-1)?.state ?? null;
 
 /**
  * The person's last answer was given at `head`, and no push of ours made that head since: a conflict there that a person has to resolve was theirs
@@ -215,11 +254,14 @@ function triedEnough(what: string, tries: number, plan: readonly PlanPart[], fix
   };
 }
 
-/** The question of an approved PR whose review holds it until other items are settled: no fix-up merges them, so a yes reviews it again then. */
-function waitsForOthers(finding: string | null, plan: readonly PlanPart[]): Recommendation {
+/**
+ * The question of an approved PR whose review holds it until the items `blockedBy` are settled: no fix-up merges them, so a yes reviews it
+ * again then, and so does AutoCraft once none of them blocks any more.
+ */
+function waitsForOthers(finding: string | null, blockedBy: readonly string[], plan: readonly PlanPart[]): Recommendation {
   const said = finding?.trim() ? asSentence(clipText(finding.trim(), FINDING_SHOWN)) : null;
   const text = said ? t("The review holds it until other items are settled: {finding} Review it again, then merge.", { finding: said }) : t("The review holds it until other items are settled. Review it again, then merge.");
-  return { text, parts: { fix: [], drop: droppedOf(plan) }, merges: true, again: "review" };
+  return { text, parts: { fix: [], drop: droppedOf(plan) }, merges: true, again: "review", cause: { code: "blocked-by", items: [...blockedBy] } };
 }
 /** Characters of a finding the fix-up is handed (its instructions take at most INSTRUCTIONS_MAX). */
 const FINDING_FIX_CHARS = 1200;
@@ -240,7 +282,7 @@ function endedLeg(pass: Pass, w: ItemWorkflow, since: string, resumed: string | 
   const r = [...pass.legs.values()].flat().filter((l) => l.workflow_id === w.id).sort((a, b) => b.id - a.id)[0];
   if (!r || !ENDED_LEG.includes(r.state) || r.updated_at <= since || r.reason === OWN_CANCEL) return null;
   if (w.kind === "pr" && PUSH_ENDS.includes(codeOf({ reason: r.reason ?? r.state, code: r.reason_code as StopCode | null }))) return null;
-  const ended: EndedLeg = { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null, head: r.head };
+  const ended: EndedLeg = { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null, head: r.head, fix: r.fix_id };
   if (HOLD_ENDS.includes(codeOf(ended)) && resumed !== null && r.updated_at <= resumed) return null;
   return ended;
 }
@@ -261,8 +303,9 @@ async function ensureLeg(db: Db, pass: Pass, writes: Writes, w: ItemWorkflow, re
       await preapproveMerge(db, { repo, number: pr, by: w.approvedBy!, via: "workflow", head, fromHead: approvedHead(pass.moves.get(key(repo, pr)) ?? [], head, since), workflowId: w.id });
     } catch (e) {
       // A refusal by rule (not reviewable, merging not approved) needs a person; anything else is tried again on the next pass.
-      // A leg that became active meanwhile is adopted, or waited for, on the next pass, and a draft is waited for as with a leg.
-      if (e instanceof PreapprovalRefused) return e.active || e.draft ? null : e.message;
+      // A leg that became active meanwhile is adopted, or waited for, on the next pass, and a draft is waited for as with a leg. A head
+      // that moved since the pass read it is looked at again on the next pass.
+      if (e instanceof PreapprovalRefused) return e.active || e.draft || e.headChanged ? null : e.message;
       throw e;
     }
   } else if (active.workflow_id === null) writes.adopt.push({ id: active.id, workflowId: w.id });
@@ -329,14 +372,25 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const alone = live.filter((w) => w.kind === "issue" && candidatePr(implement.byIssue.get(key(w.repo, w.number)), w) === null);
     const facts = byRef(prRefs.length ? await loadPrFacts(db, { refs: prRefs.map((r) => key(r.repo, r.number)) }) : []);
     const issueFacts = byRef(alone.length ? await loadItemFacts(db, { refs: alone.map((w) => key(w.repo, w.number)) }) : []);
+    // A question whose cause may go with the time comes back to the pass then: a timed hold, a backoff or a cache in the facts ends, or a new day begins.
+    for (const f of [...facts.values(), ...issueFacts.values()]) if (f.refreshAt !== undefined) wake(f.refreshAt);
+    for (const w of live) if (w.rec?.cause?.code === "daily-cap") wake(Date.parse(w.rec.cause.until));
     const ruleHeads = live.flatMap((w) => { const f = unansweredRuleRow(w) ? facts.get(key(w.repo, w.number)) : undefined; return f && f.head === w.recHead ? [f] : []; });
     const premerge = ruleHeads.length ? await premergeOf(db, ruleHeads) : new Map<string, PremergeRow>();
-    // The approved lane's jobs since the earliest point any workflow counts its failures from.
-    const earliest = due.map((w) => goOn.get(w.id)?.since ?? w.startedAt).sort()[0] ?? at;
+    const blockers = await loadBlockerReads(db, live.flatMap((w) => (w.rec?.cause?.code === "blocked-by" ? w.rec.cause.items : [])));
+    // The approved lane's jobs of the PRs whose workflow may stop on them (a running or waiting one) or waits for one to run through (a lane-failed
+    // question), since the earliest point those count from.
+    const lanePrOf = (w: ItemWorkflow): { repo: string; number: number } | null => {
+      const number = w.kind === "pr" ? w.number : candidatePr(implement.byIssue.get(key(w.repo, w.number)), w);
+      return number === null ? null : { repo: w.repo, number };
+    };
+    const laneWorkflows = due.filter((w) => w.state === "running" || w.state === "waiting" || w.rec?.cause?.code === "lane-failed");
+    const laneRefs = [...new Map(laneWorkflows.flatMap((w) => { const r = lanePrOf(w); return r ? [[key(r.repo, r.number), r] as const] : []; })).values()];
+    const earliest = laneWorkflows.map((w) => goOn.get(w.id)?.since ?? w.startedAt).sort()[0] ?? at;
     const laneRuns = new Map<string, LaneRun[]>();
-    for (const r of await loadLaneRuns(db, prRefs, earliest, Object.keys(LANE_STEPS))) (laneRuns.get(key(r.repo, r.number)) ?? laneRuns.set(key(r.repo, r.number), []).get(key(r.repo, r.number))!).push(r);
+    for (const r of await loadLaneRuns(db, laneRefs, earliest, Object.keys(LANE_STEPS))) (laneRuns.get(key(r.repo, r.number)) ?? laneRuns.set(key(r.repo, r.number), []).get(key(r.repo, r.number))!).push(r);
     const pass: Pass = {
-      at, items, implement, goOn, legs, reviews, patches, moves, facts, premerge, issues: issueFacts, laneRuns, issueReviews, own,
+      at, items, implement, goOn, legs, reviews, patches, moves, facts, premerge, issues: issueFacts, blockers, laneRuns, issueReviews, own, wake,
     };
     const writes: Writes = { workflows: [], adopt: [], stored: new Set(), closed: [], asks: [], carry: [] };
     const moved: Moved[] = [];
@@ -535,7 +589,12 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     w = { ...w, ...on };
   }
   /** The question made at `head`: one that follows another the author pushed past says so. */
-  const ask = (rec: Recommendation, head: string): Recommendation => (w.recHead !== null && !ownChain(pass, key(w.repo, target!), w.recHead, head) ? afterPush(rec) : rec);
+  const ask = (rec: Recommendation, head: string): Recommendation => {
+    // A wait whose question closed by itself at this head once comes back as a question that only an answer closes, so it cannot close and come back in a loop.
+    const k = closeKey(rec.cause), closed = w.closedWaits;
+    const kept = k !== null && closed?.head === head && closed.waits.includes(k) ? (({ cause: _, ...r }) => r)(rec) : rec;
+    return w.recHead !== null && !ownChain(pass, key(w.repo, target!), w.recHead, head) ? afterPush(kept) : kept;
+  };
   /** The attempt's open question, as the issue's recommendation; a stuck attempt of an approved issue is a step that failed twice. */
   const comeBack = async (patch: WorkflowPatch, head: string | null): Promise<{ to: ItemWorkflow["state"] | null } | null> => {
     const q = openQuestionOf(attempt);
@@ -549,12 +608,15 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   /** The approver's merge, refused before for their access, is tried again with this pass's write. */
   let retried = false;
   /** Closes the question whose cause went: the item goes on with the plan and the approval it had. */
-  const closeQuestion = async (why: string): Promise<void> => {
+  const closeQuestion = async (why: string, head: string | null = null): Promise<void> => {
     const gone = w.rec?.cause?.code === "actor-gone" && w.approvedBy !== null && target !== null;
     const waiting = gone ? [...(await loadActions(db, { workflowIds: [w.id], kinds: ["merge"], states: ["waiting-permission"] })).values()].flat().filter((a) => a.by.toLowerCase() === w.approvedBy!.toLowerCase()) : [];
     retried = waiting.length > 0;
     writes.closed.push({ w, line: t("The question closed without an answer: {why} {rec}", { why, rec: w.rec!.text }), at, retry: waiting.map((a) => a.id) });
-    const on = { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null } as const satisfies WorkflowPatch;
+    // A lane step's question is about the head its jobs failed at, which a new head is what closes it: it is recorded there.
+    const c = w.rec?.cause, k = closeKey(c), keyHead = c?.code === "lane-failed" ? c.head : head;
+    const closedWaits = k !== null && keyHead !== null ? { head: keyHead, waits: [...(w.closedWaits?.head === keyHead ? w.closedWaits.waits : []), k] } : w.closedWaits;
+    const on = { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, closedWaits } as const satisfies WorkflowPatch;
     Object.assign(base, on);
     w = { ...w, ...on };
   };
@@ -590,7 +652,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     step = stepIn(w, "implement");
     const issueFacts = pass.issues.get(key(w.repo, w.number));
     if (w.state === "blocked" || w.state === "recommending") {
-      const went = issueFacts ? causeWent(w.rec?.cause, issueFacts, w.approvedBy !== null) : null;
+      const went = issueFacts ? causeWent(w.rec?.cause, issueFacts, w.approvedBy !== null, { at: pass.at }) : null;
       if (went === null) return settle(base);
       await closeQuestion(went);
     }
@@ -622,8 +684,9 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   // Waiting for a person: nothing moves until they answer, the cause of their question goes, or someone else pushes past the head their question was made at. Then the
   // question goes and the item is looked at like a running one; `recHead` stays, so that the next question says why it is asked.
   let repushed = w.state === "blocked" || w.state === "recommending";
-  // The question closed because the hold that stopped the fix-up went: the merge leg that hold ended says nothing any more, and a new one starts.
-  let fixWent = false;
+  // The question closed because what ended the merge leg went (the hold that stopped its fix-up, a refusal of its merge, the items its review
+  // waited for): that leg says nothing any more, and a new one starts.
+  let legWent: ((leg: EndedLeg) => boolean) | null = null;
   // A stop at the author's commits made before they went through the review round: the round takes its place.
   if (w.state === "blocked" && w.kind === "pr" && w.blocker === "author-commits" && w.blockerParams?.round === undefined && w.rec) {
     await closeQuestion(t("the author's new commits are reviewed first, and the merge stays approved."));
@@ -638,11 +701,29 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       if (again === "superseded") return write({ state: "superseded", rec: null, recAt: null, blocker: null, blockerParams: null });
       if (again) return write({ ...base, rec: again.rec, recAt: pass.at, plan: again.plan });
     }
-    const went = head && w.recHead !== null && now?.head === head ? causeWent(w.rec?.cause, now, w.approvedBy !== null) : null;
+    const approved = w.approvedBy !== null;
+    const causeNow: CauseNow = {
+      at: pass.at,
+      fixState: (fix) => tryState(pass, ref, fix),
+      waitNow: () => {
+        if (!now) return undefined;
+        const r = asRunning(now), plan = decidePr(r);
+        return (questionFor(r, plan, { approved, review: null, parts: w.plan, conflict: conflictOf(r) })?.params.code as string | undefined) ?? null;
+      },
+      blocks: (items) => openFrom(pass.blockers, items).length > 0,
+      laneDone: (lane, at) => (pass.laneRuns.get(ref) ?? []).some((r) => r.step === lane && r.head === at && r.state === "done" && r.endedAt > (w.recAt ?? "")),
+    };
+    const went = head && w.recHead !== null && now?.head === head ? causeWent(w.rec?.cause, now, approved, causeNow) ?? recounted(pass, w, ref, head, now) : null;
     if (went === null) return settle(base);
-    fixWent = w.rec?.cause?.code === "fix-unmade";
-    await closeQuestion(went);
+    const cause = w.rec?.cause?.code;
+    legWent = cause === "fix-unmade" || cause === "leg" ? fixUnmade
+      : cause === "merge-refused" ? (l) => codeOf(l) === "merge-refused"
+        : cause === "blocked-by" ? (l) => codeOf(l) === "review-hold" : null;
+    await closeQuestion(went, head);
     repushed = false;
+    // The items the review held it for went: the facts read its review as stale then (review/discussion.ts staleFrom), so it is reviewed
+    // again once, within the review cap and interval, and an approved item goes on once that review is made.
+    if (cause === "blocked-by" && !approved) return settle(base);
   }
   if (repushed) {
     // The facts are at another head, as for a moment after a push: the next pass looks again.
@@ -720,7 +801,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const stopped = approved ? endedLeg(pass, w, since, resumed) : null;
   // Once CI is green at the head, a leg that red CI ended says nothing any more: a new one starts.
   // Nor does a leg the pre-merge review's defects ended, once a fix-up round repairs them at the head.
-  let ended = stopped && ((codeOf(stopped) === "ci-failed" && f?.head === head && causeWent({ code: "red-ci" }, f, approved) !== null) || (premergeStop(stopped) && premergeStopLifts(f, head)) || (fixWent && fixUnmade(stopped))) ? null : stopped;
+  let ended = stopped && ((codeOf(stopped) === "ci-failed" && f?.head === head && causeWent({ code: "red-ci" }, f, approved, { at: pass.at }) !== null) || (premergeStop(stopped) && premergeStopLifts(f, head)) || legWent?.(stopped)) ? null : stopped;
   const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => {
     const o = { approved, review: view, parts: plan, conflict }, now = f?.head === head ? f : null;
     const rec = (now && ended && x.params.reason === ended.reason ? legStop(codeOf(ended), now, o) : null) ?? atBlocker(x, view, parts, w.entry === "merge");
@@ -737,7 +818,11 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     const rounds = roundsToday(pass.reviews.get(ref) ?? [], pass.moves.get(ref) ?? [], { head, since, startedAt: w.startedAt, now: Date.parse(pass.at) });
     if (rounds >= AUTHOR_ROUNDS_PER_DAY && !(stored?.mode === "carried")) {
       const round: Found = { blocker: "author-commits", params: { from: authorPush.from, to: head, round: "daily-cap", rounds } };
-      return await block({ ...patch, blocker: round.blocker, blockerParams: round.params, rec: ask(blockerRec(round, plan), head), recAt: pass.at, recHead: head }, patch);
+      // A new day gives the rounds again: the question closes by itself then, unless someone answered it first.
+      const until = nextUtcMidnight(Date.parse(pass.at));
+      pass.wake(until);
+      const rec: Recommendation = { ...blockerRec(round, plan), cause: { code: "daily-cap", until: new Date(until).toISOString() } };
+      return await block({ ...patch, blocker: round.blocker, blockerParams: round.params, rec: ask(rec, head), recAt: pass.at, recHead: head }, patch);
     }
     if (stored && !unread && (stored.mode === "carried" || stored.workflow?.author_commits?.in_scope !== false)) {
       Object.assign(patch, { baseHead: head, acceptedHead: head });
@@ -759,7 +844,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   // A leg a check of an earlier head stopped says nothing about a head the workflow accepted since (a review round took in the author's
   // commits, or our pushes followed): a new leg checks this one.
   if (ended && !authorPush && checkedOtherHead(ended, head)) ended = null;
-  const found = detectBlocker({ entry: w.entry, approved, authorPush, failures: failures(pass, ref, since, head, f), leg: ended });
+  const found = detectBlocker({ entry: w.entry, approved, authorPush, failures: failures(pass, ref, since, head, f), laneFailures: laneFailures(pass, ref, since, head), leg: ended });
   if (found) {
     // A CI fix that failed twice names what fails and what it tried last.
     if (found.blocker === "failed-twice" && found.params.step === "CI fix" && f?.head === head && f.cifix) {
@@ -767,8 +852,16 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       if (f.cifix.lastTry) found.params.last = f.cifix.lastTry;
     }
     const shown: WorkflowPatch = impl === "theirs" ? { baseHead: head } : {};
+    let rec = blockerRec(found, plan);
+    if (typeof found.params.lane === "string") rec = { ...rec, cause: { code: "lane-failed", lane: found.params.lane, head } };
+    // A leg that ended on a fix-up try, or on a refused merge, comes back once that try is superseded or the refusal no longer stands.
+    if (!rec.cause && ended && found.params.reason === ended.reason) {
+      const tried = fixUnmade(ended) && ended.fix != null ? tryState(pass, ref, ended.fix) : null;
+      if (tried !== null) rec = { ...rec, cause: { code: "leg", fix: ended.fix!, state: tried } };
+      else if (codeOf(ended) === "merge-refused") rec = { ...rec, cause: { code: "merge-refused" } };
+    }
     // The merge leg stops before it can merge. One an integration batch holds goes through; a queued leg outside a batch is cancelled like any other.
-    return await block({ ...patch, ...shown, blocker: found.blocker, blockerParams: found.params, rec: ask(blockerRec(found, plan), head), recAt: pass.at, recHead: head }, patch);
+    return await block({ ...patch, ...shown, blocker: found.blocker, blockerParams: found.params, rec: ask(rec, head), recAt: pass.at, recHead: head }, patch);
   }
 
   /**
@@ -795,7 +888,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     const reviewed = cause === "review-hold" || cause === "review-close";
     if (reviewed && stored && stored.model === null) return await stop({ blocker: "other", params: { reason: unreadReason(stored.reason), round: "too-large" } });
     if (cause === "review-close") return await stop({ blocker: "other", params: { reason: t("the review says to close it") } }, plan, closeRec(stored?.public_summary ?? null, plan));
-    if (reviewed && stored?.blocked_by?.length) return await stop({ blocker: "other", params: { reason: t("the review holds it until other items are settled") } }, plan, waitsForOthers(stored.public_summary, plan));
+    if (reviewed && stored?.blocked_by?.length) return await stop({ blocker: "other", params: { reason: t("the review holds it until other items are settled") } }, plan, waitsForOthers(stored.public_summary, stored.blocked_by, plan));
     let fixPlan = plan, fix: number[] = [], instruction: Instruction | null = null;
     if (cause === "premerge-defect") {
       const extra = await premergeParts(db, { repo: w.repo, number: target, head }, plan, true);
@@ -813,7 +906,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     }
     // A conflict with the base branch that no step of ours merges first: no fix-up can be made before someone settles it.
     if (conflict && conflict.path !== "merge") {
-      const rec = onConflict({ text: textFor({ fix, merges: true }), parts: { fix, drop: droppedOf(plan) }, merges: true }, conflict);
+      const rec: Recommendation = { ...onConflict({ text: textFor({ fix, merges: true }), parts: { fix, drop: droppedOf(plan) }, merges: true }, conflict), cause: { code: "conflict" } };
       return await stop({ blocker: "other", params: { reason: t("it conflicts with its base branch, and no fix-up can be made before that is settled") } }, fixPlan, rec);
     }
     const tries = await operatorTries(db, w.repo, target, since);
@@ -827,6 +920,8 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     } catch (e) {
       if (!(e instanceof EffectError)) throw e;
       if (e.later) return settle(patch);
+      // A check that failed is no refusal: the workflow is checked again after the failure backoff, and nothing stops for it.
+      if (e.unknown) throw e.cause;
       return await stop({ blocker: "failed-twice", params: { step: "fix-up", reason: t("AutoCraft could not ask for a fix-up of {what}: {why}", { what: t(FIX_WHAT[cause]), why: e.message }) } }, fixPlan);
     }
     return settle({ ...patch, ...(fixPlan !== plan ? { plan: fixPlan } : {}) });

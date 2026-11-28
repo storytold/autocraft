@@ -4,7 +4,7 @@ import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { itemsStartedSince, limitResets } from "./cross.ts";
 import { loadHeldLeaseKeys } from "./leases.ts";
-import { CALL_WAIT_LIMIT, RUNNER_STOPPED } from "./fragments.ts";
+import { RUNNER_STOPPED } from "./fragments.ts";
 import { loadLiveJobs } from "./queue.ts";
 import { approvedOf, nowIso, numberOf, perItemOf } from "./sql.ts";
 import type { EndedJob, FpRecord, JobState, LaneInputs, LaneRun, LaneStateKind, LaneStatePut, LaneStateRow, StoredLane, StoredLaneItems, StreakRow, WorkflowFailure } from "./types.ts";
@@ -155,26 +155,24 @@ export async function claimMark(db: Db, name: string, nowMs: number, minGapMs: n
 }
 
 /**
- * The pipeline's ended jobs of the approved lane (one PR each) of `steps` for the PRs `refs`, that ended after `since`, oldest first.
- * A job the runner stopped and one whose write the pacing held back are left out, as the failure streaks leave them out; so is one whose model
- * call no Task Runner took in time: it says a Task Runner was away, not that the step fails. A job stopped at its deadline ran, and counts.
+ * The pipeline's ended jobs of the approved lane (one PR each) of `steps` for the PRs `refs` that ended after `since`, among the last
+ * STREAK_WINDOW job ids, oldest first. Which count as the item's own failures is the workflow's call (src/workflow/advance.ts laneFailures).
  */
 export async function loadLaneRuns(db: Db, refs: readonly { repo: string; number: number }[], since: string, steps: readonly string[]): Promise<LaneRun[]> {
   if (!refs.length || !steps.length) return [];
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom("jobs").select((_eb) => ["repo", "step", "id", "state", "ended_at", numberOf(db).as("number")])
+  const rows = await q.all(q.k.selectFrom("jobs").select(["repo", "step", "id", "state", "ended_at", "error"]).select(() => [numberOf(db).as("number"), kx.jsonText(db, "params", "$.head").as("head")])
+    .where("id", ">", (eb) => eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", STREAK_WINDOW))
     .where("requested_by", "=", PIPELINE_USER).where("ended_at", ">", since).where("state", "in", ["done", "failed"])
     .where((eb) => kx.inList(db, eb.ref("step"), steps)).where((eb) => kx.inList(db, eb.ref("repo"), [...new Set(refs.map((r) => r.repo))]))
-    .where((eb) => {
-      const error = eb.fn.coalesce("error", eb.val(""));
-      return eb.and([approvedOf(db, eb), eb(error, "<>", RUNNER_STOPPED), eb(error, "<>", CALL_WAIT_LIMIT),
-        eb.not(kx.like(db, error, eb.val("write paced:%")))]);
-    })
+    .where(kx.inList(db, numberOf(db), [...new Set(refs.map((r) => r.number))], "bigint"))
+    .where((eb) => approvedOf(db, eb))
     .orderBy("id"));
   const wanted = new Set(refs.map((r) => `${r.repo}#${r.number}`));
   return rows.flatMap((r) => {
     const number = r.number === null ? NaN : Number(r.number);
-    return r.repo !== null && r.ended_at !== null && wanted.has(`${r.repo}#${number}`) ? [{ repo: r.repo, number, step: r.step, id: Number(r.id), state: r.state as LaneRun["state"], endedAt: r.ended_at }] : [];
+    return r.repo !== null && r.ended_at !== null && wanted.has(`${r.repo}#${number}`)
+      ? [{ repo: r.repo, number, step: r.step, id: Number(r.id), state: r.state as LaneRun["state"], endedAt: r.ended_at, head: (r.head as string | null) ?? null, error: r.error }] : [];
   });
 }
 

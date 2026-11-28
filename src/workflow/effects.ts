@@ -35,10 +35,18 @@ import { authorUnaskable } from "./unaskable.ts";
 import { actBlocked } from "../core/repo-approvals.ts";
 import { RULE_STARTER, type AuthorAsk, type ItemKind, type ItemWorkflow, type PlanPart, type Surface } from "./types.ts";
 
-/** A legacy step refused the command; its message says why, translated (`effectText`). `later`: a moment may lift it (src/preapproval NotYet). */
+/**
+ * A legacy step refused the command; its message says why, translated (`effectText`). `later`: a moment may lift it (src/preapproval NotYet).
+ * `cause`: the step failed with an error that is no refusal of it (a read or write that failed), which a later try may get past.
+ */
 export class EffectError extends Error {
   readonly later: boolean;
-  constructor(message: string, later = false) { super(message); this.later = later; }
+  readonly unknown: boolean;
+  constructor(message: string, later = false, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.later = later;
+    this.unknown = cause !== undefined;
+  }
 }
 
 /**
@@ -78,12 +86,14 @@ export type Ctx = { db: Db; by: string; via: Surface; at: string; item: Target; 
 
 const ref = (t: { repo: string; number: number }): string => `${t.repo}#${t.number}`;
 
-/** Turns a refusal of an existing step into an EffectError, so the item's line says why and the other items go on. */
+/** Turns what an existing step throws into an EffectError, so the item's line says why and the other items go on. Only its typed refusals are final. */
 async function step<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (e) {
-    throw e instanceof EffectError ? e : new EffectError(effectText((e as Error).message), e instanceof NotYet);
+    if (e instanceof EffectError) throw e;
+    const refused = e instanceof PreapprovalRefused || e instanceof NotYet;
+    throw new EffectError(effectText((e as Error).message), e instanceof NotYet, refused ? undefined : e);
   }
 }
 
