@@ -245,7 +245,7 @@ export const retryStdin = async (db: Db, failedCallId: number, stdin: string): P
 /** The implementation rounds the turn mechanics (src/build/session-turns.ts) read and write. */
 export const implementRounds: RoundStore<TurnRound, ImplementationRound, TurnRequest, { pinned: Awaited<ReturnType<typeof loadCallPrompt>> }, Pod> = {
   sessionKind: "implement",
-  async prepare(db, t) {
+  async beforeWrite(db, t) {
     const follow = t.parentId !== undefined;
     // A follow-up keeps its session's system prompt and version, so a prompt saved meanwhile reaches only new sessions.
     const pinned = follow ? await loadCallPrompt(db, t.parentId!) : null;

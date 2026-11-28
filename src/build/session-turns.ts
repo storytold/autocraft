@@ -57,7 +57,7 @@ export type RoundStore<T extends TurnResult<{ status: string }>, Round extends {
   /** The kind of the turn's workspace_sessions rows. */
   sessionKind: string;
   /** Before the write: what the plan needs that is read outside it. */
-  prepare(db: Db, t: Request): Promise<Prepared>;
+  beforeWrite(db: Db, t: Request): Promise<Prepared>;
   /** Inside the write: the call and round of the turn, with the workspace as stored (undefined when gone). */
   plan(db: Db, t: Request, prepared: Prepared, workspace: { base_sha?: string | null; env_id?: string | null } | undefined): Promise<TurnPlan<T>>;
   /** Writes a new round (the turn's queued round) and returns it. */
@@ -78,7 +78,7 @@ export type RoundStore<T extends TurnResult<{ status: string }>, Round extends {
 export async function queueTurn<T extends TurnResult<{ status: string }>, Round extends { id: number; callId: number | null; result: unknown }, Request extends { workspaceId: number }, Prepared, P>(
   db: Db, calls: CallDeps, store: RoundStore<T, Round, Request, Prepared, P>, t: Request,
 ): Promise<Round> {
-  const prepared = await store.prepare(db, t);
+  const prepared = await store.beforeWrite(db, t);
   return await db.write(async () => {
     const w = await getWorkspace(db, t.workspaceId);
     const p = await store.plan(db, t, prepared, w);
