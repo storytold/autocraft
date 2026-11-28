@@ -20,24 +20,32 @@ const GROWTH = 2000;
 /** The active revision an edit is checked against: its number, body and whether it follows the release. */
 export type ActiveRevision = { rev: number; body: string; follows: boolean } | null;
 
-const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/;
+/** Control characters (C0 but tab and newline, DEL, C1), zero-width characters, bidirectional overrides and isolates, and the byte-order mark. */
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
 const TOKEN = /\b(?:bearer|token)\s+[A-Za-z0-9._~+/=-]{16,}/i;
 const MARKER = /[⟦⟧]/;
+
+/** A body as it is checked and stored: Windows line endings become newlines. */
+export const normaliseBody = (body: string): string => body.replace(/\r\n/g, "\n");
+
+const hasCredential = (text: string): boolean => hasFixedCredential(text) || TOKEN.test(text);
 
 function textProblems(where: string, text: string): Problem[] {
   const out: Problem[] = [];
   if (text.includes("{{")) out.push({ where, message: "editable text cannot hold {{: placeholders are filled by code and stay in their locked blocks" });
   if (MARKER.test(text)) out.push({ where, message: "editable text cannot hold the lock brackets ⟦ ⟧" });
   if (CONTROL.test(text)) out.push({ where, message: "editable text cannot hold control characters" });
-  if (hasFixedCredential(text) || TOKEN.test(text)) out.push({ where, message: "the text holds what looks like a credential" });
+  if (hasCredential(text)) out.push({ where, message: "the text holds what looks like a credential" });
   return out;
 }
 
-function noteProblems(note: string): Problem[] {
+/** The problems of a revision's note: required, at most NOTE_MAX characters, no control characters, no credential. */
+export function noteProblems(note: string): Problem[] {
   const n = note.trim();
   if (!n) return [{ where: "note", message: "a note saying why is required" }];
   if (n.length > NOTE_MAX) return [{ where: "note", message: `the note is longer than ${NOTE_MAX} characters` }];
   if (CONTROL.test(n)) return [{ where: "note", message: "the note cannot hold control characters" }];
+  if (hasCredential(n)) return [{ where: "note", message: "the note holds what looks like a credential" }];
   return [];
 }
 
@@ -56,7 +64,7 @@ function harnessProblems(segs: readonly Segment[]): Problem[] {
   const out: Problem[] = [];
   let at = 0;
   for (const s of segs) {
-    if (s.locked && s.name === HARNESS_LOCK && !spans.some(([a, b]) => a <= at && b >= at + s.text.length)) {
+    if (s.locked && s.name === HARNESS_LOCK && !spans.some(([a, b]) => a === at && b === at + s.text.length)) {
       out.push({ where: `locked block ${s.name}`, message: `the text around "${s.text.trim().slice(0, 40)}" changes how it is read; leave a space or punctuation next to it` });
     }
     at += s.text.length;
@@ -76,6 +84,8 @@ function claudeProblems(id: ClaudePromptId, body: string, active: ActiveRevision
   } else {
     mine.forEach((s, i) => { if (s.text !== theirs[i]!.text) out.push({ where: `locked block ${s.name} (${i + 1})`, message: "a locked block cannot be changed" }); });
   }
+  const placeholders = (t: string): string => [...stripLocks(t).matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]!).sort().join(",");
+  if (placeholders(body) !== placeholders(codeBody(id))) out.push({ where: "body", message: "the prompt must hold the same placeholders as the release, each in its locked block" });
   const last = segs.at(-1);
   if (theirs.at(-1)?.name === DATA_LOCK && !(last?.locked && last.name === DATA_LOCK)) out.push({ where: "body", message: "nothing can follow the data block, which ends the prompt" });
   segs.forEach((s, i) => { if (!s.locked) out.push(...textProblems(`editable text ${i + 1}`, s.text)); });
@@ -98,7 +108,8 @@ function guidanceProblems(body: string, active: ActiveRevision): Problem[] {
  * repo.guidance in a repo's scope. Jev prompts are refused here: they are edited with the Jev form, whose checks keep
  * their keys, types and labels. The active revision's number is compared by the save itself, inside its write.
  */
-export function checkEdit(id: string, scope: string, body: string, note: string, active: ActiveRevision): Problem[] {
+export function checkEdit(id: string, scope: string, raw: string, note: string, active: ActiveRevision): Problem[] {
+  const body = normaliseBody(raw);
   const out: Problem[] = [];
   if (id === GUIDANCE_PROMPT_ID) {
     if (scope === BASE_SCOPE) return [{ where: "scope", message: "guidance belongs to one repository" }];

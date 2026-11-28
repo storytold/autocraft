@@ -50,6 +50,8 @@ test("saves are checked, rolled back and switched to the release, with their aud
     { why: "too large", body: add(`${"Look closer. ".repeat(4000)}\n\n`) },
     { why: "the guidance slot moved out of the data block", body: code.replace("{{repo_guidance}}\n", "").replace("⟦locked:output⟧", "{{repo_guidance}}\n⟦locked:output⟧") },
     { why: "no note", body: add("Read the tests first.\n\n", outputAt), note: " " },
+    { why: "a credential in the note", body: add("Read the tests first.\n\n", outputAt), note: "token abcdefghijklmnop1234" },
+    { why: "a bidirectional override", body: add("Read the tests \u202efirst.\n\n", outputAt) },
     { why: "unchanged", body: code },
   ];
   for (const r of refused) {
@@ -57,6 +59,11 @@ test("saves are checked, rolled back and switched to the release, with their aud
     assert.equal(res.ok, false, r.why);
     assert.ok(!res.ok && res.problems.length > 0, `${r.why}: a problem is named`);
   }
+  // A sandbox path whose neighbouring editable text makes it read as another path.
+  const compare = codeBody("verify.compare");
+  const path = "⟦locked:harness⟧/repo⟦/locked⟧";
+  assert.ok(compare.includes(path));
+  assert.equal((await saveEdit(db, { id: "verify.compare", scope: "base", body: compare.replace(path, `${path}s`), note: "x", by, baseRev: null })).ok, false, "a harness path cannot grow");
   assert.equal((await saveEdit(db, { id: "classify.jev", scope: "base", body: "{}", note: "x", by, baseRev: null })).ok, false, "Jev prompts wait for their form");
   assert.deepEqual(await rows(), [], "a refused save stores nothing");
   assert.equal(await audits(), 0);

@@ -30,13 +30,18 @@ type Cache = {
   invalidations: number;
 };
 let cache: Cache | null = null;
+/**
+ * The rows prompts render from: the current cache's once its first read succeeded, until then the rows of the handle before
+ * it, so a render during a switch of handles never falls back to the code defaults.
+ */
+let served: Held | null = null;
 
 setPromptSource({
   base: (id) => {
-    const r = cache?.held?.base.get(id);
+    const r = served?.base.get(id);
     return r ? { body: r.body, rev: r.rev, follows: r.follows } : null;
   },
-  guidance: (repo) => cache?.held?.guidance.get(repo)?.body ?? "",
+  guidance: (repo) => served?.guidance.get(repo)?.body ?? "",
 });
 
 /** The waits before the second and third try of a read. */
@@ -60,6 +65,7 @@ function hold(c: Cache, rows: PromptRevision[], seq: number | null, at: number):
     else if (r.promptId === GUIDANCE_PROMPT_ID) guidance.set(r.scope, r);
   }
   c.held = { base, guidance, seq, at };
+  if (cache === c) served = c.held;
 }
 
 /**
@@ -123,8 +129,8 @@ export async function ensurePrompts(db: Db): Promise<void> {
 
 /** The active revision of a prompt in a scope ("base", or a repo for its guidance), as last ensured. */
 export function activeRow(promptId: string, scope: string): PromptRevision | null {
-  return (scope === BASE_SCOPE ? cache?.held?.base.get(promptId) : promptId === GUIDANCE_PROMPT_ID ? cache?.held?.guidance.get(scope) : undefined) ?? null;
+  return (scope === BASE_SCOPE ? served?.base.get(promptId) : promptId === GUIDANCE_PROMPT_ID ? served?.guidance.get(scope) : undefined) ?? null;
 }
 
 /** A repository's guidance text, as last ensured; "" for none. */
-export const guidanceOf = (repo: string): string => cache?.held?.guidance.get(repo)?.body ?? "";
+export const guidanceOf = (repo: string): string => served?.guidance.get(repo)?.body ?? "";

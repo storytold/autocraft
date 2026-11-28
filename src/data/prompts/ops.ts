@@ -4,7 +4,7 @@
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { addAudit } from "../control/audit.ts";
-import { NOTE_MAX, checkEdit, type ActiveRevision, type Problem } from "../../prompts/checks.ts";
+import { checkEdit, normaliseBody, noteProblems, type ActiveRevision, type Problem } from "../../prompts/checks.ts";
 import { BASE_SCOPE, CLAUDE_PROMPTS, GUIDANCE_PROMPT_ID, JEV_PROMPTS, bodyVersion, codeBody, codeDefault, type ClaudePromptId, type JevPromptId } from "../../prompts/index.ts";
 import { mergeEdit } from "../../prompts/locks.ts";
 import { sha256Hex } from "../../prompts/sha256.ts";
@@ -67,7 +67,8 @@ const refused = (problems: Problem[]): SaveResult => ({ ok: false, problems });
  * Stores an edit of a Claude prompt (scope "base") or of a repository's guidance (repo.guidance, scope = the repo) as the new
  * active revision. `baseRev`: the active revision the editor started from (null or 1 for a prompt that has no rows yet).
  */
-export async function saveEdit(db: Db, o: { id: string; scope: string; body: string; note: string; by: string; baseRev: number | null }): Promise<SaveResult> {
+export async function saveEdit(db: Db, edit: { id: string; scope: string; body: string; note: string; by: string; baseRev: number | null }): Promise<SaveResult> {
+  const o = { ...edit, body: normaliseBody(edit.body) };
   return await db.write(async () => {
     const revs = await listRevisions(db, o.id, o.scope);
     const active = activeOf(revs);
@@ -86,8 +87,8 @@ export async function saveEdit(db: Db, o: { id: string; scope: string; body: str
 /** Makes an earlier revision's text the active one again, as a new revision (kind rollback); a release revision follows the running release again. */
 export async function rollback(db: Db, o: { id: string; scope: string; rev: number; by: string; note: string }): Promise<SaveResult> {
   if (!isGuidance(o.id) && !(isBasePrompt(o.id) && o.scope === BASE_SCOPE)) return refused([{ where: "prompt", message: `${o.id} has no revisions in ${o.scope}` }]);
-  const note = o.note.trim();
-  if (!note || note.length > NOTE_MAX) return refused([{ where: "note", message: `a note of 1 to ${NOTE_MAX} characters saying why is required` }]);
+  const note = o.note.trim(), problems = noteProblems(note);
+  if (problems.length) return refused(problems);
   return await db.write(async () => {
     const revs = await listRevisions(db, o.id, o.scope);
     const from = revs.find((r) => r.rev === o.rev), active = activeOf(revs);
@@ -108,8 +109,8 @@ export async function rollback(db: Db, o: { id: string; scope: string; rev: numb
  */
 export async function useRelease(db: Db, o: { id: string; by: string; note: string }): Promise<SaveResult> {
   if (!isBasePrompt(o.id)) return refused([{ where: "prompt", message: `${o.id} has no release default` }]);
-  const note = o.note.trim();
-  if (!note || note.length > NOTE_MAX) return refused([{ where: "note", message: `a note of 1 to ${NOTE_MAX} characters saying why is required` }]);
+  const note = o.note.trim(), problems = noteProblems(note);
+  if (problems.length) return refused(problems);
   return await db.write(async () => {
     const revs = await listRevisions(db, o.id, BASE_SCOPE);
     const active = activeOf(revs);
