@@ -303,8 +303,9 @@ async function ensureLeg(db: Db, pass: Pass, writes: Writes, w: ItemWorkflow, re
       await preapproveMerge(db, { repo, number: pr, by: w.approvedBy!, via: "workflow", head, fromHead: approvedHead(pass.moves.get(key(repo, pr)) ?? [], head, since), workflowId: w.id });
     } catch (e) {
       // A refusal by rule (not reviewable, merging not approved) needs a person; anything else is tried again on the next pass.
-      // A leg that became active meanwhile is adopted, or waited for, on the next pass, and a draft is waited for as with a leg.
-      if (e instanceof PreapprovalRefused) return e.active || e.draft ? null : e.message;
+      // A leg that became active meanwhile is adopted, or waited for, on the next pass, and a draft is waited for as with a leg. A head
+      // that moved since the pass read it is looked at again on the next pass.
+      if (e instanceof PreapprovalRefused) return e.active || e.draft || e.headChanged ? null : e.message;
       throw e;
     }
   } else if (active.workflow_id === null) writes.adopt.push({ id: active.id, workflowId: w.id });
@@ -377,10 +378,17 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const ruleHeads = live.flatMap((w) => { const f = unansweredRuleRow(w) ? facts.get(key(w.repo, w.number)) : undefined; return f && f.head === w.recHead ? [f] : []; });
     const premerge = ruleHeads.length ? await premergeOf(db, ruleHeads) : new Map<string, PremergeRow>();
     const blockers = await loadBlockerReads(db, live.flatMap((w) => (w.rec?.cause?.code === "blocked-by" ? w.rec.cause.items : [])));
-    // The approved lane's jobs since the earliest point any workflow counts its failures from.
-    const earliest = due.map((w) => goOn.get(w.id)?.since ?? w.startedAt).sort()[0] ?? at;
+    // The approved lane's jobs of the PRs whose workflow may stop on them (a running or waiting one) or waits for one to run through (a lane-failed
+    // question), since the earliest point those count from.
+    const lanePrOf = (w: ItemWorkflow): { repo: string; number: number } | null => {
+      const number = w.kind === "pr" ? w.number : candidatePr(implement.byIssue.get(key(w.repo, w.number)), w);
+      return number === null ? null : { repo: w.repo, number };
+    };
+    const laneWorkflows = due.filter((w) => w.state === "running" || w.state === "waiting" || w.rec?.cause?.code === "lane-failed");
+    const laneRefs = [...new Map(laneWorkflows.flatMap((w) => { const r = lanePrOf(w); return r ? [[key(r.repo, r.number), r] as const] : []; })).values()];
+    const earliest = laneWorkflows.map((w) => goOn.get(w.id)?.since ?? w.startedAt).sort()[0] ?? at;
     const laneRuns = new Map<string, LaneRun[]>();
-    for (const r of await loadLaneRuns(db, prRefs, earliest, Object.keys(LANE_STEPS))) (laneRuns.get(key(r.repo, r.number)) ?? laneRuns.set(key(r.repo, r.number), []).get(key(r.repo, r.number))!).push(r);
+    for (const r of await loadLaneRuns(db, laneRefs, earliest, Object.keys(LANE_STEPS))) (laneRuns.get(key(r.repo, r.number)) ?? laneRuns.set(key(r.repo, r.number), []).get(key(r.repo, r.number))!).push(r);
     const pass: Pass = {
       at, items, implement, goOn, legs, reviews, patches, moves, facts, premerge, issues: issueFacts, blockers, laneRuns, issueReviews, own, wake,
     };
@@ -605,8 +613,9 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     const waiting = gone ? [...(await loadActions(db, { workflowIds: [w.id], kinds: ["merge"], states: ["waiting-permission"] })).values()].flat().filter((a) => a.by.toLowerCase() === w.approvedBy!.toLowerCase()) : [];
     retried = waiting.length > 0;
     writes.closed.push({ w, line: t("The question closed without an answer: {why} {rec}", { why, rec: w.rec!.text }), at, retry: waiting.map((a) => a.id) });
-    const k = closeKey(w.rec?.cause);
-    const closedWaits = k !== null && head !== null ? { head, waits: [...(w.closedWaits?.head === head ? w.closedWaits.waits : []), k] } : w.closedWaits;
+    // A lane step's question is about the head its jobs failed at, which a new head is what closes it: it is recorded there.
+    const c = w.rec?.cause, k = closeKey(c), keyHead = c?.code === "lane-failed" ? c.head : head;
+    const closedWaits = k !== null && keyHead !== null ? { head: keyHead, waits: [...(w.closedWaits?.head === keyHead ? w.closedWaits.waits : []), k] } : w.closedWaits;
     const on = { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, closedWaits } as const satisfies WorkflowPatch;
     Object.assign(base, on);
     w = { ...w, ...on };

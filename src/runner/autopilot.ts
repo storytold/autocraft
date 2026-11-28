@@ -55,7 +55,7 @@ import { PIPELINE_DRAIN } from "../core/rules.ts";
 import { checkRequest, DEADLINE_ERROR, JobError, now } from "./jobs.ts";
 import { NO_TAKER_SKIP, UNITS_RAN } from "./leases.ts";
 import { jobBlock, stepParallel, untakenTest, wantOf, type Active, type UntakenTest } from "./concurrency.ts";
-import { APPROVED_LANE, approvedLane, hasApprovedLane, ITEM_LANE, knownStep, loadSteps, perItemLane, type Params, type StepDef } from "./steps.ts";
+import { APPROVED_LANE, approvedLane, hasApprovedLane, isHeadSha, ITEM_LANE, knownStep, loadSteps, perItemLane, type Params, type StepDef } from "./steps.ts";
 import { repoInScope, type RepoScope, type ScopeFor } from "../core/scope.ts";
 import { loadRepoScopes } from "../data/workflow/index.ts";
 import { refreshOutsideHolds } from "../outside.ts";
@@ -462,7 +462,7 @@ export function laneCandidates(step: string, repos: string[], due: readonly Lane
   const turns: LaneDue[] = [];
   const queues = repos.filter((r, i) => items.has(r) && repos.indexOf(r) === i).map((r) => items.get(r)!);
   for (let k = 0; queues.some((q) => k < q.length); k++) for (const q of queues) if (k < q.length) turns.push(q[k]!);
-  const job = (d: LaneDue, lane: string): Candidate => make({ repo: d.repo, number: d.number, lane, ...(d.head ? { head: d.head } : {}) }, [{ repo: d.repo, number: d.number }]);
+  const job = (d: LaneDue, lane: string): Candidate => make({ repo: d.repo, number: d.number, lane, ...(isHeadSha(d.head) ? { head: d.head } : {}) }, [{ repo: d.repo, number: d.number }]);
   return [...approved.map((d) => job(d, APPROVED_LANE)), ...turns.map((d) => job(d, ITEM_LANE))];
 }
 

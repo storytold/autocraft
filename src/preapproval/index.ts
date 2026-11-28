@@ -154,11 +154,20 @@ async function cancelRow(db: Db, leg: { id: number; repo: string; number: number
  */
 export type CheckedStep = { write: (workflowId: number) => Promise<number | null> };
 
-/** A step's refusal by rule (the PR or its state); other errors may pass on a later try. `active`: a merge leg is in progress already. `draft`: it waits for the PR to be marked ready. */
+/**
+ * A step's refusal by rule (the PR or its state); other errors may pass on a later try. `active`: a merge leg is in progress already. `draft`: it
+ * waits for the PR to be marked ready. `headChanged`: the PR's head moved since the caller read it, and a look at the new head may pass.
+ */
 export class PreapprovalRefused extends Error {
   readonly active: boolean;
   readonly draft: boolean;
-  constructor(message: string, why: "active" | "draft" | null = null) { super(message); this.active = why === "active"; this.draft = why === "draft"; }
+  readonly headChanged: boolean;
+  constructor(message: string, why: "active" | "draft" | "head-changed" | null = null) {
+    super(message);
+    this.active = why === "active";
+    this.draft = why === "draft";
+    this.headChanged = why === "head-changed";
+  }
 }
 
 /**
@@ -280,7 +289,7 @@ export async function checkMergeLeg(db: Db, o: { repo: string; number: number; b
   if (!fact || fact.integration) throw outOfScope(ref);
   if (fact.draft) throw isDraft(ref);
   const head = needHead(it, ref);
-  if (o.head !== undefined && head !== o.head) throw new PreapprovalRefused(HEAD_CHANGED);
+  if (o.head !== undefined && head !== o.head) throw new PreapprovalRefused(HEAD_CHANGED, "head-changed");
   if (await hasLeg(db, repo, number)) throw busy(ref);
   return {
     write: async (workflowId) => {

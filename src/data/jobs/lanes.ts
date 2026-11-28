@@ -154,13 +154,18 @@ export async function claimMark(db: Db, name: string, nowMs: number, minGapMs: n
   return won.length > 0;
 }
 
-/** The pipeline's ended jobs of the approved lane (one PR each) of `steps` for the PRs `refs` that ended after `since`, oldest first. Which count as the item's own failures is the workflow's call (src/workflow/advance.ts laneStops). */
+/**
+ * The pipeline's ended jobs of the approved lane (one PR each) of `steps` for the PRs `refs` that ended after `since`, among the last
+ * STREAK_WINDOW job ids, oldest first. Which count as the item's own failures is the workflow's call (src/workflow/advance.ts laneFailures).
+ */
 export async function loadLaneRuns(db: Db, refs: readonly { repo: string; number: number }[], since: string, steps: readonly string[]): Promise<LaneRun[]> {
   if (!refs.length || !steps.length) return [];
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("jobs").select(["repo", "step", "id", "state", "ended_at", "error"]).select(() => [numberOf(db).as("number"), kx.jsonText(db, "params", "$.head").as("head")])
+    .where("id", ">", (eb) => eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", STREAK_WINDOW))
     .where("requested_by", "=", PIPELINE_USER).where("ended_at", ">", since).where("state", "in", ["done", "failed"])
     .where((eb) => kx.inList(db, eb.ref("step"), steps)).where((eb) => kx.inList(db, eb.ref("repo"), [...new Set(refs.map((r) => r.repo))]))
+    .where(kx.inList(db, numberOf(db), [...new Set(refs.map((r) => r.number))], "bigint"))
     .where((eb) => approvedOf(db, eb))
     .orderBy("id"));
   const wanted = new Set(refs.map((r) => `${r.repo}#${r.number}`));

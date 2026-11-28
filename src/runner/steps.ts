@@ -32,6 +32,8 @@ export type Params = Record<string, string | number>;
 
 export const RUN_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const HEAD_SHA = /^[0-9a-f]{7,64}$/;
+/** Whether `v` is a commit id a `sha` param takes. */
+export const isHeadSha = (v: unknown): v is string => typeof v === "string" && HEAD_SHA.test(v);
 
 /**
  * The `lane` of a job of a per-item step (Review, Pre-merge review, Fix-up, Fix) that works one PR (`number`): `approved` for a PR a
@@ -1192,8 +1194,8 @@ export function validateParams(step: StepDef, raw: unknown, trackedRepos: string
         out[p.name] = v;
         break;
       case "sha":
-        if (typeof v !== "string" || !HEAD_SHA.test(v)) throw new ParamError(`${p.label} must be a commit id`);
-        out[p.name] = v;
+        // Only a note for counting the job's failures: one that is no commit id is left out, and the job runs without it.
+        if (isHeadSha(v)) out[p.name] = v;
         break;
     }
   }
