@@ -36,13 +36,16 @@ const HEAD_SHA = /^[0-9a-f]{7,64}$/;
 export const isHeadSha = (v: unknown): v is string => typeof v === "string" && HEAD_SHA.test(v);
 
 /**
- * The `lane` of a job of a per-item step (Review, Pre-merge review, Fix-up, Fix) that works one PR (`number`): `approved` for a PR a
- * person started or approved for merge (core/select.ts ownLane), `item` for a PR nobody started. A job without a lane works every PR
- * of the repo nobody started (a command-line run). One live job per (step, PR), so no PR waits behind another (src/runner/concurrency.ts).
+ * The `lane` of a job of a per-item step (Review, Post final reviews, Pre-merge review, Fix-up, Fix, Implement) that works one item
+ * (`number`): `approved` for an item a person started or approved for merge (core/select.ts ownLane; every issue Implement works was
+ * queued by a person), `item` for a PR nobody started. A job without a lane works every PR of the repo nobody started (a command-line
+ * run), or the one item its `number` names. One live job per (step, item), so no item waits behind another (src/runner/concurrency.ts).
  */
 export const APPROVED_LANE = "approved";
 export const ITEM_LANE = "item";
 const LANE_PARAM: ParamDef = { name: "lane", label: "Lane", kind: "enum", options: [APPROVED_LANE, ITEM_LANE], help: "approved: the pull request (number), which a person started or approved for merge; item: the pull request, which nobody started; empty: every pull request nobody started" };
+/** Implement's lane: every issue it works was queued by a person, so its planner jobs are all of the approved lane. */
+const IMPLEMENT_LANE_PARAM: ParamDef = { name: LANE_PARAM.name, label: "Lane", kind: "enum", options: [APPROVED_LANE], help: "approved: the planner's job for the queued issue (number), which runs beside the repo's other issues; empty: a run started by hand" };
 const PR_PARAM: ParamDef = { name: "number", label: "Pull request", kind: "int", min: 1, max: 1_000_000_000, help: "only this pull request" };
 /** The PR's head when the planner queued a per-item job, so its failures count per head (src/workflow/advance.ts laneStops); the job works the head the PR has when it runs. */
 const HEAD_PARAM: ParamDef = { name: "head", label: "Head", kind: "sha", cliOnly: true, help: "the pull request's head commit when the job was queued" };
@@ -50,7 +53,7 @@ const HEAD_PARAM: ParamDef = { name: "head", label: "Head", kind: "sha", cliOnly
 /** The `number` param of a job of a per-item step: the one PR it works. */
 const onlyPr = (params: Params): { number?: number } => (typeof params.number === "number" ? { number: params.number } : {});
 
-/** The step runs one job per PR (Review, Pre-merge review, Fix-up, Fix): `{ repo, number, lane: "approved" }` for a PR a person started or approved (core/select.ts ownLane), `{ repo, number, lane: "item" }` for the others. */
+/** The step runs one job per item (Review, Post final reviews, Pre-merge review, Fix-up, Fix, Implement): `{ repo, number, lane: "approved" }` for an item a person started or approved (core/select.ts ownLane), `{ repo, number, lane: "item" }` for the others. */
 export const hasApprovedLane = (step: StepDef | undefined): boolean => !!step?.params.some((p) => p.name === LANE_PARAM.name);
 
 /** True for a job (its params, as an object or the stored JSON) of the approved lane. */
@@ -513,6 +516,7 @@ export const STEPS: StepDef[] = [
       { name: "number", label: "Issue", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the queued issue" },
       { name: "bucket", label: "Work", kind: "enum", options: [...IMPLEMENT_BUCKETS], default: "plan", help: "plan, build from the stored plan, or revise our PR" },
       { name: "mode", label: "Mode", kind: "enum", options: ["normal", "dry"], default: "normal", cliOnly: true, help: "dry: plan only, storing and posting nothing (`implement run --plan-only --no-post`)" },
+      IMPLEMENT_LANE_PARAM,
     ],
     check: checkImplement,
     run: async (ctx) => {
@@ -757,12 +761,15 @@ export const STEPS: StepDef[] = [
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 20, help: "reviews to post in this job" },
+      LANE_PARAM,
+      PR_PARAM,
+      HEAD_PARAM,
     ],
     run: async (ctx) => {
       const { runReviewPost } = await import("../review/post.ts");
-      const r = await runReviewPost(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
+      const r = await runReviewPost(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), approved: approvedLane(ctx.params), ...onlyPr(ctx.params), dryRun: false, onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       const line = `${r.repo}: ${r.posted.length} posted, ${r.edited.length} edited, ${r.skipped.length} skipped, ${r.failed.length} failed${r.note ? `; ${r.note}` : ""}`;
-      // A review that could not be written stays due: a failed job backs off instead of trying again at once.
+      // A review that could not be written stays due: a failed job backs off instead of trying again at once, a lane job for its own PR only.
       if (r.failed.length && !r.posted.length && !r.edited.length) throw new Error(`${line}; ${r.failed[0]!.ref}: ${r.failed[0]!.reason}`);
       return line;
     },

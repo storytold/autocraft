@@ -134,9 +134,12 @@ export async function claimJob(db: Db, c: { id: number; step: string; repo: stri
       const same = running(eb, "s").where("s.step", "=", c.step).select(eb.lit(1).as("one"));
       const sameNumber = (e: kx.AnyEb) => (c.number === null ? e(numberOf(db, "s.params"), "is", null) : e(numberOf(db, "s.params"), "=", c.number));
       const perItem = c.lane === "approved" || c.lane === "item";
-      // Per-item: the same PR in either lane, or (an item job) a job of the repo without a lane. Without a lane: any job but an approved one.
+      const laneless = (e: kx.AnyEb) => e(e.fn.coalesce(kx.jsonText(db, "s.params", "$.lane"), e.val("")), "=", "");
+      // Per-item: any job naming the same item, or (an item job) a job of the repo without a lane or item. Without a lane: naming an
+      // item, a job without a lane or a per-item job of that item; naming none, any job but an approved one.
       const lane = c.step === "security-fix" ? sameNumber
-        : perItem ? (e: kx.AnyEb) => e.or([e.and([perItemOf(db, e, "s.params"), sameNumber(e)]), ...(c.lane === "item" ? [e(e.fn.coalesce(kx.jsonText(db, "s.params", "$.lane"), e.val("")), "=", "")] : [])])
+        : perItem ? (e: kx.AnyEb) => e.or([sameNumber(e), ...(c.lane === "item" ? [e.and([laneless(e), e(numberOf(db, "s.params"), "is", null)])] : [])])
+        : c.number !== null ? (e: kx.AnyEb) => e.or([laneless(e), e.and([perItemOf(db, e, "s.params"), sameNumber(e)])])
         : (e: kx.AnyEb) => e(e.fn.coalesce(kx.jsonText(db, "s.params", "$.lane"), e.val("")), "<>", "approved");
       const sameWork = c.repo === null ? same : same.where((e: kx.AnyEb) => e.or([e("s.repo", "is", null), e.and([e("s.repo", "=", c.repo!), lane(e)])]));
       const conds = [eb.not(eb.exists(sameWork))];

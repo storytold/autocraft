@@ -1,10 +1,11 @@
 // Which jobs may run together: one queued or running job per (step, repo), at most `step_parallel` repos per step,
 // and the named mutexes of StepDef.exclusive. The planner, the command-line gate and the runner use the same rules.
 // A queued job that no Task Runner may take (untakenTest) holds no repo of the step.
-// Per-item steps (hasApprovedLane): each due PR gets a job of its own, `{ repo, number, lane: "approved" }` for a PR a person started
+// Per-item steps (hasApprovedLane): each due item gets a job of its own, `{ repo, number, lane: "approved" }` for an item a person started
 // or approved for merge (ownLane in src/core/select.ts) and `{ repo, number, lane: "item" }` for the others. One live job per (step, repo,
-// number); such jobs neither count toward step_parallel nor wait for it, so no PR waits for another PR's job. A job of the step
-// without a lane (a command-line run) works the repo's PRs nobody started: it does the same work as their item jobs.
+// number); such jobs neither count toward step_parallel nor wait for it, so no item waits for another item's job. A job of the step
+// without a lane (a command-line run) works the one item its `number` names, the same work as that item's job, or else the repo's
+// PRs nobody started, the same work as their item jobs.
 import { freshConfig, saveSettings } from "../data/control/index.ts";
 import { loadLiveJobs } from "../data/jobs/index.ts";
 import { taskOfStep, TASK_CHOICES } from "../remote/my-tasks.ts";
@@ -115,15 +116,15 @@ type Work = { repo: string | null; number: number | null; approved: boolean; per
 
 /**
  * Two jobs of one step do the same work: one of them is not about a single repo; or the same repo and: the same finding (security-fix),
- * two per-item jobs of the same PR, an item job and a job of the repo without a lane, or two jobs without a lane.
+ * a per-item job and another job naming the same item, an item job and a job of the repo without a lane or item, or two jobs without a lane.
  */
 function sameWork(step: string, a: Work, b: Work): boolean {
   if (a.repo === null || b.repo === null) return true;
   if (a.repo !== b.repo) return false;
   if (step === "security-fix") return a.number === b.number;
-  if (a.perItem && b.perItem) return a.number === b.number;
-  if (a.perItem || b.perItem) return !(a.perItem ? a : b).approved;
-  return true;
+  if (!a.perItem && !b.perItem) return true;
+  if (a.number !== null && b.number !== null) return a.number === b.number;
+  return !(a.perItem ? a : b).approved;
 }
 
 /** `perItem`: a job of a per-item lane, for the PR `number`; `approved`: of the approved lane. */

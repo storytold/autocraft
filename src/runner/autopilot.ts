@@ -389,14 +389,15 @@ export function roundRobin(repos: string[], cursor: string | null): string[] {
 type ImplementJob = { number: number; bucket: string; score: number | null };
 
 /** implementWork of a planner pass's Plans, made on first use and kept with them. */
-const passImplementWork = new WeakMap<PlanSet, Promise<Map<string, ImplementJob>>>();
+const passImplementWork = new WeakMap<PlanSet, Promise<Map<string, ImplementJob[]>>>();
 
 /**
- * Per repo, the queued issue its next implement job works on. The revisions of our implementation PRs (planned on the PR,
- * for the PR's issue) come first, then the issues in the planned order (work of ours in flight, then the work score). With several, the first
- * whose job may run now (implementRefusals): one that may not keeps no other work of the repo back.
+ * Per repo, the queued issues its implement jobs work on, each in a job of its own (the approved lane). The revisions of our
+ * implementation PRs (planned on the PR, for the PR's issue) come first, then the issues in the planned order (work of ours in
+ * flight, then the work score). With several, those whose job may run now (implementRefusals), or the first when none may: its job
+ * says why.
  */
-async function implementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob>> {
+async function implementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob[]>> {
   let work = passImplementWork.get(plans);
   if (!work) {
     passImplementWork.set(plans, (work = findImplementWork(db, tracked, plans)));
@@ -405,16 +406,19 @@ async function implementWork(db: Db, tracked: string[], plans: PlanSet): Promise
   return await work;
 }
 
-async function findImplementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob>> {
+async function findImplementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob[]>> {
   const found = new Map<string, ImplementJob[]>(tracked.map((repo) => [repo, []]));
-  for (const p of await planned(db, "implement", { plans })) found.get(p.facts.repo)?.push({ number: Number(p.action.params?.issue), bucket: "revise", score: p.facts.score });
-  for (const p of await plannedItems(db, "implement", { plans })) found.get(p.facts.repo)?.push({ number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan"), score: p.facts.score });
+  // One job per issue: a revision of its PR comes before a planned bucket of the same issue.
+  const add = (repo: string, j: ImplementJob): void => { const jobs = found.get(repo); if (jobs && !jobs.some((x) => x.number === j.number)) jobs.push(j); };
+  for (const p of await planned(db, "implement", { plans })) add(p.facts.repo, { number: Number(p.action.params?.issue), bucket: "revise", score: p.facts.score });
+  for (const p of await plannedItems(db, "implement", { plans })) add(p.facts.repo, { number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan"), score: p.facts.score });
   const choices = [...found].flatMap(([repo, jobs]) => (jobs.length > 1 ? jobs.map((j) => ({ repo, number: j.number })) : []));
   const refused = choices.length ? await (await import("../implement/gate.ts")).implementRefusals(db, choices) : new Map<string, string | null>();
-  const out = new Map<string, ImplementJob>();
+  const out = new Map<string, ImplementJob[]>();
   for (const [repo, jobs] of found) {
-    const next = jobs.find((j) => (refused.get(`${repo}#${j.number}`) ?? null) === null) ?? jobs[0];
-    if (next) out.set(repo, next);
+    const may = jobs.filter((j) => (refused.get(`${repo}#${j.number}`) ?? null) === null);
+    const next = may.length ? may : jobs.slice(0, 1);
+    if (next.length) out.set(repo, next);
   }
   return out;
 }
@@ -763,9 +767,9 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx), work = await implementWork(db, ctx.tracked, plans);
       return flightFirst(plans, [...work.keys()].sort())
-        .map((repo) => { const j = work.get(repo)!; return { step: "implement", params: { repo, number: j.number, bucket: j.bucket } }; });
+        .flatMap((repo) => work.get(repo)!.map((j) => ({ step: "implement", params: { repo, number: j.number, bucket: j.bucket, lane: APPROVED_LANE }, refs: [{ repo, number: j.number }] })));
     },
-    topScore: async (db, ctx) => bestScore([...(await implementWork(db, ctx.tracked, await plansOf(db, ctx))).values()].map((j) => j.score)),
+    topScore: async (db, ctx) => bestScore([...(await implementWork(db, ctx.tracked, await plansOf(db, ctx))).values()].flat().map((j) => j.score)),
     // AutoCraft's own retry of a stopped implementation falls due with no input changing: the lane runs again at its time, also
     // after an idle job (start-retry.ts).
     extra: async (db) => [...(await loadDueOwnRetries(db, Date.now()))].sort(([a], [b]) => a.localeCompare(b)).map(([repo, at]) => `${repo}=${at}`).join(","),
@@ -812,10 +816,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // The final Opus reviews, posted as one PR review each in repos approved for comments.
     name: "review-post",
     perRepo: true,
-    detect: async (db, ctx) => {
-      const due = new Set((await planned(db, "post-review", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
-      return ctx.tracked.filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "review-post", params: { repo } }));
-    },
+    // One job per PR, so a review GitHub keeps refusing backs off alone and holds no other PR's post.
+    detect: async (db, ctx) => laneCandidates("review-post", [...ctx.tracked].sort(), (await planned(db, "post-review", { plans: await plansOf(db, ctx) })).map(laneDue)),
   },
   {
     // Operator messages in conversations; answered whether or not the item's repo is in scope, since an operator started them.
