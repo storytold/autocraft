@@ -1,10 +1,13 @@
 // Fix sessions (`fix_sessions`) and their turns (`fix_session_turns`): the model sessions the fix steps keep per item (src/fixsession).
 
-/** pr: the session of a pull request (fix-up, CI fix, conflict); security: the private fix of a security finding. */
-export type FixSessionKind = "pr" | "security";
+/**
+ * pr: the session of a pull request (fix-up, CI fix, conflict); security: the private fix of a security finding; mainfix: the fix of
+ * a red default branch, one per repo (number 0: the default branch, not a PR).
+ */
+export type FixSessionKind = "pr" | "security" | "mainfix";
 /** The step a turn works for: its allowed files and its stored row come from it. */
-export type FixStep = "fixup" | "cifix" | "conflict" | "security";
-export const FIX_STEPS: readonly FixStep[] = ["cifix", "fixup", "conflict", "security"];
+export type FixStep = "fixup" | "cifix" | "conflict" | "security" | "main-fix";
+export const FIX_STEPS: readonly FixStep[] = ["cifix", "fixup", "conflict", "security", "main-fix"];
 /** An entry of the fix_sessions setting: a fix step, or `review` (the Opus reviews of a PR run in workspaces of their own). */
 export type FixSessionSwitch = FixStep | "review";
 export const FIX_SESSION_SWITCHES: readonly FixSessionSwitch[] = [...FIX_STEPS, "review"];
@@ -49,10 +52,12 @@ export type FixTurn = {
   /** The call's model turns. */
   turns: number | null; costUsd: number | null; toolCalls: number | null; shellMs: number | null;
   diffHash: string | null;
+  /** The turn's task was a quiet one (a security fix not yet published). */
+  quiet: boolean;
   createdAt: string; settledAt: string | null;
 };
 
-export type NewFixTurn = { sessionId: number; step: FixTurnStep; purpose: FixTurnPurpose; head?: string | null; callId?: number | null; parentId?: number | null };
+export type NewFixTurn = { sessionId: number; step: FixTurnStep; purpose: FixTurnPurpose; head?: string | null; callId?: number | null; parentId?: number | null; quiet?: boolean };
 
 /** How a turn ended; fields left out stay as they are. */
 export type FixTurnSettle = {

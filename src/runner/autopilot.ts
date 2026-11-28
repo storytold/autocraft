@@ -949,8 +949,9 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "main-fix",
     perRepo: true,
     // A rerun waits for the next reading of the head or a time limit, and a failure log not readable yet is read again after the
-    // next main CI poll; the clock moves with no change in the data.
-    extra: async (db) => await mainFixClock(db, Date.now()),
+    // next main CI poll; the clock moves with no change in the data. A fix that waited for its fix session's workspace runs again
+    // when that workspace or the environments move.
+    extra: async (db) => `${await mainFixClock(db, Date.now())}|${await fixWorkspaceReading(db, "mainfix")}`,
     detect: async (db, { tracked, wake }) => (await mainFixDueRepos(db, tracked, wake ? { wake } : {})).sort().map((repo) => ({ step: "main-fix", params: { repo } })),
   },
   {

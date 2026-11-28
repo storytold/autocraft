@@ -50,18 +50,26 @@ export const STEP_PLANS: Record<string, Plan> = {
 export type StepVariant = "fix-session";
 
 /** The steps whose jobs have a fix-session variant, with the fix_sessions step that turns it on. */
-export const SESSION_VARIANT_STEPS: Record<string, FixStep> = { "security-fix": "security" };
+export const SESSION_VARIANT_STEPS: Record<string, FixStep> = { "security-fix": "security", "main-fix": "main-fix" };
 
 /**
  * A fix session turn's minutes: a step's first turn, then its follow-ups (AutoCraft's check findings, one undo turn and one report
- * turn), each at its call's time limit. The workspace is never waited for in the job: a security fix ends on a workspace that is not
- * ready and its next job starts once the workspace moves on.
+ * turn), each at its call's time limit. The workspace is never waited for in the job: a security fix, or a red default branch's fix,
+ * ends on a workspace that is not ready, and its next job starts once the workspace moves on.
  */
 const sessionStepMin = (): number => (FIX_SESSION_CALL.timeoutSeconds + (CHECK_FOLLOW_UPS + 2) * FIX_FOLLOW_UP_CALL.timeoutSeconds) / 60;
 
-/** The fix-session bound of a step's job, in minutes, and its longest call: a security fix runs up to FIX_ROUNDS rounds before a build, then the review. */
+/**
+ * The fix-session bound of a step's job, in minutes, and its longest call: a security fix runs up to FIX_ROUNDS rounds before a build,
+ * then the review; a red default branch's fix classifies the head, runs one step (a first turn or a lint round) and the Opus check. The
+ * workspace is never waited for in the job.
+ */
 const SESSION_BOUNDS: Record<string, () => { bound: number; longest: number }> = {
   "security-fix": () => ({ bound: FIX_ROUNDS * sessionStepMin() + callMin(item("security.fixcheck")), longest: Math.max(FIX_SESSION_CALL.timeoutSeconds / 60, callMin(item("security.fixcheck"))) }),
+  "main-fix": () => ({
+    bound: callMin(item("mainfix.classify")) + sessionStepMin() + callMin(item("fixup.check")),
+    longest: Math.max(FIX_SESSION_CALL.timeoutSeconds / 60, callMin(item("mainfix.classify")), callMin(item("fixup.check"))),
+  }),
 };
 
 /**

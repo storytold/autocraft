@@ -515,6 +515,9 @@ const STATE_COLUMNS: [table: string, column: string, type: string][] = [
   ["ci_fixes", "session_turn", "INTEGER"],
   ["conflict_merges", "session_turn", "INTEGER"],
   ["security_fix_rounds", "session_turn", "INTEGER"],
+  ["main_fixes", "session_turn", "INTEGER"],
+  // Whether a fix session turn's task was a quiet one: a turn whose quiet differs from the last one starts a fresh harness session.
+  ["fix_session_turns", "quiet", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 const STATE_INDEXES = [

@@ -52,11 +52,13 @@ const OPENING: readonly FixTurnPurpose[] = ["start", "step", "lint"];
 /** The reasons of a diff that was read but cannot be used (workspaceDiff, collectDiff): the change is refused, not the step failed. */
 const CHANGE_REFUSAL = /over \d+ MiB|not UTF-8/;
 
-export type FixTurnResult = TurnResult<SecurityReport> & { step: GateStep; head: string; parentId?: number };
+export type FixTurnResult = TurnResult<SecurityReport> & { step: GateStep; head: string; parentId?: number; quiet?: boolean };
 export type FixRound = { id: number; callId: number | null; sessionId: number; result: FixTurnResult };
 export type FixTurnRequest = {
   session: FixSession; workspaceId: number; step: GateStep; purpose: FixTurnPurpose; head: string; stdin: string;
   promptId: FixPromptId; items: ItemRef[]; by: string;
+  /** The task is a quiet one. */
+  quiet?: boolean;
   /** A follow-up: the call whose harness session it continues. It keeps that session's system prompt and version. */
   parentId?: number;
   /** A first turn's system prompt and version, rendered with its stdin. */
@@ -69,7 +71,7 @@ const roundOf = (t: FixTurn): FixRound => ({
   id: t.id, callId: t.callId, sessionId: t.sessionId,
   result: {
     purpose: t.purpose, outcome: t.outcome, report: (t.report as SecurityReport | null) ?? null, ...(t.error !== null && { error: t.error }),
-    turns: t.turns, costUsd: t.costUsd, calls: t.toolCalls ?? 0, shellMs: t.shellMs ?? 0, step: t.step, head: t.head ?? "", ...(t.parentId !== null && { parentId: t.parentId }),
+    turns: t.turns, costUsd: t.costUsd, calls: t.toolCalls ?? 0, shellMs: t.shellMs ?? 0, step: t.step, head: t.head ?? "", ...(t.parentId !== null && { parentId: t.parentId }), ...(t.quiet && { quiet: true }),
   },
 });
 
@@ -92,14 +94,14 @@ function storeOf(kind: FixSession["kind"]): RoundStore<FixTurnResult, FixRound, 
         stdin: t.stdin, system: sys.system, timeoutSeconds: limits.timeoutSeconds, maxTurns: limits.maxTurns, items: t.items,
         maxAttempts: CALL_ATTEMPTS, keepSession: true, ...(follow && { parentId: t.parentId }),
       };
-      const result: FixTurnResult = { purpose: t.purpose, outcome: "queued", report: null, turns: null, costUsd: null, calls: 0, shellMs: 0, step: t.step, head: t.head, ...(follow && { parentId: t.parentId }) };
+      const result: FixTurnResult = { purpose: t.purpose, outcome: "queued", report: null, turns: null, costUsd: null, calls: 0, shellMs: 0, step: t.step, head: t.head, ...(follow && { parentId: t.parentId }), ...(t.quiet && { quiet: true }) };
       // A security fix's workspace session names the call's item (the security pseudo repo), never the finding as an item of the repo.
       const subject = kind === "security" && t.items[0] ? t.items[0] : { repo: t.session.repo, number: t.session.number };
       return { call, owner: t.session.id, kind: t.purpose, result, session: { repo: subject.repo, item: subject.number, baseSha: t.head, requestedBy: t.by, deadlineSec: limits.timeoutSeconds } };
     },
     async add(db, owner, round) {
       const r = round.result;
-      const id = await addTurn(db, { sessionId: owner, step: r.step, purpose: r.purpose as FixTurnPurpose, head: r.head, callId: round.callId, parentId: r.parentId ?? null });
+      const id = await addTurn(db, { sessionId: owner, step: r.step, purpose: r.purpose as FixTurnPurpose, head: r.head, callId: round.callId, parentId: r.parentId ?? null, quiet: !!r.quiet });
       await updateSession(db, owner, { addTurns: 1 });
       return { id, callId: round.callId, sessionId: owner, result: r };
     },
@@ -114,14 +116,15 @@ function storeOf(kind: FixSession["kind"]): RoundStore<FixTurnResult, FixRound, 
     async afterReply() {},
   };
 }
-const STORES = { pr: storeOf("pr"), security: storeOf("security") };
+const STORES = { pr: storeOf("pr"), security: storeOf("security"), mainfix: storeOf("mainfix") };
 
 // ---- prompts ----------------------------------------------------------------------------------------------------------
 
 /** fix.session's system prompt (with the repo's guidance) and its first message, from the prompt revisions as they are now. */
 export async function renderFixSession(db: Db, task: FixSessionTask): Promise<{ system: string; stdin: string; version: string }> {
   await ensurePrompts(db);
-  const repo = task.ref.split("#")[0]!;
+  // A PR's ref is repo#n, a default branch's repo@sha.
+  const repo = task.ref.split(/[#@]/)[0]!;
   const guidance = guidanceOf(repo);
   const p = claudeParts("fix.session", [{ ...task, ...(guidance && { repo_guidance: guidance }) }], false);
   return { system: p.system ?? "", stdin: p.stdin, version: p.version };
@@ -143,6 +146,11 @@ export type StepSpec = {
   gate(pod: Pod): StepGate;
   items?: ItemRef[];
   /**
+   * The task is a quiet one (a security fix not yet published). A session whose last call's task differed in this starts a fresh
+   * harness session, so a quiet task's context never carries over into a turn with other rules, nor the other way round.
+   */
+  quiet?: boolean;
+  /**
    * A lint follow-up: the step goes on from its stored change `patch` (made at `head`), which the tree gets again, with `message`
    * (the findings) on the session of call `parentId`, the call that wrote the change. When that is not the session's last call (a
    * later turn, a lost runner, a new session), a fresh harness session gets the task, which then names the findings itself, with the
@@ -162,6 +170,7 @@ export function prStep(db: Db, turn: StepTurn, gate: (pod: Pod) => StepGate, o: 
   return {
     step: turn.step, head: turn.head, promptId: "fix.session",
     task: (history) => renderFixSession(db, { ref: turn.ref, turn, ...(history && { history }), ...(o.lint && { lint: o.lint.findings }) }),
+    ...(turn.quiet && { quiet: true }),
     message: ({ moved }) => stepMessage(turn, { later: true, ...(moved && { moved }) }),
     gate,
     ...(o.lint && { lint: { patch: o.lint.patch, message: lintMessage(o.lint.findings), parentId: o.lint.parentId } }),
@@ -361,6 +370,14 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
       }
     }
   }
+  // A task whose quiet differs from the one the session's last call worked on does not continue that call's harness session.
+  if (s.lastCallId !== null) {
+    const prev = (await turnsOf(db, s.id)).find((t) => t.callId === s.lastCallId);
+    if (prev && prev.quiet !== !!spec.quiet) {
+      env.log(`fix session ${s.id}: the task is ${spec.quiet ? "" : "not "}quiet, unlike the last turn's; the next turn starts a fresh session`);
+      if (!await updateSession(db, s.id, { lastCallId: null }) || !await reload()) return done({ kind: "ended", reason: `fix session ${s.id} ended` }, ws.workspaceId);
+    }
+  }
   // This step's turns so far, from the adopted turn back to the step's opening turn (purpose start, step or lint).
   let sent = 0, checkTurns = 0, undone = false, reportAsked = false;
   if (kept) {
@@ -423,7 +440,7 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
         purpose = next.purpose === "lint" ? "lint" : next.purpose !== "step" ? "fresh" : fresh ? "step" : "start";
       }
       retryOf = null;
-      const req: FixTurnRequest = { session: s, workspaceId: ws.workspaceId, step, purpose, head: spec.head, stdin, promptId: spec.promptId, items, by, ...(follow && next.message !== null && { parentId: s.lastCallId! }), ...(prompt && { prompt }) };
+      const req: FixTurnRequest = { session: s, workspaceId: ws.workspaceId, step, purpose, head: spec.head, stdin, promptId: spec.promptId, items, by, ...(spec.quiet && { quiet: true }), ...(follow && next.message !== null && { parentId: s.lastCallId! }), ...(prompt && { prompt }) };
       await docs();
       round = await queueTurn(db, calls, store, req);
       sent++;
