@@ -377,6 +377,7 @@ export interface CiVsMain {
   main_head: string;
   state: string;
   checks: string;
+  failing: string;
   reason: string | null;
   reads: number;
   first_at: string;
@@ -3286,7 +3287,7 @@ export const COLUMNS = {
   chat_messages: ["id", "conversation_id", "author", "via", "kind", "body", "payload", "workflow_event_id", "turn_id", "workflow_id", "github_comment_id", "at"],
   ci_fixes: ["repo", "number", "head", "to_head", "kind", "state", "reason", "files", "attempt", "task_id", "runs", "created_at", "session", "patch", "lint_task", "lint_round", "lint_state"],
   ci_run_approvals: ["repo", "number", "head_oid", "cross_repo", "runs", "approved", "reread", "failed", "checked_at", "approved_at"],
-  ci_vs_main: ["repo", "number", "head", "main_head", "state", "checks", "reason", "reads", "first_at", "read_at"],
+  ci_vs_main: ["repo", "number", "head", "main_head", "state", "checks", "failing", "reason", "reads", "first_at", "read_at"],
   classifications: ["repo", "number", "classifier", "run_id", "at", "type_label", "want", "reference", "flags", "dup_of", "reason", "probs", "input_hash"],
   classify_state: ["kind", "repo", "number", "value", "at"],
   claude_account_status: ["account_id", "logged_in", "method", "plan", "login_expires_at", "checked_at"],

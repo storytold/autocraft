@@ -5,7 +5,11 @@ import type { LintPrevious } from "../fixup/patch.ts";
 
 /** One failed step of a failed check: the tail of its log. The log is untrusted text from the PR's CI run. */
 export type FailedStep = { job: string; step: string; tail: string };
-export type FailedCheck = { name: string; conclusion: string; runId: number | null; /** When the check run completed (ISO), if GitHub said. */ completedAt?: string | null; steps: FailedStep[] };
+export type FailedCheck = {
+  name: string; conclusion: string; runId: number | null; /** When the check run started and completed (ISO), if GitHub said. */ startedAt?: string | null; completedAt?: string | null; steps: FailedStep[];
+  /** A comparison's reading only (src/cifix/logs.ts CompareRead): the steps reached its cap, or another check run of the head has the same name. */
+  cut?: boolean; duplicate?: boolean;
+};
 /** What the failed required checks of a head said. */
 export type CiFailure = { head: string; checks: FailedCheck[] };
 

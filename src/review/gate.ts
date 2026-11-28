@@ -3,7 +3,8 @@
 import { ciAt } from "../core/evidence.ts";
 import { personReviewSince, roundWaits } from "../core/author-round.ts";
 import { optionalChecksOf } from "../optional-checks.ts";
-import { mainsFailuresOf } from "../mainci/no-new.ts";
+import { ciVsMain, failingAt, vsMainOf, type RedMain } from "../mainci/no-new.ts";
+import type { VsMainRow } from "../data/merge/index.ts";
 import { BLOCKED_EXPIRES_MS, BLOCKS_REVIEW, activeFrom, hasOpenQuestion, loadBlockerReads, type BlockerReads } from "./blockers.ts";
 import { MAX_RERUNS_PER_DAY, maintainerSince, discussionStateOf, nextUtcMidnight, staleMarksOf } from "./discussion.ts";
 import { ourPathIn } from "./ours.ts";
@@ -81,8 +82,8 @@ export async function loadHoldInputs(db: Db, keys: KeySource, nowMs: number) {
 export type HoldInputs = Awaited<ReturnType<typeof loadHoldInputs>> & {
   facts: ReviewFacts;
   optional: (repo: string) => string[];
-  /** The failing checks of `ref` at `head` that fail only where the red main fails (src/mainci/no-new.ts): they do not make CI red. */
-  mains: (ref: string, head: string) => string[];
+  /** The red main and the comparison row of `ref` at `head` (src/mainci/no-new.ts ciVsMain): checks failing only where main fails do not make CI red. */
+  vsMain: (ref: string, head: string) => { red: RedMain | undefined; row: VsMainRow | undefined };
   /** The least minutes between two reviews of one PR. */
   interval: number;
   /** The blockers the holds among the latest reviews name. */
@@ -103,14 +104,14 @@ export type HoldCheck = (repo: string, number: number, head: string, refresh?: (
 /** The hold check of `refs` ("repo#number"; every PR without them), with what it reads loaded once. */
 export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Iterable<string>): Promise<HoldCheck> {
   const keys: KeySource = refs ? [...refs].map((r) => ({ repo: r.slice(0, r.lastIndexOf("#")), number: Number(r.slice(r.lastIndexOf("#") + 1)) })) : { mode: "full" };
-  const [facts, inputs, interval, optional, edges, approvals, workflows, pushes, mains] = await db.together(() => Promise.all([
+  const [facts, inputs, interval, optional, edges, approvals, workflows, pushes, vsMain] = await db.together(() => Promise.all([
     loadReviewFacts(db, keys, { now: nowMs }), loadHoldInputs(db, keys, nowMs), reviewMinInterval(db), optionalChecksOf(db), loadPushEdges(db, keys), loadRunApprovals(db, keys),
-    loadWorkflowFacts(db, keys, { nowMs }), loadOwnPushes(db, keys), mainsFailuresOf(db, keys, nowMs),
+    loadWorkflowFacts(db, keys, { nowMs }), loadOwnPushes(db, keys), vsMainOf(db, keys, nowMs),
   ]));
   const reads = await loadBlockerReads(db, [...facts.latest.values()].filter((r) => r.verdict === "hold").flatMap((r) => r.blocked_by));
   const authorRound = (ref: string, head: string): boolean => roundWaits(workflows.live.get(ref), pushes.get(ref) ?? [], head);
   const personReview = (ref: string): string | null => personReviewSince(workflows.live.get(ref));
-  return holdsFrom({ ...inputs, facts, interval, optional, mains, reads, edges, approvals, authorRound, personReview }, nowMs);
+  return holdsFrom({ ...inputs, facts, interval, optional, vsMain, reads, edges, approvals, authorRound, personReview }, nowMs);
 }
 
 /**
@@ -167,7 +168,8 @@ export function holdsFrom(d: HoldInputs, nowMs: number): HoldCheck {
       }
       settled = true;
     }
-    const ci = ciAt(checks.get(ref), head, { optional: [...optional(repo), ...d.mains(ref, head)], approvedRuns: d.approvals.get(`${ref}@${head}`)?.approved.length ?? 0 });
+    const approvedRuns = d.approvals.get(`${ref}@${head}`)?.approved.length ?? 0;
+    const ci = ciVsMain({ ci: (passing) => ciAt(checks.get(ref), head, { optional: [...optional(repo), ...passing], approvedRuns }), failing: failingAt(checks.get(ref), head, optional(repo)), ...d.vsMain(ref, head), now: nowMs }).ci;
     if (ci === "pending") return { kind: "ci", wait: "CI on the latest commit to finish" };
     const ours = last && last.head !== head ? ourPathIn(d.edges.get(ref) ?? [], last.head, head) : null;
     if (ci === "failure" && last && !settled) {

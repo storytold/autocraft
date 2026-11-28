@@ -17,6 +17,7 @@ import { expectFlat } from "./helpers/query-count.ts";
 import { premergeFix } from "../src/core/decide.ts";
 import { CHECK, OPERATOR, T0, untilQuiet, world, type World } from "./world-db.ts";
 import { addOwnCommits } from "../src/data/control/index.ts";
+import { saveMainHeads } from "../src/data/mirror/index.ts";
 import { loadLegPass } from "../src/data/workflow/index.ts";
 import { queueOriginOf, queuePage } from "../src/dash/api/queue-page.ts";
 import type { Req } from "../src/dash/types.ts";
@@ -342,6 +343,16 @@ describe("pre-approved merge", () => {
     await w.db.run(w.db.k.updateTable("ci_run_approvals").set({ approved: "[]" }));
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 52))?.state, "queued");
+  });
+
+  test("a leg in ci waits while its red CI is compared with a red main's, also once the CI fix gave up", async () => {
+    const w = await (await take(await fresh(), 53)).review(53, { verdict: "take-fix" });
+    await inCi(w, 53);
+    await saveMainHeads(w.db, [{ repo: "app", sha: "mainred", branch: "main", state: "red", failing: JSON.stringify([{ name: CHECK, url: null }]), checks: "[]", committed_at: T0, headline: "Change" }], T0);
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ overall: "failure", checks: JSON.stringify([{ name: CHECK, state: "failure" }]) }).where("number", "=", 53));
+    await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 53, head: "sha53b", kind: "code", state: "capped", reason: "the PR's limit is used", attempt: 1, created_at: T0 }));
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 53))?.state, "ci");
   });
 
   test("an operator fix-up stored for linting is planned for its lint check, and a dropped one ends the request instead of looping", async () => {

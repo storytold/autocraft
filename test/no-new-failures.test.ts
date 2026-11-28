@@ -3,6 +3,8 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { saveMainHeads } from "../src/data/mirror/index.ts";
+import { compareFailures, headFailures } from "../src/mainci/no-new.ts";
+import type { FailedStep } from "../src/cifix/types.ts";
 import { runChecks } from "../src/review/index.ts";
 import { CHECK, T0, world, type World } from "./world-db.ts";
 
@@ -22,7 +24,7 @@ test("while main is red, a PR failing only where main fails is planned to merge 
   const runs: Record<string, string> = { [MAIN]: "100", sha1: "101", sha2: "102" };
   const gh = async (args: string[]): Promise<string> => {
     const sha = /commits\/([^/]+)\/check-runs/.exec(args[1] ?? "")?.[1];
-    if (sha) return JSON.stringify({ check_runs: [{ id: 1, name: CHECK, status: "completed", conclusion: "failure", details_url: `https://github.com/o/app/actions/runs/${runs[sha]}/job/1` }] });
+    if (sha) return JSON.stringify({ check_runs: [{ id: 1, name: CHECK, status: "completed", conclusion: "failure", started_at: "2026-01-03T00:00:00Z", details_url: `https://github.com/o/app/actions/runs/${runs[sha]}/job/1` }] });
     if (args[0] === "run") return log(logs[Object.keys(runs).find((k) => runs[k] === args[2])!]!);
     throw new Error(`unexpected gh ${args.join(" ")}`);
   };
@@ -36,4 +38,24 @@ test("while main is red, a PR failing only where main fails is planned to merge 
   assert.match(one.note ?? "", /fails only where main fails/);
   assert.equal(two.state, "ci-failed");
   assert.ok(!two.actions.some((a) => a.kind === "merge"));
+});
+
+/** One head's reading of check G with the given failed steps. */
+const head = (steps: FailedStep[]) => headFailures({ head: "h", checks: [{ name: "G", conclusion: "failure", runId: 1, startedAt: "2026-01-02T00:00:00Z", steps }] });
+const step = (step: string, lines: string[]): FailedStep => ({ job: "test", step, tail: lines.join("\n") + "\n" });
+const panic = (test: string, at = "crates/core/src/lib.rs:10:5") => `thread '${test}' panicked at ${at}:`;
+
+test("two tests that panic at one line are two failures: one main does not have is new", () => {
+  const main = head([step("cargo test", [panic("tests::a")])]);
+  const pr = head([step("cargo test", [panic("tests::a"), panic("tests::b")])]);
+  assert.equal(compareFailures(pr, main, ["G"]).state, "new");
+  assert.equal(compareFailures(head([step("cargo test", [panic("tests::a")])]), main, ["G"]).state, "not-new");
+});
+
+test("a failure the step keys cannot see is new: a failed step main's check does not have, or a summary test main's does not list", () => {
+  const main = head([step("cargo test", [panic("tests::a")])]);
+  const lint = head([step("cargo test", [panic("tests::a")]), step("cargo clippy", ["error: this could be simpler", "##[error]Process completed with exit code 1."])]);
+  assert.notEqual(compareFailures(lint, main, ["G"]).state, "not-new");
+  const summary = head([step("cargo test", [panic("tests::a"), "", "failures:", "    tests::a", "    tests::c", "", "test result: FAILED. 3 passed; 2 failed; 0 ignored"])]);
+  assert.equal(compareFailures(summary, main, ["G"]).state, "new");
 });

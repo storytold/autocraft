@@ -31,7 +31,8 @@ import { ensureAuthorWrites } from "../fixup/author-permission.ts";
 import { longLivedOf, pushable } from "../fixup/pushable.ts";
 import { repoHasNoCi } from "../merge/no-ci.ts";
 import { optionalChecksOf } from "../optional-checks.ts";
-import { mainsFailuresOf } from "../mainci/no-new.ts";
+import { ciVsMain, failingAt, vsMainOf, type RedMain } from "../mainci/no-new.ts";
+import type { VsMainRow } from "../data/merge/index.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
 import { stoppingDefects } from "../premerge/types.ts";
 import { removeFromBatch } from "../merge/controls.ts";
@@ -349,8 +350,8 @@ type PassFacts = {
   stands: Map<string, Standing>;
   /** The repo's optional checks. */
   optional: (repo: string) => string[];
-  /** The failing checks of `ref` at `head` that fail only where the red main fails (src/mainci/no-new.ts). */
-  mains: (ref: string, head: string) => string[];
+  /** The red main and the comparison row of `ref` at `head` (src/mainci/no-new.ts ciVsMain). */
+  vsMain: (ref: string, head: string) => { red: RedMain | undefined; row: VsMainRow | undefined };
   /** The repo's stale reviews, read once per pass; `refresh`: when that answer changes with the clock alone, per PR. */
   stale: (repo: string) => Promise<{ heads: Set<string>; refresh: Map<string, number> }>;
 };
@@ -370,9 +371,9 @@ async function loadPassFacts(db: Db, { rows, context }: LegPass): Promise<PassFa
   const repos = [...new Set(rows.map((r) => r.repo))];
   const heads = rows.flatMap((r) => (r.head ? [{ repo: r.repo, number: r.number, head: r.head }] : []));
   const fixIds = rows.flatMap((r) => (r.fix_id !== null ? [r.fix_id] : []));
-  const [items, checks, repoRows, merge, fixResults, pushes, wfFacts, reviews, identity, mergeEntryReviews, optional, mains] = await db.together(() => Promise.all([
+  const [items, checks, repoRows, merge, fixResults, pushes, wfFacts, reviews, identity, mergeEntryReviews, optional, vsMain] = await db.together(() => Promise.all([
     loadItems(db, refs, "pr"), loadChecks(db, refs), loadRepos(db, { names: repos }), loadMergeFacts(db, refs), loadOperatorFixResults(db, fixIds),
-    loadOwnPushes(db, refs), loadWorkflowFacts(db, refs), loadReviewsAt(db, heads), githubIdentity(db), loadMergeEntryReviews(db, refs), optionalChecksOf(db), mainsFailuresOf(db, refs),
+    loadOwnPushes(db, refs), loadWorkflowFacts(db, refs), loadReviewsAt(db, heads), githubIdentity(db), loadMergeEntryReviews(db, refs), optionalChecksOf(db), vsMainOf(db, refs),
   ]));
   const acting = rows.flatMap((r) => { const c = context.get(r.id); return [r.by, ...(typeof c === "object" ? wfFacts.actors.get(c.workflowId) ?? [] : [])].map((login) => ({ login, repo: r.repo })); });
   const stands = await standings(db, acting, { identity });
@@ -389,7 +390,7 @@ async function loadPassFacts(db: Db, { rows, context }: LegPass): Promise<PassFa
   const workflows = new Map<number, WorkflowFact>();
   for (const f of [...wfFacts.live.values(), ...wfFacts.ofPr.values()]) workflows.set(f.id, f);
   return {
-    items, checks, merge, fixResults, pushes, mergeEntryReviews, workflows, actors: wfFacts.actors, stands, optional, mains, stale,
+    items, checks, merge, fixResults, pushes, mergeEntryReviews, workflows, actors: wfFacts.actors, stands, optional, vsMain, stale,
     syncedAt: new Map(repos.map((r) => [r, repoRows.get(r)?.synced_at ?? null])),
     reviews: new Map([...reviews].map(([k, v]) => [k, { verdict: v.verdict, sure: v.sure, reason: v.reason, at: v.at, fixes: v.fixes, hold: v.workflow?.hold ?? null, blockedBy: v.blocked_by }])),
   };
@@ -657,7 +658,9 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (r.kind === "bad") return await stop(r.stop);
     const c = pf.checks.get(ref);
     // CI as the planner and the merge step judge it.
-    const ci = ciAt(c, head, { optional: [...pf.optional(p.repo), ...pf.mains(ref, head)], approvedRuns: pf.merge.runs.get(`${ref}@${head}`)?.approved.length ?? 0 });
+    // A head that is still compared with a red main's failures waits for that, as for pending CI (src/mainci/no-new.ts).
+    const approvedRuns = pf.merge.runs.get(`${ref}@${head}`)?.approved.length ?? 0;
+    const ci = ciVsMain({ ci: (passing) => ciAt(c, head, { optional: [...pf.optional(p.repo), ...passing], approvedRuns }), failing: failingAt(c, head, pf.optional(p.repo)), ...pf.vsMain(ref, head), now: Date.now() }).ci;
     if (ci === "unknown") return;
     // CI at this head decides nothing: nothing fixes it before the base is merged in.
     if (c!.mergeable === "CONFLICTING") return await onConflict(db, p, head, await factOf());

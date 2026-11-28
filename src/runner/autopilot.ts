@@ -609,8 +609,9 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       };
       for (const e of queue) if (e.state === "waiting-ci") waits(e.repo, e.number);
       for (const p of plans.prs) if (p.facts.ghState === "OPEN" && p.facts.operator?.ciWait) waits(p.facts.repo, p.facts.number);
-      // A red head due for its comparison with a red main (src/mainci/no-new.ts), in any queue state: the checks job makes it.
-      for (const p of plans.prs) if (p.facts.ghState === "OPEN" && p.facts.vsMain && "comparing" in p.facts.vsMain && p.facts.vsMain.at === null) waits(p.facts.repo, p.facts.number);
+      // A red head due for its comparison with a red main, or for a read again after a check that ran before main turned red (src/mainci/no-new.ts),
+      // in any queue state: the checks job makes it.
+      for (const p of plans.prs) if (p.facts.ghState === "OPEN" && p.facts.vsMain && "at" in p.facts.vsMain && p.facts.vsMain.at === null) waits(p.facts.repo, p.facts.number);
       // A merge job that advanced a batch runs again at once; one that only watched waits.
       const later = async (step: string, repo: string): Promise<boolean> => {
         const last = await lastJobEnd(db, step, repo);

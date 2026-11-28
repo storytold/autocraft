@@ -18,9 +18,9 @@ const ANSI = /(?:\u001b|\^\[)\[[0-9;?]*[A-Za-z]/g;
 const STAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
 const GATE = /gate/i;
 
-type CheckRuns = { check_runs?: { id?: number; name?: string; status?: string; conclusion?: string | null; details_url?: string | null; completed_at?: string | null }[] };
+type CheckRuns = { check_runs?: { id?: number; name?: string; status?: string; conclusion?: string | null; details_url?: string | null; started_at?: string | null; completed_at?: string | null }[] };
 /** `checkId`: the check run's id, which for a GitHub Actions check is its job's id. */
-type Run = { name: string; conclusion: string; runId: number | null; checkId: number | null; completedAt: string | null };
+type Run = { name: string; conclusion: string; runId: number | null; checkId: number | null; startedAt: string | null; completedAt: string | null };
 
 /**
  * The failed check runs of a head. The repos' CI calls the suite's gate workflow, so its checks carry "gate" in their
@@ -34,7 +34,7 @@ type Run = { name: string; conclusion: string; runId: number | null; checkId: nu
 export function failedRuns(reply: CheckRuns, optional: string[] = [], every = false): { runs: Run[]; gates: "passed" | "running" | "none" } {
   const all = reply.check_runs ?? [];
   const failed = all.filter((c) => c.status === "completed" && FAILED.has(c.conclusion ?? "") && !optional.includes(c.name ?? "?"))
-    .map((c) => ({ name: c.name ?? "?", conclusion: c.conclusion ?? "failure", runId: Number(/\/actions\/runs\/(\d+)/.exec(c.details_url ?? "")?.[1]) || null, checkId: c.id ?? null, completedAt: c.completed_at ?? null }));
+    .map((c) => ({ name: c.name ?? "?", conclusion: c.conclusion ?? "failure", runId: Number(/\/actions\/runs\/(\d+)/.exec(c.details_url ?? "")?.[1]) || null, checkId: c.id ?? null, startedAt: c.started_at ?? null, completedAt: c.completed_at ?? null }));
   if (every) return { runs: failed, gates: "none" };
   const gate = failed.filter((c) => GATE.test(c.name));
   const gateChecks = all.filter((c) => GATE.test(c.name ?? ""));
@@ -82,30 +82,30 @@ function stepAt(lines: Lines, from: number): string {
   return UNKNOWN_STEP;
 }
 
-/** The last STEP_TAIL characters of lines [from, to), each ending in a newline, built from the end. */
-function tailOf(lines: Lines, from: number, to: number): string {
+/** The last `cap` characters of lines [from, to), each ending in a newline, built from the end. */
+function tailOf(lines: Lines, from: number, to: number, cap = STEP_TAIL): string {
   const parts: string[] = [];
   let size = 0;
-  for (let i = to - 1; i >= from && size < STEP_TAIL; i--) {
+  for (let i = to - 1; i >= from && size < cap; i--) {
     const l = `${lines.at(i)}\n`;
     parts.push(l);
     size += l.length;
   }
   const tail = parts.reverse().join("");
-  return tail.length > STEP_TAIL ? tail.slice(-STEP_TAIL) : tail;
+  return tail.length > cap ? tail.slice(-cap) : tail;
 }
 
 /** A whole job's failed step: up to its last `##[error]` line before the post-job cleanup, named after the nearest step start above it. */
-function failedTail(job: string, lines: Lines): FailedStep {
+function failedTail(job: string, lines: Lines, cap = STEP_TAIL): FailedStep {
   const end = errorEnd(lines, 0, postStart(lines));
-  return { job, step: stepAt(lines, end - 1), tail: tailOf(lines, 0, end) };
+  return { job, step: stepAt(lines, end - 1), tail: tailOf(lines, 0, end, cap) };
 }
 
 /**
  * `gh run view --log-failed` lines are `job<TAB>step<TAB>text`; groups them per job and step, in order. A job whose lines all name
  * no step (`UNKNOWN STEP`) is cut to its failed step (failedTail).
  */
-export function parseFailedLog(text: string): FailedStep[] {
+export function parseFailedLog(text: string, cap = STEP_TAIL): FailedStep[] {
   const groups = new Map<string, { job: string; step: string; lines: string[] }>();
   for (const line of text.split("\n")) {
     const [job, step, ...rest] = line.split("\t");
@@ -117,7 +117,7 @@ export function parseFailedLog(text: string): FailedStep[] {
   }
   return [...groups.values()].map((g) => {
     const lines = ofArray(g.lines);
-    return g.step === UNKNOWN_STEP ? failedTail(g.job, lines) : { job: g.job, step: g.step, tail: tailOf(lines, 0, lines.length) };
+    return g.step === UNKNOWN_STEP ? failedTail(g.job, lines, cap) : { job: g.job, step: g.step, tail: tailOf(lines, 0, lines.length, cap) };
   });
 }
 
@@ -142,7 +142,7 @@ function jobLines(text: string): Lines {
  * write nothing), each failed step is its own section under its own name; otherwise the log is cut at its last error, named
  * after the nearest step start.
  */
-export function parseJobLog(job: string, text: string, steps: readonly JobStep[] = []): FailedStep[] {
+export function parseJobLog(job: string, text: string, steps: readonly JobStep[] = [], cap = STEP_TAIL): FailedStep[] {
   const lines = jobLines(text);
   const post = postStart(lines);
   const firstPost = steps.findIndex((s) => /^Post /.test(s.name ?? "") || s.name === "Complete job");
@@ -159,11 +159,11 @@ export function parseJobLog(job: string, text: string, steps: readonly JobStep[]
     const out = ran.flatMap((s, k) => {
       if (s.conclusion !== "failure") return [];
       const from = starts[k]!;
-      return [{ job, step: (s.name ?? UNKNOWN_STEP).slice(0, STEP_NAME), tail: tailOf(lines, from, errorEnd(lines, from, starts[k + 1] ?? post)) }];
+      return [{ job, step: (s.name ?? UNKNOWN_STEP).slice(0, STEP_NAME), tail: tailOf(lines, from, errorEnd(lines, from, starts[k + 1] ?? post), cap) }];
     });
     if (out.length) return out;
   }
-  return [failedTail(job, lines)];
+  return [failedTail(job, lines, cap)];
 }
 
 /** `gh run view` refuses a run's log while the run goes on. */
@@ -184,11 +184,20 @@ const GONE = /\bHTTP 410\b/;
 export type Reading = { kind: "failure"; failure: CiFailure } | { kind: "skip"; why: string } | { kind: "unread"; why: string; failure: CiFailure; permanent: boolean };
 
 /**
+ * How a comparison reads (src/mainci/no-new.ts), never shown to a model: every failed check (failedRuns `every`), each failed step
+ * whole up to `cap` characters per step instead of the tails a fix reads; a check whose steps reach it is marked `cut`, and one whose
+ * name another check run of the head also carries is marked `duplicate`.
+ */
+export type CompareRead = { cap: number };
+
+/**
  * Reads the failed checks of `head` and the failed steps' log tails. A head with no failed check run (a commit status
  * or an action_required run failed it), or whose gate checks all passed, is skipped: there is nothing here to fix.
  */
-export async function readFailure(gh: Gh, repo: string, head: string, optional: string[] = [], every = false): Promise<Reading> {
-  const { runs, gates } = failedRuns(JSON.parse(await gh(["api", `repos/${slugOf(repo)}/commits/${head}/check-runs?per_page=100`])) as CheckRuns, optional, every);
+export async function readFailure(gh: Gh, repo: string, head: string, optional: string[] = [], compare?: CompareRead): Promise<Reading> {
+  const reply = JSON.parse(await gh(["api", `repos/${slugOf(repo)}/commits/${head}/check-runs?per_page=100`])) as CheckRuns;
+  const { runs, gates } = failedRuns(reply, optional, !!compare);
+  const cap = compare?.cap ?? STEP_TAIL;
   if (gates === "running") return { kind: "unread", why: "the gate checks are still running", failure: { head, checks: [] }, permanent: false };
   if (gates === "passed") return { kind: "skip", why: "the gate checks passed; only an optional check failed" };
   if (!runs.length) return { kind: "skip", why: "no failed check run at the head (a commit status or a run waiting for approval failed)" };
@@ -203,7 +212,7 @@ export async function readFailure(gh: Gh, repo: string, head: string, optional: 
     if (r.runId !== null && r.conclusion === "failure") {
       if (!logs.has(r.runId)) {
         // GitHub serves a run's log only once the whole run has ended; a completed job's own log is served at once.
-        try { logs.set(r.runId, parseFailedLog(await gh(["run", "view", String(r.runId), "--repo", `${slugOf(repo)}`, "--log-failed"]))); }
+        try { logs.set(r.runId, parseFailedLog(await gh(["run", "view", String(r.runId), "--repo", `${slugOf(repo)}`, "--log-failed"]), cap)); }
         catch (e) {
           const why = firstLine(e);
           if (IN_PROGRESS.test(why)) logs.set(r.runId, "jobs");
@@ -223,7 +232,7 @@ export async function readFailure(gh: Gh, repo: string, head: string, optional: 
             // Without the job's step list the log is still cut at its last error, so a failed read of it is not an unread log.
             let listed: JobStep[] = [];
             try { listed = (JSON.parse(await gh(["api", job])) as { steps?: JobStep[] }).steps ?? []; } catch { listed = []; }
-            steps = parseJobLog(r.name, text, listed);
+            steps = parseJobLog(r.name, text, listed, cap);
           }
         }
       } else {
@@ -234,6 +243,11 @@ export async function readFailure(gh: Gh, repo: string, head: string, optional: 
         if (!steps.length && all.length) gone ??= `the log of run ${r.runId} has no failed step of ${r.name}`;
         else if (!steps.length) unread ??= `the log of run ${r.runId} has no failed step of ${r.name} yet`;
       }
+    }
+    if (compare) {
+      const size = steps.reduce((n, x) => n + x.tail.length, 0);
+      checks.push({ name: r.name, conclusion: r.conclusion, runId: r.runId, startedAt: r.startedAt, completedAt: r.completedAt, steps, ...(size >= compare.cap ? { cut: true } : {}) });
+      continue;
     }
     const kept: FailedStep[] = [];
     let size = 0;
@@ -246,6 +260,11 @@ export async function readFailure(gh: Gh, repo: string, head: string, optional: 
       total += tail.length;
     }
     checks.push({ name: r.name, conclusion: r.conclusion, runId: r.runId, completedAt: r.completedAt, steps: kept });
+  }
+  if (compare) {
+    const names = (reply.check_runs ?? []).map((c) => c.name ?? "?");
+    const duplicates = [...new Set(names.filter((n, i) => names.indexOf(n) !== i))];
+    if (duplicates.length) for (const c of checks) if (duplicates.includes(c.name)) c.duplicate = true;
   }
   if (gone !== null) return { kind: "unread", why: gone, failure: { head, checks }, permanent: true };
   return unread === null ? { kind: "failure", failure: { head, checks } } : { kind: "unread", why: unread, failure: { head, checks }, permanent: false };

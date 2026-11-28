@@ -41,10 +41,9 @@ import { BatchGit } from "./batch-git.ts";
 import { ACTIVE_BATCH, BLOCKED_BY_REVIEW, CLOSED_BY_PERSON, MAX_PUBLISH_FAILURES, PUBLISH_FAILED, RUNS_WAIT_NOTE, BUILD_MAX_MS, MAX_BUILD_TRIES, admits, cancelBuild, retryDelayMs, getBatch, publishBackoffs, publishDelayMs, updateBatch, type BatchMember, type BatchView } from "./batch-store.ts";
 import { firstRefusal, mergeVerdicts } from "./approval.ts";
 import { baseRefusal, recordLiveBase } from "./base.ts";
-import { allowFailedArgs, ciNow, prInfo, mergeRun, DEFAULT_MERGE_COMMAND, type CommandResult } from "./index.ts";
+import { allowFailedArgs, ciNow, commandNote, prInfo, mergeRun, DEFAULT_MERGE_COMMAND, type CommandResult } from "./index.ts";
 import { liveGateChecked } from "../review/discussion.ts";
-import { redMainHeads } from "../mainci/index.ts";
-import { judgeHead, vsMainStatus } from "../mainci/no-new.ts";
+import { baseRed, judgeHead, vsMainStatus } from "../mainci/no-new.ts";
 import { optionalChecks } from "../optional-checks.ts";
 import { buildQueue, type QueueEntry } from "./queue.ts";
 import { planned } from "../core/select.ts";
@@ -567,18 +566,18 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   }
 
   /**
-   * The batch PR's red CI against a red main (src/mainci/no-new.ts), read now when due: the comparison row, null when none applies,
-   * or "wait" while a log is read again after its backoff.
+   * The batch PR's red CI against main at the batch's base (src/mainci/no-new.ts), read now when due: the comparison row, null when none
+   * applies (that head is not red with the failing checks), or "wait" while a log is read again after its backoff.
    */
   async function vsMain(b: BatchView, ch: PrChecks): Promise<VsMainRow | null | "wait"> {
-    const red = (await redMainHeads(db, d.now().getTime())).get(repo);
+    const red = await baseRed(db, repo, b.base_sha);
     const optional = await optionalChecks(db, repo);
     const failing = ch.checks.filter((c) => c.state === "failure" && !optional.includes(c.name)).map((c) => c.name);
     const prev = await loadVsMainAt(db, repo, ch.number, ch.head_oid);
     const st = vsMainStatus({ failing, red, row: prev, now: d.now().getTime() });
     if (st.skip) return null;
-    const row = st.due ? await judgeHead(db, gh, { repo, number: ch.number, head: ch.head_oid, failing, red: red!, prev, now: d.now() }) : st.row;
-    if (row && row.state !== "unread") log(`  ${b.branch}: CI compared with ${branch}'s: ${row.state}${row.reason ? ` (${row.reason})` : ""}`);
+    const row = st.due ? (await judgeHead(db, gh, { repo, number: ch.number, head: ch.head_oid, failing, red: red!, prev, now: d.now() })).row : st.row;
+    if (row && row.state !== "unread") log(`  ${b.branch}: CI compared with ${branch}'s at the base: ${row.state}${row.reason ? ` (${row.reason})` : ""}`);
     return !row || row.state === "unread" ? "wait" : row;
   }
 
@@ -602,14 +601,14 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     }
     const live = members.filter((m) => checks.some((c) => c.number === m.number && c.state === "OPEN" && !c.is_draft && c.head_oid === m.head_oid));
     if (live.length < members.length) return supersede(b, live, "a PR in the batch was closed, merged, pushed to or turned into a draft");
-    let ci = await ciNow(db, repo, ch);
+    let ci = await ciNow(db, repo, ch, b.base_sha);
     let vs: VsMainRow | null = null;
     if (ci === "failure") {
       // While main is red, the batch PR's failing checks are compared with main's: failures only where main fails let it merge.
       const judged = await vsMain(b, ch);
       if (judged === "wait") { s.waiting.push(b.branch); return; }
       vs = judged;
-      if (vs?.state === "not-new") ci = await ciNow(db, repo, ch);
+      if (vs?.state === "not-new") ci = await ciNow(db, repo, ch, b.base_sha);
     }
     if (ci === "failure") return red(b, members, ch.checks.filter((c) => c.state === "failure").map((c) => c.name), vs);
     if (ch.mergeable === "CONFLICTING") return supersede(b, members, `the batch PR conflicts with ${branch}`);
@@ -678,14 +677,14 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       // Every member must still hold at its batched head, and the batch PR at the batch tip.
       const g = await guardBatchMerge(db, { repo, number: b.pr_number!, head: b.commit_sha }, members.map((m) => ({ number: m.number, head: m.head_oid })), by, liveRead);
       if ("refused" in g) { log(`  ${b.branch}: not merged: ${g.refused}`); s.waiting.push(b.branch); return; }
-      const r = await mergeViaCommand(w, d.run, d.mergeCommand, g, { method: "merge", extra: await allowFailedArgs(db, repo, d.mergeCommand, { number: b.pr_number!, head: b.commit_sha }) }, { run: runId, head: b.commit_sha, batch: b.branch }, async () => {
+      const r = await mergeViaCommand(w, d.run, d.mergeCommand, g, { method: "merge", extra: await allowFailedArgs(db, repo, d.mergeCommand, { number: b.pr_number!, head: b.commit_sha, base: b.base_sha }) }, { run: runId, head: b.commit_sha, batch: b.branch }, async () => {
         after = (await refreshChecks(db, d.querier, repo, [b.pr_number!]))[0];
         return after?.state === "MERGED";
       });
       if (r.code !== 0) {
         // The merge may have gone through although the command failed afterwards.
         if (after?.state === "MERGED") return await bookLanded(b, members, q);
-        const why = oneLine(r.stderr) || oneLine(r.stdout) || `exit code ${r.code}`;
+        const why = (oneLine(r.stderr) || oneLine(r.stdout) || `exit code ${r.code}`) + await commandNote(db, repo, d.mergeCommand, { number: b.pr_number!, head: b.commit_sha, base: b.base_sha });
         await updateBatch(db, b.id, at(), { summary: `${d.mergeCommand}: ${why}`.slice(0, 400) });
         log(`  ${b.branch}: refused: ${why}`);
         s.waiting.push(b.branch);

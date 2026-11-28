@@ -2040,7 +2040,9 @@ CREATE INDEX IF NOT EXISTS main_ci_repo_time ON main_ci(repo, committed_at);
 
 -- The failing tests and locations of a red default-branch head, per failed check, from its failure logs (src/mainci/no-new.ts).
 -- One row per head, read once by the first comparison against it. state: read | unread (a log could not be read yet; the next
--- comparison reads it again). keys: JSON {check: [key]}; a key is `test <name>` for a test that panicked, else `<file>:<line>`.
+-- comparison reads it again) | gone (GitHub no longer serves a log: every comparison against it counts as new).
+-- keys: JSON {check: {steps: [{step, keys}], tests, summary, bad, startedAt}} (src/mainci/no-new.ts CheckFailures); a key is
+-- `test <name>` for each test that panicked, else `<file>:<line>`.
 CREATE TABLE IF NOT EXISTS main_ci_failures (
   repo TEXT NOT NULL,
   head_sha TEXT NOT NULL,
@@ -2052,16 +2054,20 @@ CREATE TABLE IF NOT EXISTS main_ci_failures (
 );
 
 -- A PR head's failing required checks compared with the default branch's at its red settled head (main_head), src/mainci/no-new.ts.
--- One row per PR head; a later main head replaces it. state: not-new (every failing check fails on main with no failing test or
--- location main's does not have: CI counts as passing) | new (some failure is not main's) | unread (a log of either side could not
--- be read yet; read again after 5, 15, 60 minutes, then hourly) | unparsed (a log named no test or location, or stayed unreadable
--- for a day: counts as new). checks: JSON [name] of the failing checks found not new (on a new row too: the CI fix leaves them alone).
+-- One row per PR head; a later main head, or a failing check outside `failing`, replaces it. state: not-new (every failing check fails
+-- on main in the same steps with no failing test or location main's does not have: CI counts as passing) | new (some failure is not
+-- main's) | unread (a log of either side could not be read yet; read again after 5, 15, 60 minutes, then hourly) | unparsed (a step
+-- named no test or location, a step or check name did not match main's, a log was over the limit, or stayed unreadable for a day:
+-- counts as new) | early (a failing check's run started before main's head turned red: counts as new; read again on the same backoff
+-- for a rerun). checks: JSON [name] of the failing checks found not new (on a new row too: the CI fix leaves them alone).
+-- failing: JSON [name] of the failing checks the row judged.
 CREATE TABLE IF NOT EXISTS ci_vs_main (
   repo TEXT NOT NULL, number INTEGER NOT NULL,
   head TEXT NOT NULL,
   main_head TEXT NOT NULL,
   state TEXT NOT NULL,
   checks TEXT NOT NULL,
+  failing TEXT NOT NULL,
   reason TEXT,                        -- one line, public-safe
   reads INTEGER NOT NULL,             -- reads of this head against main_head
   first_at TEXT NOT NULL,

@@ -24,8 +24,8 @@ export const MAIN_FIX_BRANCH_PREFIX = "autocraft/main-ci-";
 
 /**
  * Repos whose default branch counts as red (derive()), also while its newest head's checks run after a red result: the settled red
- * head and the checks that failed there, which a PR's failures are compared with (src/mainci/no-new.ts), and the time it stops
- * counting as red when nothing new is read (derive()'s `until`; null: only a new result ends it).
+ * head and the checks that failed there, which a PR's failures are compared with (src/mainci/no-new.ts), when it was seen red, and
+ * the time it stops counting as red when nothing new is read (derive()'s `until`; null: only a new result ends it).
  */
 export async function redMainHeads(db: Db, nowMs: number = Date.now()): Promise<Map<string, RedMain>> {
   const out = new Map<string, RedMain>();
@@ -34,7 +34,9 @@ export async function redMainHeads(db: Db, nowMs: number = Date.now()): Promise<
     if (at?.d.state !== "red") continue;
     let failing: string[] = [];
     try { failing = (JSON.parse(at.settled.failing) as { name?: string }[]).map((f) => f.name ?? "").filter(Boolean); } catch { /* malformed: nothing fails by name */ }
-    out.set(repo, { sha: at.settled.head_sha, failing, until: at.d.until });
+    // When the head was seen red: the change to red when it is red now, else (its checks rerun) when it was first seen.
+    const redAt = at.settled.state === "red" ? at.settled.state_changed_at : at.settled.first_seen_at;
+    out.set(repo, { sha: at.settled.head_sha, failing, until: at.d.until, redAt });
   }
   return out;
 }

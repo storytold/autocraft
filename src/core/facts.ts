@@ -11,7 +11,7 @@ import { pushable, sameRepo } from "../fixup/pushable.ts";
 import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
 import { refereeClosed, settle } from "../classify/settled.ts";
 import { MAIN_FIX_BRANCH_PREFIX } from "../mainci/index.ts";
-import { passingChecks, vsMainStatus } from "../mainci/no-new.ts";
+import { ciVsMain } from "../mainci/no-new.ts";
 import { changesRequestedWhy, GATE_FAILURES, failureNote } from "../merge/changes-requested.ts";
 import { parseFixes } from "../fixup/candidates.ts";
 import { tierKey, tiersOf, type AuthorRef } from "../whitelist.ts";
@@ -200,7 +200,7 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
     const cfg = config(db);
     const ctx: Ctx = {
       now, refresh, stale: await staleOf(false), staleActionable: await staleOf(true), ownPrs, identity: cfg.githubIdentity,
-      holdOf: holdsFrom({ ...d.holds, facts: d.review, optional: (repo) => cfg.repo(repo).optionalChecks, mains: (ref, head) => passingChecks(d.vsMain.get(`${ref}@${head}`), d.mainRed.get(ref.slice(0, ref.lastIndexOf("#")))), interval: minIntervalOf(d.control.settings.get(MIN_INTERVAL_KEY)), reads: d.blockers, edges: new Map([...d.patches].map(([ref, p]) => [ref, p.pushes])), approvals: d.merge.runs,
+      holdOf: holdsFrom({ ...d.holds, facts: d.review, optional: (repo) => cfg.repo(repo).optionalChecks, vsMain: (ref, head) => ({ red: d.mainRed.get(ref.slice(0, ref.lastIndexOf("#"))), row: d.vsMain.get(`${ref}@${head}`) }), interval: minIntervalOf(d.control.settings.get(MIN_INTERVAL_KEY)), reads: d.blockers, edges: new Map([...d.patches].map(([ref, p]) => [ref, p.pushes])), approvals: d.merge.runs,
         authorRound: (ref, head) => roundWaits(d.workflow.live.get(ref), d.ownPushes.get(ref) ?? [], head), personReview: (ref) => personReviewSince(d.workflow.live.get(ref)) }, now),
     };
     const out: PrFacts[] = [];
@@ -283,21 +283,16 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   };
   /**
    * The CI state at `at` and where it stands against a red main: failing checks that fail only where main fails count as passing
-   * (src/mainci/no-new.ts); while that comparison is to be made, or a log is read again, the CI waits for it.
+   * (src/mainci/no-new.ts); while that comparison is to be made, or a log is read again, the CI waits for it. A batch PR is compared
+   * by its merge job, with main at its base.
    */
   const ciVs = (at: string): { ci: CiState; vs: PrFacts["vsMain"] } => {
     const approvedRuns = d.merge.runs.get(`${ref}@${at}`)?.approved.length ?? 0;
-    const plain = ciAt(ch, at, { optional, approvedRuns });
-    if (plain !== "failure") return { ci: plain, vs: null };
-    const st = vsMainStatus({ failing: requiredAt(at).failing, red, row: d.vsMain.get(`${ref}@${at}`), now });
-    if (st.skip) return { ci: plain, vs: null };
-    const passing = passingChecks(st.row, red);
-    if (passing.length) return { ci: ciAt(ch, at, { optional: [...optional, ...passing], approvedRuns }), vs: { passing } };
-    if (!st.row || st.row.state === "unread") {
-      if (st.at !== null) refresh.soon(ref, st.at);
-      return { ci: "pending", vs: { comparing: true, at: st.at } };
-    }
-    return { ci: plain, vs: null };
+    const ci = (passing: string[]): CiState => ciAt(ch, at, { optional: [...optional, ...passing], approvedRuns });
+    if (integration) return { ci: ci([]), vs: null };
+    const r = ciVsMain({ ci, failing: requiredAt(at).failing, red, row: d.vsMain.get(`${ref}@${at}`), now });
+    if (r.vs && "at" in r.vs && r.vs.at !== null) refresh.soon(ref, r.vs.at);
+    return r;
   };
   const ciOf = (at: string): CiState => ciVs(at).ci;
   const isOwn = (author: string | null): boolean => !!author && d.ownLogins.has(author.toLowerCase());
