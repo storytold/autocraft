@@ -3,8 +3,8 @@
 // call (runnerTakes: role rules, write permission by the room's rule roomCanWrite, My repos narrowed by the runner's own
 // list), busy or not. A Manual only user's runner (manual-only.ts) is no taker for automatic work, which it never claims: only
 // for the calls it claims (work its user started or approved, calls bound to its user or taken over, follow-ups and picks). For work
-// its user started or approved (started.ts) a runner is a taker whatever its My repos, tasks and items, and
-// whether or not it is connected and ready. takerTest is the one taker rule: pools and the runner's job starts skip work without a taker, the
+// its user started or approved (started.ts) a runner is a taker whatever its My repos, tasks and items, ready or not, while it
+// holds the work (it reported lately, or its usage limit or cool-off has a known end). takerTest is the one taker rule: pools and the runner's job starts skip work without a taker, the
 // dashboard's minute maintenance runs sweepTakers: a queued call with no taker for NO_TAKER_MS is withdrawn, and pipeline-on
 // repos with no taker are recorded for the remote-no-taker health check. Follow-up turns and calls with a pick that counts
 // keep their own rules (calls.ts awaitCall, picks). A call bound to a user (a maintainer's conversation turn) has a taker only
@@ -14,7 +14,7 @@ import { NO_TAKER_PREFIX } from "./calls.ts";
 import { t, tk } from "../i18n/index.ts";
 import { orderedOf, type Cand } from "./cands.ts";
 import { pickCounts } from "./picks-rules.ts";
-import { heldForOwner, STARTED_HOLD_MS, startedOf } from "./started.ts";
+import { heldForOwner, STARTED_HOLD_MS, startedOf, type OwnerRole } from "./started.ts";
 import { acceptedModels } from "./mode.ts";
 import type { Tier } from "./protocol.ts";
 import { roleFits, runnerTakes } from "./rules.ts";
@@ -93,13 +93,16 @@ export async function waitingOn(db: Db, c: TakerCall, nowMs: number = Date.now()
   return waitingOnIn(await loadView(db, nowMs), c);
 }
 
-/** One person whose Task Runner a call waits for, and why; `until`: for a usage limit, the earliest time one of their runners reported it ends. */
-export type RunnerWait = { login: string; hold: RunnerHold; until: number | null };
+/**
+ * One person whose Task Runner a call waits for, and why; `until`: for a usage limit, the earliest time one of their runners reported it ends;
+ * `role`: their part in the work (StartedCalls.roleOf), which names them to a reader who may not see logins.
+ */
+export type RunnerWait = { login: string; hold: RunnerHold; until: number | null; role?: OwnerRole };
 
 export function waitingOnIn(v: RemoteView, c: TakerCall): RunnerWait[] {
   const runners = takersIn(v), canWrite = canWriteOf(v.snapshot), s = startedOf(v);
   if (runners.some((r) => autoTakes(r, c, canWrite)) || [...s.ownersFor(c)].some((o) => s.canTake(o, c))) return [];
-  return [...s.waitersFor(c)].sort().map((login) => runnerHoldOf(v, login));
+  return [...s.waitersFor(c)].sort().map((login) => ({ ...runnerHoldOf(v, login), role: s.roleOf(login, { refs: c.refs ?? [], repos: c.repos }) }));
 }
 
 /** Why none of `login`'s Task Runners can claim now (RunnerWait), for a login whose runners cannot. */
@@ -117,13 +120,30 @@ export const hhmm = (ms: number): string => new Date(ms).toISOString().slice(11,
 /**
  * The line of work that waits for one person's Task Runner (waitingOnIn, or loginWaitIn's renewal), in the words of the item's state
  * line (src/workflow/waits.ts). `shown`: the reader may see whose runner it is and why it cannot claim (operators and maintainers);
- * others read only that it waits for a Task Runner.
+ * others read the person by role (hiddenWaitText).
  */
 export function runnerWaitText(w: RunnerWait | { login: string; renewsAt: number }, shown: boolean): string {
-  if (!shown) return t("Waiting for a Task Runner");
+  if (!shown) return "renewsAt" in w ? t("Waiting for a Task Runner") : hiddenWaitText(w);
   if ("renewsAt" in w) return t("Waiting for {login}'s Task Runner (login renews at {time} UTC)", { login: w.login, time: hhmm(w.renewsAt) });
   const why = w.until !== null ? t("{hold} until {time} UTC", { hold: t(HOLD_TEXT[w.hold]), time: hhmm(w.until) }) : t(HOLD_TEXT[w.hold]);
   return t("Waiting for {login}'s Task Runner ({why})", { login: w.login, why });
+}
+
+/** A hidden wait line names the person by their part in the work. */
+const ROLE_WAIT: Record<OwnerRole, string> = {
+  approver: tk("Waiting for the approver's Task Runner"), starter: tk("Waiting for the starter's Task Runner"), taker: tk("Waiting for the Task Runner of a person who took the work"),
+};
+const ROLE_OFFLINE: Record<OwnerRole, string> = {
+  approver: tk("Waiting for the approver's Task Runner (offline)"), starter: tk("Waiting for the starter's Task Runner (offline)"), taker: tk("Waiting for the Task Runner of a person who took the work (offline)"),
+};
+
+/**
+ * runnerWaitText for a reader who may not see logins or usage: the person by their role in the work, and only whether their runner is
+ * offline; without a role, that it waits for a Task Runner.
+ */
+export function hiddenWaitText(w: Pick<RunnerWait, "hold" | "role">): string {
+  if (!w.role) return t("Waiting for a Task Runner");
+  return t((w.hold === "offline" ? ROLE_OFFLINE : ROLE_WAIT)[w.role]);
 }
 
 /**

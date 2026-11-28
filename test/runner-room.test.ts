@@ -99,6 +99,8 @@ test("the sweep tells the person whose started work waits for their offline or h
     // Past the hold her runner has gone quiet: one notice about her runner, though the approver has none, naming her role, and not again
     // on the next pass. The implementation bound to her says the same.
     const t1 = t0 + STARTED_HOLD_MS + STATUS_FRESH_MS + 1000;
+    // Its last report is recent enough that it still holds her work (started.ts OWNER_GONE_MS).
+    await report("ready", t0 + STARTED_HOLD_MS - 1000);
     await sweep(t1);
     await sweep(t1 + 60_000);
     assert.deepEqual(await notices(7), ["No Task Runner can take this right now (the starter's Task Runner is not connected). It starts when one is free."]);

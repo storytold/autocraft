@@ -47,10 +47,10 @@ test("queued work about an item: no taker gives the no-taker line, work held for
   const until = new Date(Date.now() + 3_600_000).toISOString();
   await storeStatus(db, token, "mira", parseStatus({ slots: 1, busy: 0, readiness: "quota-held", until, harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
   assert.equal((await why(true)).call, `Waiting for mira's Task Runner (usage limit until ${until.slice(11, 16)} UTC)`);
-  assert.equal((await why(false)).call, "Waiting for a Task Runner", "a viewer reads no login or quota");
+  assert.equal((await why(false)).call, "Waiting for the starter's Task Runner", "a viewer reads no login or quota");
   const wf = (await liveWorkflow(db, "app", 5))!;
   assert.equal(await legWait(db, wf, Date.now(), { shown: true }), "Waiting for mira's Task Runner (usage limit)");
-  assert.equal(await legWait(db, wf, Date.now(), { shown: false }), "Waiting for a Task Runner", "the item's state line names no account to a viewer");
+  assert.equal(await legWait(db, wf, Date.now(), { shown: false }), "Waiting for the starter's Task Runner", "the item's state line names no account to a viewer");
 
   // Her runner is ready: other runners pass the call over for her.
   await storeStatus(db, token, "mira", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));

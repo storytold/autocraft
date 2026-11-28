@@ -1,5 +1,6 @@
 // A queued call whose only taker went away is withdrawn after NO_TAKER_MS; its caller skips the unit without a failure, and
 // the remote-no-taker health check names the repo. A Manual only Task Runner is no taker for automatic work, only for the work it claims.
+// An approver's Task Runner holds the work they approved while it reports, and stops holding it once silent past OWNER_GONE_MS.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -7,11 +8,12 @@ import { test } from "node:test";
 import { pool } from "../src/classify/run.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { computeChecks } from "../src/health-checks.ts";
-import { awaitCall, enqueueCall } from "../src/remote/calls.ts";
+import { awaitCall, enqueueCall, withdrawCall } from "../src/remote/calls.ts";
 import { parseStatus, STATUS_FRESH_MS, storeStatus } from "../src/remote/helpers.ts";
 import { setManualOnly } from "../src/remote/manual-only.ts";
 import { claimCall } from "../src/remote/calls.ts";
 import { PROTOCOL_VERSION } from "../src/remote/protocol.ts";
+import { OWNER_GONE_MS } from "../src/remote/started.ts";
 import { NO_TAKER_MS, sweepTakers, takerTest } from "../src/remote/takers.ts";
 import { leaseSkips } from "../src/runner/leases.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -97,5 +99,47 @@ test("a Manual only runner is no taker for an automatic call, which is withdrawn
   const takes = takerTest(db, t1);
   assert.ok(await takes({ prompt_id: "postmerge.opus", repos: ["fontcraft"], step: "postmerge" }), "a post-merge job of his merged PR has his runner");
   assert.equal(await takes({ prompt_id: "review.opus", repos: ["fontcraft"], step: "opus-review" }), false, "an automatic review there has none");
+  await db.close();
+});
+
+test("approved work goes to the approver's runner first while it reports, and to any runner that allows it once that runner is silent", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-no-taker-approved-")), "t.db"));
+  for (const login of ["dave", "erin"]) {
+    await db.run(db.k.insertInto("access").values({ login, role: "maintainer" }));
+    await db.run(db.k.insertInto("repo_permissions").values({ login, repo: "photocraft", permission: "write", checked_at: new Date().toISOString() }));
+  }
+  const t0 = Date.now();
+  const tokens = { dave: (await createToken(db, "dave", "helper", { kind: "runner" })).row.id, erin: (await createToken(db, "erin", "helper", { kind: "runner" })).row.id };
+  const ready = (login: "dave" | "erin", at: number) => storeStatus(db, tokens[login], login, parseStatus({ slots: 2, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }), at);
+  await ready("dave", t0);
+  await ready("erin", t0);
+  // Dave's own settings take no automatic work: his approval alone sends the calls to his runner.
+  await setManualOnly(db, "dave", true);
+  const at = new Date(t0).toISOString();
+  for (const number of [8, 9]) await db.run(db.k.insertInto("item_workflows").values({ repo: "photocraft", number, kind: "pr", entry: "merge", weight: 5, state: "running", started_by: "dave", approved_by: "dave", started_at: at, started_via: "github", plan: "[]", updated_at: at } as never));
+  const call = (number: number) => enqueueCall(db, { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", items: [{ repo: "photocraft", number }], level: 0, maxAttempts: 1,
+    bundle: { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 60, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} } }, t0);
+  const first = await call(8), second = await call(9);
+  let n = 0;
+  const claim = async (login: "dave" | "erin", when: number) => (await claimCall(db, { tokenId: tokens[login], login, role: "maintainer" },
+    { requestId: `approved-claim-${++n}`, protocol: PROTOCOL_VERSION, helperVersion: "9.9.9", harness: "claude", harnessVersion: "2.1", tiers: { top: "opus" } }, async () => true, when)).lease?.id ?? null;
+  const sweep = async (when: number): Promise<number> => { await db.run(db.k.updateTable("remote_calls").set({ seen_at: when }).where("id", "=", second)); return await sweepTakers(db, when); };
+  const marked = async () => (await db.get(db.k.selectFrom("remote_calls").select("no_taker_since as s").where("id", "=", second)))!.s !== null;
+
+  assert.equal(await claim("erin", t0), null, "erin's runner passes dave's work over while his runner can take it");
+  assert.equal(await claim("dave", t0), first);
+  await withdrawCall(db, first, "test", ["leased"], t0);
+
+  // Neither runner reports any more. Dave's runner still holds his work for a while, so the call waits for it.
+  const t1 = t0 + STATUS_FRESH_MS + 1000;
+  await sweep(t1);
+  assert.equal(await marked(), false, "a runner that reported lately still holds its approver's work");
+  // Silent past OWNER_GONE_MS, it holds nothing: with no other taker the call is marked for the no-taker withdrawal.
+  const t2 = t0 + OWNER_GONE_MS + 1000;
+  await sweep(t2);
+  assert.equal(await marked(), true, "a silent approver's runner holds nothing");
+  // Erin's runner comes back and may take photocraft: it takes the call.
+  await ready("erin", t2);
+  assert.equal(await claim("erin", t2), second);
   await db.close();
 });

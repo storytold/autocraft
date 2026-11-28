@@ -15,7 +15,7 @@ import type { ActionKind } from "../core/plan.ts";
 import type { Db } from "../db/index.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { t, tk } from "../i18n/index.ts";
-import { loginWaitIn, takerTestIn, waitingOnIn, type RunnerHold } from "../remote/takers.ts";
+import { hiddenWaitText, loginWaitIn, takerTestIn, waitingOnIn, type RunnerHold } from "../remote/takers.ts";
 import { loadQueue } from "../data/runners/index.ts";
 import { loadView } from "../remote/view.ts";
 import type { ItemWorkflow } from "./types.ts";
@@ -114,7 +114,7 @@ async function legLines(db: Db, wfs: readonly Waiter[], nowMs: number, shown: bo
     const call = { prompt_id: "", repos: [w.repo], step, refs: [{ repo: w.repo, number }] };
     if (!takes(call)) { add(w.id, t("Waiting for the {step}: no Task Runner can take it", { step: t(STEP_WORD[step]!) })); continue; }
     const [first] = waitingOnIn(view, call);
-    if (first) { add(w.id, shown ? t("Waiting for {login}'s Task Runner ({why})", { login: first.login, why: t(HOLD_WORD[first.hold]) }) : t("Waiting for a Task Runner")); continue; }
+    if (first) { add(w.id, shown ? t("Waiting for {login}'s Task Runner ({why})", { login: first.login, why: t(HOLD_WORD[first.hold]) }) : hiddenWaitText(first)); continue; }
     const renew = queued.has(`${w.repo}#${number}`) ? loginWaitIn(view, call) : null;
     if (renew) add(w.id, shown ? t("Waiting for {login}'s Task Runner (login renews at {time} UTC)", { login: renew.login, time: new Date(renew.at).toISOString().slice(11, 16) }) : t("Waiting for a Task Runner"));
   }

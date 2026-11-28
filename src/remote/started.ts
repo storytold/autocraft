@@ -5,8 +5,10 @@
 // their runners is fresh, ready and not cooling off, offers the call's tier and may take it (role rules, write permission, a
 // token whose model did not decline it), other users' runners pass the call over, for at most STARTED_HOLD_MS from its
 // queueing (calls.ts claimOrder, takers.ts sweepTakers). Then, or when no owner can take it, any runner takes it under all
-// its own limits. For the taker rule (takers.ts) an owner's runner counts connected or not, ready or not: the work waits for
-// it rather than being reported as having no taker. Registered as a wait in src/stages/registry.ts. A call of the post-merge
+// its own limits. For the taker rule (takers.ts) an owner's runner counts ready or not while it holds the work (holdsWork: it
+// reported within OWNER_GONE_MS, or its usage limit or cool-off has a known end): the work waits for it rather than being reported
+// as having no taker. An owner's runner silent for longer holds nothing: the call goes to any runner its settings allow, or the
+// no-taker withdrawal ends it, until that runner reports again. Registered as a wait in src/stages/registry.ts. A call of the post-merge
 // review step on a merged PR is such work too: of the starter and approver of the workflow that ended done through that merge, for
 // MERGED_WORK_MS after its last write (src/data/workflow/fragments.ts endedByMerge, which the lease's condition reads too).
 // A person who took a live workflow's work onto their Task Runner (`take`, src/data/workflow/item-runners.ts) is one of its
@@ -22,12 +24,25 @@ import type { Entry } from "../workflow/types.ts";
 import { judges, roleFits } from "./rules.ts";
 import { taskOfStep } from "./my-tasks.ts";
 import type { Tier } from "./protocol.ts";
-import { IDLE_FRESH_MS, LIVE_LEASE_MS, MAINFIX_STEP, POSTMERGE_STEP, takeableBound } from "../data/runners/index.ts";
+import { IDLE_FRESH_MS, LIVE_LEASE_MS, MAINFIX_STEP, POSTMERGE_STEP, takeableBound, type RunnerRow, type RunnerSnapshot } from "../data/runners/index.ts";
 import { scaled } from "./time-scale.ts";
 import { canWriteOf, freshReady, loadView, settingsOf, tiersOf, type RemoteView } from "./view.ts";
 
 /** How long other users' runners pass a started call over for its owner, from its queueing. */
 export const STARTED_HOLD_MS = scaled(10 * 60_000);
+
+/** How long after its last status an owner's Task Runner still holds their started work for the taker rule (holdsWork). */
+export const OWNER_GONE_MS = scaled(10 * 60_000);
+
+/**
+ * Whether a runner credential still holds its user's started work for the taker rule: it reported within OWNER_GONE_MS (or, never
+ * reported, was made within it: its runner is being set up), or its last report was a usage limit or cool-off with an end still ahead,
+ * or its user cools off until a known time.
+ */
+const holdsWork = (s: RunnerSnapshot, r: RunnerRow, now: number): boolean =>
+  (r.reportedAt ?? Date.parse(r.createdAt)) >= now - OWNER_GONE_MS
+  || ((r.readiness === "quota-held" || r.readiness === "cooled-off") && r.until !== null && Date.parse(r.until) > now)
+  || Date.parse(s.cooled.get(r.login.toLowerCase())?.until ?? "") > now;
 
 /** The My tasks ids (my-tasks.ts) of the steps a live workflow of each entry runs. */
 const ENTRY_TASKS: Record<Entry, ReadonlySet<string>> = {
@@ -61,9 +76,9 @@ export type StartedCalls = {
    */
   ownersFor: (c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; tier?: Tier }) => ReadonlySet<string>;
   /**
-   * The lowercase logins whose started work a call or job is (as ownersFor) and who have a runner token, connected or not, ready
-   * or not, cooling off or not, that may take it once it claims: the role rules, write permission, and its tier among the models
-   * the runner last reported (any tier before its first report). The taker rule counts them, so the work waits for their runner.
+   * The lowercase logins whose started work a call or job is (as ownersFor) and who have a runner token that holds the work (holdsWork),
+   * ready or not, that may take it once it claims: the role rules, write permission, and its tier among the models the runner last
+   * reported (any tier before its first report). The taker rule counts them, so the work waits for their runner.
    */
   waitersFor: (c: { prompt_id: string; repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; tier?: Tier }) => ReadonlySet<string>;
   /**
@@ -73,7 +88,11 @@ export type StartedCalls = {
    * (`refusedToken`). The lease's side is boundTakeAllows in src/data/runners/cross.ts.
    */
   boundTakers: (c: { prompt_id: string; refs: readonly ItemRef[]; forLogin: string; tier?: Tier; refusedToken?: number | null }) => ReadonlySet<string>;
+  /** The part one of a call's people has in its work, to name them to a reader who may not see logins: approver, else starter, else taker. */
+  roleOf: (login: string, c: { refs: readonly ItemRef[]; repos: readonly string[] }) => OwnerRole;
 };
+
+export type OwnerRole = "approver" | "starter" | "taker";
 
 const NONE: ReadonlySet<never> = new Set();
 
@@ -115,7 +134,7 @@ export function readyWithRoom(v: RemoteView, login: string, tier?: Tier, exceptT
 function buildStarted(v: RemoteView): StartedCalls {
   const { snapshot, accepted, now: nowMs } = v;
   const { live, prs, merged } = snapshot.started;
-  const byItem = new Map<string, Set<string>>(), byMerged = new Map<string, Set<string>>();
+  const byItem = new Map<string, Set<string>>(), byMerged = new Map<string, Set<string>>(), approvers = new Map<string, Set<string>>();
   const add = (to: Map<string, Set<string>>, repo: string, number: number, logins: (string | null)[]) => {
     const key = `${repo}#${number}`;
     let s = to.get(key);
@@ -135,10 +154,14 @@ function buildStarted(v: RemoteView): StartedCalls {
   const taken = new Map<string, Row[]>();
   for (const { repo, number, w } of [...live.map((w) => ({ repo: w.repo, number: w.number, w })), ...prs.map((w) => ({ repo: w.repo, number: w.prNumber, w }))]) {
     add(byItem, repo, number, [w.started_by, w.approved_by]);
+    add(approvers, repo, number, [w.approved_by]);
     const key = `${repo}#${number}`;
     if (w.taken_by?.length) (taken.get(key) ?? taken.set(key, []).get(key)!).push(w);
   }
-  for (const p of merged) add(byMerged, p.repo, p.prNumber, [p.started_by, p.approved_by]);
+  for (const p of merged) {
+    add(byMerged, p.repo, p.prNumber, [p.started_by, p.approved_by]);
+    add(approvers, p.repo, p.prNumber, [p.approved_by]);
+  }
   // Who approved Fix red main, by repo: the main-fix step's item-less calls there are theirs.
   const fixers = new Map<string, string>(snapshot.started.mainfix.map((a) => [a.repo, a.by.toLowerCase()]));
   const approvedFix = (repos: readonly string[], step?: string): ReadonlySet<string> => {
@@ -155,9 +178,10 @@ function buildStarted(v: RemoteView): StartedCalls {
     runnersOf.set(login, u);
   }
   const runnerLogins = [...runnersOf.keys()];
-  // Every runner token, by login: its tiers as last reported, null before its first report.
+  // Every runner token that holds its user's started work, by login: its tiers as last reported, null before its first report.
   const tokensOf = new Map<string, { role: string; tiers: (Set<Tier> | null)[] }>();
   for (const r of snapshot.runners) {
+    if (!holdsWork(snapshot, r, nowMs)) continue;
     const login = r.login.toLowerCase();
     const u = tokensOf.get(login) ?? { role: r.role ?? "", tiers: [] };
     u.tiers.push(r.reportedAt === null ? null : tiersOf(r.models, accepted));
@@ -198,6 +222,11 @@ function buildStarted(v: RemoteView): StartedCalls {
   const deniedOn = (login: string, repos: readonly string[]): boolean => repos.some((x) => !canWrite(login, x));
   return {
     owners, runnerLogins,
+    roleOf: (login, c) => {
+      const key = login.toLowerCase();
+      if (c.refs.some((r) => approvers.get(`${r.repo}#${r.number}`)?.has(key)) || c.repos.some((x) => fixers.get(x) === key)) return "approver";
+      return c.refs.some((r) => byItem.get(`${r.repo}#${r.number}`)?.has(key) || byMerged.get(`${r.repo}#${r.number}`)?.has(key)) ? "starter" : "taker";
+    },
     tiersOf: (login) => new Set([...runnersOf.get(login.toLowerCase())?.tokens.values() ?? []].flatMap((t) => [...t])),
     canTake: (login, c) => {
       const u = runnersOf.get(login.toLowerCase());
