@@ -7,7 +7,7 @@
 import type { Gh } from "../merge/safe-merge.ts";
 import type { CiFailure, FailedCheck } from "../cifix/types.ts";
 import { readFailure, type Reading } from "../cifix/logs.ts";
-import { summaryTests, testLocations } from "../core/failure-locations.ts";
+import { crashed, failedTargets, summaryTests, testLocations } from "../core/failure-locations.ts";
 import type { CiState } from "../core/evidence.ts";
 import { CIFIX_UNREAD_DELAYS_MS, passesNote, repeatAfter } from "../core/rules.ts";
 import { optionalChecks } from "../optional-checks.ts";
@@ -17,18 +17,19 @@ import { redMainHeads } from "./index.ts";
 import type { PrChecks } from "../review/checks.ts";
 import type { KeySource } from "../data/keys.ts";
 import type { Db } from "../db/index.ts";
+import { slugOf } from "../owners.ts";
 
 /**
  * A red default-branch head a PR's failures are compared with: its sha, the checks that failed there, when it stops counting as red
- * with nothing new read (null: only a new result ends it), and when it was seen red (null: no check of run start times).
+ * with nothing new read (null: only a new result ends it), and when it was seen red (null: no check of the runs' creation).
  */
 export type RedMain = { sha: string; failing: string[]; until: number | null; redAt: string | null };
 
 /** Failures per check of one head. */
 export type HeadFailures = Record<string, CheckFailures>;
 
-/** The facts' view of a red head against a red main: failing checks that let CI pass, a comparison to make, or a read again for a rerun. */
-export type VsFact = { passing: string[] } | { comparing: true; at: number | null } | { rerun: true; at: number | null } | null;
+/** The facts' view of a red head against a red main: failing checks that let CI pass, or a comparison to make. */
+export type VsFact = { passing: string[] } | { comparing: true; at: number | null } | null;
 
 /** A PR head stays unread this long after its first unread read; then its failure counts as new. */
 export const VS_MAIN_UNREAD_END_MS = 24 * 3600_000;
@@ -38,13 +39,16 @@ export const COMPARE_CAP = 2_000_000;
 /** The identity of a failure: each panicking test by name (its line moves with edits), a failure of no named test by file and line. */
 const keyOf = (l: { file: string; line: number; test: string | null }): string => (l.test ? `test ${l.test}` : `${l.file}:${l.line}`);
 
-/** One failed check as a comparison reads it: its failed steps' keys, its failing tests (summary and panics), and why it cannot be compared. */
+/**
+ * One failed check as a comparison reads it: per failed step its keys, the test targets cargo reports failed and whether a test binary
+ * died; its failing tests (summary and panics), and why it cannot be compared.
+ */
 export function checkFailures(c: FailedCheck): CheckFailures {
-  const steps = c.steps.map((s) => ({ step: s.step, keys: [...new Set(testLocations(s.tail, Infinity, true).places.map(keyOf))] }));
+  const steps = c.steps.map((s) => ({ step: s.step, keys: [...new Set(testLocations(s.tail, Infinity, true).places.map(keyOf))], targets: failedTargets(s.tail), crash: crashed(s.tail) }));
   const summary = summaryTests(c.steps.map((s) => s.tail).join("\n"));
   const tests = [...new Set([...(summary ?? []), ...steps.flatMap((s) => s.keys.filter((k) => k.startsWith("test ")).map((k) => k.slice(5)))])];
   const bad = c.cut ? "its log is over the comparison's limit" : c.duplicate ? "more than one check run carries its name" : null;
-  return { steps, tests, summary, bad, startedAt: c.startedAt ?? null };
+  return { steps, tests, summary, bad, runId: c.runId };
 }
 
 export function headFailures(f: CiFailure): HeadFailures {
@@ -53,10 +57,11 @@ export function headFailures(f: CiFailure): HeadFailures {
 
 /**
  * Compares a PR head's failing required checks (`failing`) with main's. not-new: each fails on main, and every failed step of it is a
- * failed step of main's check that names at least one failing test or location, all of them main's, and its test summary lists only
- * tests main's lists. new: a check passes on main, or names a test or location main's does not. unparsed: a step names nothing or does
- * not fail on main, a log is over the limit or a check name is not unique. early: otherwise not new, but a check's run started before
- * main's head was seen red (`redAt`). `checks`: the failing checks found not new.
+ * failed step of main's check that names at least one failing test or location, all of them main's, and only test targets main's
+ * step reports failed; its test summary lists only tests main's lists. new: a check passes on main, or names a test, location or target
+ * main's does not. unparsed: a step names nothing or does not fail on main, a test binary died in a step where main's did not, a log is
+ * over the limit or a check name is not unique. early (final, counts as new): otherwise not new, but a check's workflow run is a rerun or
+ * was created before main's head was seen red (`redAt`): a rerun keeps the merge commit it first ran on. `checks`: the failing checks found not new.
  */
 export function compareFailures(pr: HeadFailures, main: HeadFailures, failing: readonly string[], redAt: string | null = null): { state: "not-new" | "new" | "unparsed" | "early"; checks: string[]; reason: string } {
   const notNew: string[] = [];
@@ -76,11 +81,15 @@ export function compareFailures(pr: HeadFailures, main: HeadFailures, failing: r
       const theirs = new Set(ms.flatMap((x) => x.keys));
       const extra = s.keys.find((k) => !theirs.has(k));
       if (extra) { fresh ??= `${c} fails at ${extra}, which main does not`; ok = false; break; }
+      const targets = new Set(ms.flatMap((x) => x.targets));
+      const target = s.targets.find((t) => !targets.has(t));
+      if (target) { fresh ??= `${c} fails test target ${target}, which main does not`; ok = false; break; }
+      if (s.crash && !ms.some((x) => x.crash)) { unparsed ??= `a test binary of ${c} did not exit normally in "${s.step}", where main's exited`; ok = false; break; }
     }
     if (!ok) continue;
     const test = p.summary?.find((t) => !m.tests.includes(t));
     if (test) { fresh ??= `${c} fails test ${test}, which main does not`; continue; }
-    if (redAt && (!p.startedAt || p.startedAt <= redAt)) { early ??= `${c} ran before main turned red; compared again after it reruns`; continue; }
+    if (redAt && !(p.run && p.run.attempt === 1 && p.run.createdAt > redAt)) { early ??= `${c} ran on a merge commit from before main turned red (a push or a base update runs it afresh)`; continue; }
     notNew.push(c);
   }
   if (fresh) return { state: "new", checks: notNew, reason: fresh };
@@ -92,7 +101,7 @@ export function compareFailures(pr: HeadFailures, main: HeadFailures, failing: r
 /**
  * Where a head whose CI is red stands against a red main: `skip` when no comparison applies (main is not red, nothing fails, or a
  * failing check passes on main by name, so the failure is new without a read); `due` when it is to be read (no row against main's
- * head, a failing check the row did not judge, or an unread or early row whose backoff ended), else `at` when such a row is read again.
+ * head, a failing check the row did not judge, or an unread row whose backoff ended), else `at` when such a row is read again.
  * `row` is the row that still holds.
  */
 export function vsMainStatus(o: { failing: readonly string[]; red: RedMain | undefined; row: VsMainRow | null | undefined; now: number }):
@@ -101,7 +110,7 @@ export function vsMainStatus(o: { failing: readonly string[]; red: RedMain | und
   if (!red || !failing.length || failing.some((n) => !red.failing.includes(n))) return { skip: true };
   const row = o.row && o.row.mainHead === red.sha && failing.every((n) => o.row!.failing.includes(n)) ? o.row : null;
   if (!row) return { skip: false, due: true, at: null, row: null };
-  if (row.state !== "unread" && row.state !== "early") return { skip: false, due: false, at: null, row };
+  if (row.state !== "unread") return { skip: false, due: false, at: null, row };
   const at = repeatAfter(Date.parse(row.readAt), row.reads, CIFIX_UNREAD_DELAYS_MS);
   return { skip: false, due: at <= o.now, at: at > o.now ? at : null, row };
 }
@@ -117,7 +126,7 @@ export const mainsChecks = (row: VsMainRow | null | undefined, mainSha: string |
 /**
  * The CI state of a head against a red main, for the planner, the review gate and pre-approved legs alike. `ci(passing)` is ciAt with
  * those failing checks counted as optional. Failing checks found not new pass; while a comparison is to be made (or a log read again)
- * CI is pending; an early row is red CI that is compared again after its backoff.
+ * CI is pending.
  */
 export function ciVsMain(o: { ci: (passing: string[]) => CiState; failing: string[]; red: RedMain | undefined; row: VsMainRow | null | undefined; now: number }): { ci: CiState; vs: VsFact } {
   const plain = o.ci([]);
@@ -127,7 +136,6 @@ export function ciVsMain(o: { ci: (passing: string[]) => CiState; failing: strin
   const passing = passingChecks(st.row, o.red?.sha);
   if (passing.length) return { ci: o.ci(passing), vs: { passing } };
   if (!st.row || st.row.state === "unread") return { ci: "pending", vs: { comparing: true, at: st.at } };
-  if (st.row.state === "early") return { ci: plain, vs: { rerun: true, at: st.at } };
   return { ci: plain, vs: null };
 }
 
@@ -201,7 +209,7 @@ async function mainFailures(db: Db, gh: Gh, repo: string, red: RedMain, optional
  */
 export async function judgeHead(db: Db, gh: Gh, o: { repo: string; number: number; head: string; failing: readonly string[]; red: RedMain; prev: VsMainRow | null; now: Date }): Promise<{ row: VsMainRow; mainUnread: boolean }> {
   const at = o.now.toISOString();
-  const prev = o.prev && o.prev.mainHead === o.red.sha && (o.prev.state === "unread" || o.prev.state === "early") ? o.prev : null;
+  const prev = o.prev && o.prev.mainHead === o.red.sha && o.prev.state === "unread" ? o.prev : null;
   const base = { repo: o.repo, number: o.number, head: o.head, mainHead: o.red.sha, failing: [...o.failing], reads: (prev?.reads ?? 0) + 1, firstAt: prev?.firstAt ?? at, readAt: at };
   const save = async (r: VsMainRow, mainUnread = false): Promise<{ row: VsMainRow; mainUnread: boolean }> => { await saveVsMain(db, r); return { row: r, mainUnread }; };
   const unread = (why: string, permanent: boolean, mainUnread = false) => {
@@ -215,7 +223,21 @@ export async function judgeHead(db: Db, gh: Gh, o: { repo: string; number: numbe
     const reading = await readFailure(gh, o.repo, o.head, optional, { cap: COMPARE_CAP });
     if (reading.kind === "unread") return await unread(reading.why, reading.permanent);
     if (reading.kind === "skip") return await save({ ...base, state: "unparsed", checks: [], reason: oneLine(reading.why) });
-    const r = compareFailures(headFailures(reading.failure), main.keys, o.failing, o.red.redAt);
+    const pr = headFailures(reading.failure);
+    // A run whose attempt and creation time decide whether it ran on a merge commit made after main turned red; read once per run.
+    if (o.red.redAt) {
+      const runs = new Map<number, { attempt: number; createdAt: string } | null>();
+      for (const c of o.failing) {
+        const f = pr[c];
+        if (!f || f.runId === null) continue;
+        if (!runs.has(f.runId)) {
+          const r = JSON.parse(await gh(["api", `repos/${slugOf(o.repo)}/actions/runs/${f.runId}`])) as { run_attempt?: number; created_at?: string };
+          runs.set(f.runId, typeof r.run_attempt === "number" && typeof r.created_at === "string" ? { attempt: r.run_attempt, createdAt: r.created_at } : null);
+        }
+        f.run = runs.get(f.runId)!;
+      }
+    }
+    const r = compareFailures(pr, main.keys, o.failing, o.red.redAt);
     return await save({ ...base, state: r.state, checks: r.checks, reason: r.reason });
   } catch (e) {
     return await unread(`the comparison failed: ${oneLine(String((e as Error).message ?? e))}`, false);

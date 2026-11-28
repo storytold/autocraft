@@ -261,10 +261,9 @@ export type PrFacts = {
   ci: string;
   /**
    * The reviewed head's CI against a red default branch (src/mainci/no-new.ts): `passing`, the failing checks that fail only where main
-   * fails and so let CI pass; `comparing` while that comparison is to be made (at once, or after `at` when a log is read again); `rerun`
-   * when a check ran before main turned red: red CI, compared again at once or after `at`. Null otherwise.
+   * fails and so let CI pass; `comparing` while that comparison is to be made (at once, or after `at` when a log is read again). Null otherwise.
    */
-  vsMain: { passing: string[] } | { comparing: true; at: number | null } | { rerun: true; at: number | null } | null;
+  vsMain: { passing: string[] } | { comparing: true; at: number | null } | null;
   mergeable: string;
   /** The mergeable state has read as unknown since `since`, and was read again `rereads` times (src/merge/mergeable.ts); null when it is known. */
   unknown: { since: string; reads: number; rereads: number; stuck: boolean } | null;

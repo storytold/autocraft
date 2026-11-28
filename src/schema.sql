@@ -2057,9 +2057,10 @@ CREATE TABLE IF NOT EXISTS main_ci_failures (
 -- One row per PR head; a later main head, or a failing check outside `failing`, replaces it. state: not-new (every failing check fails
 -- on main in the same steps with no failing test or location main's does not have: CI counts as passing) | new (some failure is not
 -- main's) | unread (a log of either side could not be read yet; read again after 5, 15, 60 minutes, then hourly) | unparsed (a step
--- named no test or location, a step or check name did not match main's, a log was over the limit, or stayed unreadable for a day:
--- counts as new) | early (a failing check's run started before main's head turned red: counts as new; read again on the same backoff
--- for a rerun). checks: JSON [name] of the failing checks found not new (on a new row too: the CI fix leaves them alone).
+-- named no test or location, a step or check name did not match main's, a test binary died where main's did not, a log was over the
+-- limit, or stayed unreadable for a day:
+-- counts as new) | early (a failing check's workflow run is a rerun or was created before main's head turned red, so it ran on an
+-- older merge commit: counts as new, final for the head). checks: JSON [name] of the failing checks found not new (on a new row too: the CI fix leaves them alone).
 -- failing: JSON [name] of the failing checks the row judged.
 CREATE TABLE IF NOT EXISTS ci_vs_main (
   repo TEXT NOT NULL, number INTEGER NOT NULL,

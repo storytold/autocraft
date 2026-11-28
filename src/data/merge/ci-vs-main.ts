@@ -10,7 +10,11 @@ export type VsMainState = "not-new" | "new" | "unread" | "unparsed" | "early";
 /** One PR head against the default branch's red head `mainHead`; `checks` are the failing checks found not new, `failing` those it judged. */
 export type VsMainRow = { repo: string; number: number; head: string; mainHead: string; state: VsMainState; checks: string[]; failing: string[]; reason: string | null; reads: number; firstAt: string; readAt: string };
 /** One failed check of a head as a comparison reads it (src/mainci/no-new.ts). */
-export type CheckFailures = { steps: { step: string; keys: string[] }[]; tests: string[]; summary: string[] | null; bad: string | null; startedAt: string | null };
+export type CheckFailures = {
+  steps: { step: string; keys: string[]; targets: string[]; crash: boolean }[]; tests: string[]; summary: string[] | null; bad: string | null; runId: number | null;
+  /** The check's workflow run (a PR head's only, read by the comparison): its attempt and when it was created. */
+  run?: { attempt: number; createdAt: string } | null;
+};
 /** The failures of a red default-branch head, per failed check (`keys`); unread while a log could not be read, gone when GitHub no longer serves one. */
 export type MainFailures = { repo: string; headSha: string; state: "read" | "unread" | "gone"; keys: Record<string, CheckFailures>; reason: string | null; readAt: string };
 

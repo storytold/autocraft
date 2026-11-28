@@ -75,6 +75,33 @@ const CARGO_RESULT = /^test result: FAILED\b/;
 // nextest's lines for a failed test: `FAIL [   0.004s] my-crate tests::a`, also `TRY 2 FAIL`, `SIGSEGV`, `TIMEOUT` and `(  3/120)` counters.
 const NEXTEST = /^\s*(?:TRY \d+ )?(?:FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGBUS|SIGKILL|ABORT|LEAK-FAIL)\s+\[\s*[\d.]+m?s\]\s+(?:\(\s*\d+\/\s*\d+\)\s+)?\S+\s+(\S+)\s*$/;
 
+// cargo's line for each test binary that failed (also one that crashed without a summary), and its `error: N targets failed:` list.
+const CARGO_TARGET = /^\s*error: test failed, to rerun pass `([^`\n]{1,200})`/;
+const CARGO_TARGETS = /^\s*error: \d+ targets? failed:\s*$/;
+const CARGO_LISTED = /^\s+`([^`\n]{1,200})`\s*$/;
+// A test binary that died: cargo's report of its exit, and Rust's own abort message (stack overflow and the like).
+const CRASH = /process didn't exit successfully|fatal runtime error/;
+
+/** The test targets cargo reports failed in a log (`-p core --lib`, ...), first seen first. */
+export function failedTargets(text: string): string[] {
+  const lines = text.replace(ANSI, "").split(/\r?\n/);
+  const out = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    const t = CARGO_TARGET.exec(lines[i]!);
+    if (t) { out.add(t[1]!); continue; }
+    if (!CARGO_TARGETS.test(lines[i]!)) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      const m = CARGO_LISTED.exec(lines[j]!);
+      if (!m) break;
+      out.add(m[1]!);
+    }
+  }
+  return [...out];
+}
+
+/** Whether a log reports a test binary that did not exit normally. */
+export const crashed = (text: string): boolean => text.replace(ANSI, "").split(/\r?\n/).some((l) => CRASH.test(l));
+
 /**
  * The failing test names of a log's test summaries: cargo's `failures:` list right before `test result: FAILED`, and nextest's failed-test
  * lines. Null when the log has neither. The log is untrusted: only names that are Rust paths are kept.
