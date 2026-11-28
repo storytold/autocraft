@@ -74,3 +74,25 @@ test("a failed workflow run is accepted only when every failed job in it is a li
   const unlisted = await safeMerge("o/r", "5", "--merge", [], [], gh([{ name: sonar, conclusion: "failure" }]), nap);
   assert.equal(unlisted.merged, false);
 });
+
+test("a listed check still running holds no merge, nor does its run while only listed jobs are unfinished", async () => {
+  const sonar = "sonarcloud / SonarCloud Scan";
+  const pr = { state: "OPEN", isDraft: false, mergeable: "MERGEABLE", mergeStateStatus: "UNSTABLE", headRefOid: "abc", statusCheckRollup: [ok, { name: sonar, status: "IN_PROGRESS", conclusion: null }] };
+  const gh = (jobs: { name: string; status: string; conclusion: string | null }[]) => async (args: string[]): Promise<string> => {
+    const json = args[args.indexOf("--json") + 1] ?? "";
+    if (args[1] === "graphql") return JSON.stringify({ data: { repository: { pullRequest: { reviewDecision: null, latestOpinionatedReviews: { nodes: [] } } } } });
+    if (args[1]?.endsWith("/jobs?per_page=100")) return JSON.stringify({ jobs });
+    if (args[0] === "api") return JSON.stringify({ workflow_runs: [{ id: 9, name: "SonarCloud", status: "in_progress", conclusion: null }] });
+    if (json.startsWith("state,isDraft")) return JSON.stringify(pr);
+    if (json.startsWith("author")) return JSON.stringify({ author: { login: "dev" }, commits: [{ authors: [{ login: "dev" }] }] });
+    if (json === "state,mergeCommit") return JSON.stringify({ state: "MERGED", mergeCommit: { oid: "def" } });
+    return "";
+  };
+  const nap = async () => {};
+  const tests = { name: "sonarcloud / Tests 1/4", status: "completed", conclusion: "success" };
+  const scan = { name: sonar, status: "in_progress", conclusion: null };
+  assert.equal((await safeMerge("o/r", "5", "--merge", [sonar], [sonar], gh([tests, scan]), nap)).merged, true);
+  const running = await safeMerge("o/r", "5", "--merge", [sonar], [sonar], gh([{ ...tests, status: "in_progress", conclusion: null }, scan]), nap);
+  assert.deepEqual(running, { merged: false, reason: "REFUSED o/r#5: workflow runs not green:\nSonarCloud: in_progress" });
+  assert.equal((await safeMerge("o/r", "5", "--merge", [], [sonar], gh([tests, scan]), nap)).merged, false);
+});

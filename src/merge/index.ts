@@ -46,10 +46,12 @@ export const DEFAULT_MERGE_COMMAND = "safe-merge";
 
 /**
  * `--allow-failed` for each optional check of the repo and each check of PR `at` that fails only where the red default branch fails
- * (src/mainci/no-new.ts), only for the built-in command (another command may not know the flag).
+ * (src/mainci/no-new.ts), and `--allow-pending` for each optional check, only for the built-in command (another command may not know the flags).
  */
 export async function allowFailedArgs(db: Db, repo: string, cmd: string, at: { number: number; head: string; base?: string }): Promise<string[]> {
-  return cmd === DEFAULT_MERGE_COMMAND ? (await allowedFailures(db, repo, at.number, at.head, at.base)).flatMap((n) => ["--allow-failed", n]) : [];
+  if (cmd !== DEFAULT_MERGE_COMMAND) return [];
+  const [failed, optional] = await db.together(() => Promise.all([allowedFailures(db, repo, at.number, at.head, at.base), optionalChecks(db, repo)]));
+  return [...failed.flatMap((n) => ["--allow-failed", n]), ...optional.flatMap((n) => ["--allow-pending", n])];
 }
 
 /** What a refusal adds when the merge command takes no `--allow-failed` but checks of the PR fail only where the red main fails. */
