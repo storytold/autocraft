@@ -163,6 +163,18 @@ describe("triage", () => {
   });
 });
 
+describe("gate checks", () => {
+  const read = (gate: object) => readFailure(async () => JSON.stringify({ check_runs: [
+    { id: 1, name: "lint", status: "completed", conclusion: "failure" }, { id: 2, name: "ci-gate", ...gate },
+  ] }), "r", "h");
+  test("a failed optional check next to a gate still running is unread; once the gate passed it is skipped", async () => {
+    const running = await read({ status: "in_progress", conclusion: null });
+    assert.equal(running.kind, "unread");
+    assert.equal(running.kind === "unread" && running.permanent, false);
+    assert.equal((await read({ status: "completed", conclusion: "success" })).kind, "skip");
+  });
+});
+
 describe("guard", () => {
   /** A one-hunk git diff of `before` to `after`, at the lines that really change, and the guard's verdict on it. */
   const judge = (before: string, after: string, file = "src/lib.rs", sides = new Map([[file, { before, after }]])) => {

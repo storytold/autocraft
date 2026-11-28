@@ -171,6 +171,19 @@ describe("runner", () => {
     assert.equal((await getJob(db, id)).error, RUNNER_STOPPED);
   });
 
+  test("a graceful stop resumes a job at the resume cap that only waits for a Task Runner to take its queued call, and fails one whose call runs", async () => {
+    const mk = async (callState: string) => {
+      const id = Number((await db.get(db.k.insertInto("jobs").values({ step: "test-echo", params: "{}", requested_by: "boss", requested_at: new Date().toISOString(), state: "running", started_at: new Date().toISOString(), resumes: 12 }).returning("id")))!.id);
+      await db.run(db.k.insertInto("remote_calls").values({ job_id: id, step: "fixup", stage: 7, prompt_id: "fixup.patch", prompt_version: "v", tier: "top", effort: "high", asked_model: "opus", bundle: "{}", state: callState, items: "[]", repo: "app", since: 1, seen_at: 1, queued_since: 1, max_attempts: 2, timeout_ms: 1_200_000 }));
+      return id;
+    };
+    const waiting = await mk("queued"), running = await mk("leased");
+    assert.equal((await endJob(db, waiting, 143, null, null, true))?.state, "queued");
+    assert.equal((await db.get(db.k.selectFrom("jobs").select("resumes").where("id", "=", waiting)))!.resumes, 13);
+    assert.equal((await endJob(db, running, 143, null, null, true))?.state, "failed");
+    assert.equal((await getJob(db, running)).error, RUNNER_STOPPED);
+  });
+
   test("a runner stop while a step writes lets the write finish, and the write it refuses is no failed item: the job resumes", async () => {
     const stopper = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 5000, log: () => {} });
     const job = await enqueue(db, "test-writes", { n: 5 }, "boss");

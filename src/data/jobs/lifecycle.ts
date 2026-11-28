@@ -34,9 +34,17 @@ export async function markCancelRequested(db: Db, ids: number[], by: string): Pr
     .where(kx.inList(db, "id", ids, "bigint")).where("state", "=", "running"))).changes;
 }
 
+/** The job in the enclosing `jobs` statement only waits for a Task Runner: it has a queued remote call and none leased (running). */
+const waitingForTaker = (eb: kx.AnyEb) => {
+  const t = kx.schemaEb(eb);
+  const calls = (state: string[]) => t.selectFrom("main.remote_calls as rc").select(eb.lit(1).as("one")).where("rc.job_id", "=", kx.ref<number>("jobs.id")).where("rc.state", "in", state);
+  return eb.and([eb.exists(calls(["queued"])), eb.not(eb.exists(calls(["leased"])))]);
+};
+
 /**
  * The guarded update of `resumeJob` over many ids: a running job without a cancel request, resumed fewer than
- * MAX_TOTAL_RESUMES times (a crash resume fewer than MAX_RESUMES), not a command-line run and not stopped at its deadline
+ * MAX_TOTAL_RESUMES times (a graceful resume of a job that only waits for a Task Runner to take a queued call is not
+ * limited; a crash resume fewer than MAX_RESUMES), not a command-line run and not stopped at its deadline
  * goes back to the queue. Ids missing from the result did not resume.
  */
 export async function markResumed(db: Db, rows: { id: number; kind: "graceful" | "crash" }[]): Promise<{ id: number; resumes: number; crash_resumes: number; log_path: string | null }[]> {
@@ -44,7 +52,8 @@ export async function markResumed(db: Db, rows: { id: number; kind: "graceful" |
   const q = queryDb(db);
   const one = async (ids: number[], crash: boolean) => await q.all(q.k.updateTable("jobs")
     .set((eb) => ({ state: "queued", resumes: eb("resumes", "+", 1), crash_resumes: crash ? eb("crash_resumes", "+", 1) : eb.ref("crash_resumes"), started_at: null, ended_at: null, pid: null, progress: null, error: null }))
-    .where(kx.inList(db, "id", ids, "bigint")).where("state", "=", "running").where("cancel_requested_at", "is", null).where("resumes", "<", MAX_TOTAL_RESUMES)
+    .where(kx.inList(db, "id", ids, "bigint")).where("state", "=", "running").where("cancel_requested_at", "is", null)
+    .where((eb) => crash ? eb("resumes", "<", MAX_TOTAL_RESUMES) : eb.or([eb("resumes", "<", MAX_TOTAL_RESUMES), waitingForTaker(eb)]))
     .$if(crash, (b) => b.where("crash_resumes", "<", MAX_RESUMES)).where("requested_by", "<>", "cli")
     .where((eb) => eb.or([eb("error", "is", null), eb.and([eb.not(kx.like(db, "error", eb.val("stopped: ran past %"))), eb.not(kx.like(db, "error", eb.val("stopped: no progress for %")))])]))
     .returning(["id", "resumes", "crash_resumes", "log_path"]));

@@ -7,7 +7,7 @@ import { loadJobs } from "../data/jobs/index.ts";
 
 /** A job may resume this many times after an unclean stop (a crash or a kill without the stop signal), which a job that takes the runner down repeatedly causes; a stop past that fails it with RUNNER_STOPPED. */
 export const MAX_RESUMES = 2;
-/** A job may resume this many times in all, graceful restarts (deploys) included: a backstop against an endless loop. */
+/** A job may resume this many times in all, graceful restarts (deploys) included: a backstop against an endless loop. A graceful resume of a job that only waits for a Task Runner to take a queued call (no call leased) is not limited: waiting costs nothing and the resumed run adopts the call again. */
 export const MAX_TOTAL_RESUMES = 12;
 
 /** For a job that resumed: when its current run started (work recorded before that belongs to an earlier run). Null for a job that never resumed. */
