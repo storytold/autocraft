@@ -487,30 +487,43 @@ function instructionTail(words: string): boolean {
 /** Words that open a condition on the command, whatever follows them ("once dylan approves", "before the release"). */
 const LEADING_CONDITION = /^(?:(?:please|pls|just|only)\s+)*(?:once|when|whenever|after|until|till|before|as\s+soon\s+as|if|unless)(?![\w-])/i;
 
-/** Words about the merge itself: instructions holding one leave open where the work ends. A merge conflict or merge commit is code. */
-const MERGE_TALK = /(?<![\w-])(?:merg(?:e|es|ed|ing)(?!\s+(?:conflicts?|markers?|commits?|base))|land(?:ed)?|ship(?:ped)?|goes\s+in|go\s+in|myself|keep\s+(?:it|this|that)\s+open|leave\s+(?:it|this|that)|no\s+rush|before\s+it\s+goes|for\s+me\s+to)(?![\w-])/i;
-/** A negation word. */
-const NEGATION = /(?<![\w-])(?:not|never|no|dont|do not|cannot|cant|wont)(?![\w-])|n't(?![\w-])/i;
-/** A clause that speaks about the work rather than the code: it opens with a negation or with a person ("I'm not sure", "let me look"). */
-const ABOUT_WORK = /^(?:(?:and|then|also|so|just|please|but)\s+)*(?:not|never|no|don't|dont|do not|i|i'm|im|i'll|i'd|i've|we|we're|we'll|we'd|you|you're|let me|let's|lets|let us)(?![\w-])/i;
+// A clause of instructions either describes the code change or speaks about the process around it. Only instructions whose every clause
+// describes the code end in the default merge; a process clause leaves the end open (endInDoubt). The markers err toward the process:
+// a clause about code that uses one ("fix the merge logic so duplicates are not merged") is read as unclear, and nothing runs.
+/** A person, named or addressed: someone the process waits for or reports to. */
+const PROCESS_PERSON = /(?<![\w-])(?:i|i'm|im|i'll|i'd|i've|me|my|mine|we|we're|we'll|we'd|us|our|you|you're|your|let me|let's|lets|let us)(?![\w-])|(?<![\w.-])@[\w-]+/i;
+/** A verb of the process rather than the code; "the review" names what it found. A merge conflict, merge marker or merge commit is code. */
+const PROCESS_WORD = /(?<![\w-])(?:merg(?:e|es|ed|ing)(?!\s+(?:conflicts?|markers?|commits?|base))|land(?:s|ed)?|ship(?:s|ped)?|push(?:es|ed)?|approv(?:e|es|ed|al)|decid(?:e|es|ed)|ping|tell|wait(?:s|ing)?|hold(?:s|ing)?|leave|(?<!(?:the|a|this|that|its|their|our|latest|last)\s+)review(?:s|ed)?|look(?:s|ed)?|check\s+with|goes\s+in|go\s+in|keep\s+(?:it|this|that)\s+open|rush|hurry)(?![\w-])/i;
+/** Words of time, which say when the work happens rather than what it does. */
+const PROCESS_TIME = /(?<![\w-])(?:later|tomorrow|tonight|soon|eventually|someday|sometime|next\s+(?:week|time|release))(?![\w-])|^(?:(?:and|but)\s+)?first(?![\w-])/i;
+/** A condition word, which is about the process when the checks follow it ("once CI is green"); with a person or a process word the clause is already. */
+const PROCESS_CONDITION = /(?<![\w-])(?:as\s+soon\s+as|once|when(?:ever)?|after|before|until|till|if|unless)(?![\w-])(.*)$/i;
+const CHECKS = /(?<![\w-])(?:ci|checks?|green|tests?\s+pass(?:es)?|builds?\s+pass(?:es)?|ready)(?![\w-])/i;
+
+/** The process word of a clause, or null when the clause describes only the code. */
+function processIn(clause: string): string | null {
+  const word = PROCESS_PERSON.exec(clause) ?? PROCESS_WORD.exec(clause) ?? PROCESS_TIME.exec(clause);
+  if (word) return word[0];
+  const cond = PROCESS_CONDITION.exec(clause);
+  return cond && CHECKS.test(cond[1]!) ? cond[0] : null;
+}
 
 /**
- * What in instructions leaves open whether the work ends in a merge, or null: a word about the merge (MERGE_TALK), or a negation or doubt
- * in a clause about the work. A negation in the first clause, or after the subject of a later one ("it should not default to on", "so it
- * does not drop normals"), says what the code should do.
+ * Whether instructions leave open where the work ends: null when every clause describes the code change, else the first clause about the
+ * process and the clauses about the code, as written.
  */
-function endInDoubt(instruction: string): { words: string; /** The clauses with no such word, as written. */ keep: string } | null {
-  const clauses = instruction.split(/[,;.!\n]+|\s+(?=(?:but|though|although)\s)/i).map((c) => c.trim()).filter(Boolean);
+function endInDoubt(instruction: string): { words: string; /** The clauses about the code, as written. */ keep: string } | null {
+  const clauses = instruction.split(/[,;.!\n]+|\s+(?=(?:but|though|although|and|then|as\s+soon\s+as|once|when|whenever|after|before|until|till)\s)/i).map((c) => c.trim()).filter(Boolean);
   let words: string | null = null;
-  const keep = clauses.filter((c, i) => {
+  const keep = clauses.filter((c) => {
     const plain = c.replace(CODE_RE, " ");
-    const talk = MERGE_TALK.exec(plain)?.[0];
-    const person = ABOUT_WORK.exec(plain);
-    const doubt = !!person && (NEGATION.test(plain) || HEDGE.test(plain)) && (i > 0 || !NEGATION.test(person[0]));
-    if (talk || doubt) words ??= plain.replace(/^(?:but|though|although)\s+/i, "");
-    return !talk && !doubt;
+    const about = processIn(plain) !== null || HEDGE.test(plain);
+    if (about) words ??= plain.replace(/^(?:but|though|although|and|then)\s+/i, "");
+    return !about;
   });
-  return words === null ? null : { words, keep: keep.join("; ") };
+  // A condition clause about the code goes back on the clause before it ("the crash when the file is empty").
+  const joined = keep.map((c) => c.replace(/^(?:and|then)\s+/i, "")).reduce((out, c) => (!out ? c : PROCESS_CONDITION.test(c) && PROCESS_CONDITION.exec(c)!.index === 0 ? `${out} ${c}` : `${out}; ${c}`), "");
+  return words === null ? null : { words, keep: joined };
 }
 
 /**

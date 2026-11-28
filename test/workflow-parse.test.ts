@@ -216,6 +216,8 @@ describe("workflow commands", () => {
       "fix the typo. Do not merge this one", "fix the typo; don't ship it yet", "fix the typo but don't land it", "fix the typo, I'll merge it myself",
       "fix the typo and leave it for me to merge", "fix the typo, keep it open", "fix the typo, but let me look before it goes in",
       "fix the typo but I'm not convinced we want this", "fix the typo, no rush", "fix: make sure we don't merge duplicate rows",
+      "fix the typo but hold off", "fix the typo, then I'll decide", "fix the typo as soon as dylan approves", "fix the typo, leave the PR as is after",
+      "fix the typo and ping me", "fix the typo and don't push it", "fix the typo once CI is green",
     ]) {
       const p = parse(text);
       assert.ok(p.kind === "ambiguous" && p.ends, `${text}: ${JSON.stringify(p)}`);
@@ -231,9 +233,13 @@ describe("workflow commands", () => {
       const r = run(reply, pr());
       assert.ok(r.kind === "run" && r.run.instruction?.text === "the typo" && r.run.merges === merges, `${reply}: ${JSON.stringify(r)}`);
     }
-    // A negation that says what the code should do leaves the default end.
-    const keep = run("fix the export so it does not drop normals", pr());
-    assert.ok(keep.kind === "run" && keep.run.merges);
+    // Clauses that describe only the code, negations and conditions of the code included, leave the default end.
+    for (const text of ["fix the export so it does not drop normals", "fix the crash when the file is empty", "fix: never drop normals", "fix the first row of the table"]) {
+      const keep = run(text, pr());
+      assert.ok(keep.kind === "run" && keep.run.merges, `${text}: ${JSON.stringify(keep)}`);
+    }
+    const cond = parse("fix the typo as soon as dylan approves");
+    assert.ok(cond.kind === "ambiguous" && cond.ends === "fix the typo", "the offer keeps the code clause");
   });
 
   test("first fix before a start, and then merge after instructions on an issue, read as written", () => {
