@@ -202,10 +202,10 @@ const withdrawGone = async (db: Db, now: number, more: (eb: Eb) => Expression<Sq
   await withdrawWhere(db, `${ITEM_WITHDRAWN_PREFIX}every item it names was merged or closed`, now, (eb) => eb.and([eb("state", "=", "queued"), ...[more(eb)].filter((x) => x !== null),
     itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login", step: "remote_calls.step" })]));
 
-/** Withdraws queued or leased `conversation.turn` calls bound to `forLogin` that name `ref`. */
+/** Withdraws queued or leased conversation turn calls (`conversation.turn`, `interactive.conversation-turn`) bound to `forLogin` that name `ref`. */
 export async function withdrawTurnCalls(db: Db, a: { ref: string; forLogin: string; reason: string }): Promise<number> {
   const it = splitRef(a.ref);
-  return (await withdrawWhere(db, a.reason, Date.now(), (eb) => eb.and([eb("prompt_id", "=", "conversation.turn"), eb("repo", "=", it.repo), eb("state", "in", ["queued", "leased"]),
+  return (await withdrawWhere(db, a.reason, Date.now(), (eb) => eb.and([eb("prompt_id", "in", ["conversation.turn", "interactive.conversation-turn"]), eb("repo", "=", it.repo), eb("state", "in", ["queued", "leased"]),
     ciEq(db, "for_login", eb.val(a.forLogin)),
     eb.exists(schemaEb(eb).selectFrom("main.remote_call_items as ci").select(eb.lit(1).as("one")).where("ci.call_id", "=", ref<number>("remote_calls.id")).where("ci.repo", "=", it.repo).where("ci.number", "=", it.number))]))).length;
 }

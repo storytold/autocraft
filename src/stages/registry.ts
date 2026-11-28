@@ -108,7 +108,7 @@ export const STAGES: StageDef[] = [
     steps: [{ name: "conversation", maxMin: 30, label: "Conversations", limit: 30 }, { name: "conversation-maintainer", maxMin: 30, label: "Maintainers' conversations", limit: null }],
     lanes: [{ name: "conversation", steps: ["conversation"], order: 20 }, { name: "conversation-maintainer", steps: ["conversation-maintainer"], order: 21 }],
     models: [{ model: "opus", use: "Conversation replies" }],
-    promptIds: ["conversation.turn"], promptStage: "Decide",
+    promptIds: ["conversation.turn", "interactive.conversation-turn"], promptStage: "Decide",
     waits: [],
     writes: [],
     person: "A person runs the commands a reply proposes",

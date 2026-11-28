@@ -357,11 +357,12 @@ export async function storeReply(db: Db, ref: RefKey, claim: string, reply: { tu
 /**
  * Withdraws the maintainer's message that waits for Opus, queued or being answered: it ends as failed, naming who withdrew it, and the
  * item takes messages again. The writer's queued or leased model calls for the item are withdrawn too. `by`: an operator, or the maintainer who wrote it.
+ * Returns the withdrawn turn's id.
  */
-export async function withdrawTurn(db: Db, ref: RefKey, by: { login: string; operator: boolean }): Promise<void> {
+export async function withdrawTurn(db: Db, ref: RefKey, by: { login: string; operator: boolean }): Promise<number> {
   const [repo, number] = splitRef(ref);
   const q = queryDb(db);
-  await db.write(async () => {
+  return await db.write(async () => {
     const wait = await q.get(q.k.selectFrom("main.conversation_turns").select(["id", "kind", "login"]).where("repo", "=", repo).where("number", "=", number).where("kind", "in", [...PERSON]).where("status", "in", [...WAITING]));
     if (!wait || wait.kind !== "maintainer") throw new ConversationError(409, "no maintainer's message waits for Opus here");
     if (!by.operator && wait.login.toLowerCase() !== by.login.toLowerCase()) throw new ConversationError(403, "only an operator, or the person who wrote it, withdraws a message");
@@ -369,6 +370,7 @@ export async function withdrawTurn(db: Db, ref: RefKey, by: { login: string; ope
     const seq = await settle(db, repo, number, "failed", why, (b) => b.where("id", "=", Number(wait.id)).where("status", "in", [...WAITING]));
     if (seq !== null) await unhold(db, repo, number, seq + 1);
     await withdrawTurnCalls(db, { ref, forLogin: wait.login, reason: why });
+    return Number(wait.id);
   });
 }
 

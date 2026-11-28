@@ -47,7 +47,7 @@ export const DROP_WINDOW_MS = scaled(2 * 3600_000);
 export const FAILURE_WINDOW_MS = scaled(30 * 60_000);
 
 /** Prompts that judge an item: an author or co-author of an item they judge gets their calls only when no other runner that could take them asks for work. */
-const JUDGING = new Set(["review.opus", "premerge.opus", "postmerge.opus", "fixup.check", "conversation.turn", "verify.compare", "classify.haiku", "security.verify", "security.fixcheck"]);
+const JUDGING = new Set(["review.opus", "premerge.opus", "postmerge.opus", "fixup.check", "conversation.turn", "interactive.conversation-turn", "verify.compare", "classify.haiku", "security.verify", "security.fixcheck"]);
 export const judges = (promptId: string): boolean => JUDGING.has(promptId) || promptId.startsWith("dupes.compare-");
 
 /** The named lock of one login's lease transactions (lowercase). */

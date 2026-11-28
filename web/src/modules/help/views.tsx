@@ -131,7 +131,7 @@ function Start() {
 function Surfaces({ c }: { c: HelpCommand }) {
   const mention = useMention();
   const dt = "text-ink/70";
-  // ask is answered on GitHub and in the item's chat.
+  // ask is answered on GitHub, on Discord and in the item's chat; on Discord the item comes first, as the question runs to the end.
   const ask = c.word === "ask";
   return (
     <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
@@ -139,12 +139,12 @@ function Surfaces({ c }: { c: HelpCommand }) {
       <dd className="min-w-0 break-words">
         <Code>{`@${mention} ${c.example}`}</Code>
       </dd>
+      <dt className={dt}>Discord</dt>
+      <dd className="min-w-0 break-words">
+        <Code>{ask ? `@AutoCraft ask ${ITEM} ${c.example.replace(/^ask\s+/, "")}` : `@AutoCraft ${c.example} ${ITEM}`}</Code>
+      </dd>
       {!ask && (
         <>
-          <dt className={dt}>Discord</dt>
-          <dd className="min-w-0 break-words">
-            <Code>{`@AutoCraft ${c.example} ${ITEM}`}</Code>
-          </dd>
           <dt className={dt}>{t("Agent")}</dt>
           <dd className="min-w-0 break-words">“{`${c.example}: ${ITEM}`}”</dd>
         </>

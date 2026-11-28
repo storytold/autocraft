@@ -1,7 +1,8 @@
 // The Conversation step: answers each person's message that waits for Opus with one sandboxed `claude -p` call
 // (the item's repository and the workspace, read-only) and stores the reply with its action cards. An operator's message is a
 // call of the shared model queue; a maintainer's runs only on the maintainer's own Task Runners (a call bound to their login).
-// A message put as a question from GitHub (src/conversations/ask.ts) gets its answer, or why there is none, sent back there.
+// A message put as a question from GitHub or Discord (src/conversations/ask.ts) gets its answer, or why there is none, sent back there;
+// one from Discord runs as interactive.conversation-turn, in Interactive slots.
 import { jobItem } from "../runner/job-items.ts";
 import { referenceDir } from "../reference.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
@@ -12,12 +13,14 @@ import type { PersonKind } from "./types.ts";
 import { ownTaker } from "../remote/takers.ts";
 import { pool } from "../classify/run.ts";
 import { runModelStep } from "../agents/step.ts";
-import { CONVERSATION } from "../agents/steps.ts";
+import { CONVERSATION, CONVERSATION_INTERACTIVE } from "../agents/steps.ts";
 import { PROGRESS_KEEP, coalesce } from "../classify/progress.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { defaultSemanticDeps, referenceProblems, type SemanticDeps } from "../reference-lint.ts";
 import { needsFixTurn } from "../replylint.ts";
-import { answerAsked } from "./ask.ts";
+import { answerAsked, conversationPromptId, NO_INTERACTIVE_SLOTS } from "./ask.ts";
+import { loadTurnMessage } from "../data/chat/index.ts";
+import { userInteractiveSlots } from "../remote/interactive-slots.ts";
 import { sweepRunningCards } from "./act.ts";
 import { claimPending, failTurn, pendingConversations, promptParts, refreshItem, releaseTurn, setTurnProgress, storeReply, type DiffSource } from "./store.ts";
 import type { Db } from "../db/index.ts";
@@ -88,8 +91,11 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     let released = false;
     if (forLogin === undefined) p.onHandled?.(++handled);
     try {
+      // A question asked on Discord takes Interactive slots only.
+      const promptId = conversationPromptId((await loadTurnMessage(db, wait.id))?.via);
       if (forLogin !== undefined) {
-        const why = !await ownTaker(db, forLogin, { prompt_id: CONVERSATION_PROMPT.id, repos: [repo], tier }) ? ownRunnerGone(forLogin) : null;
+        const why = promptId !== CONVERSATION_PROMPT.id && await userInteractiveSlots(db, forLogin, "maintainer") < 1 ? NO_INTERACTIVE_SLOTS
+          : !await ownTaker(db, forLogin, { prompt_id: promptId, repos: [repo], tier }) ? ownRunnerGone(forLogin) : null;
         if (why) { await fail(why); return; }
       }
       const parts = await promptParts(db, repo, n, wait);
@@ -106,7 +112,7 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
       const dir = referenceDir(repo);
       // A maintainer's reference check runs on their own Task Runner too.
       const semantic = dir ? p.semantic ?? defaultSemanticDeps(db, `${repo}#${n}`, forLogin === undefined ? {} : { forLogin }) : undefined;
-      const step = runModelStep(db, CONVERSATION, { ref: `${repo}#${n}`, item: parts.item, turns: parts.turns, ...(checkout && { repo_dir: REPO_PATH }) }, {
+      const step = runModelStep(db, promptId === CONVERSATION_PROMPT.id ? CONVERSATION : CONVERSATION_INTERACTIVE, { ref: `${repo}#${n}`, item: parts.item, turns: parts.turns, ...(checkout && { repo_dir: REPO_PATH }) }, {
         model, ...(forLogin !== undefined && { forLogin, firstWaitMs: p.ownWaitMs ?? OWN_LEASE_WAIT_MS }), checkout: checkout ?? undefined, reference: checkout ? dir : undefined, onProgress, ctx: { db, repo, n, dir, semantic },
         usage: { run: p.usageRun, agent: `conversation-${String(k).padStart(3, "0")}`, stage: "conversation", items: () => 1 },
         onReply: (reply) => { if (reply.fixTurn) p.log(`conversation: ${repo}#${n}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },

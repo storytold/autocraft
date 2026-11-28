@@ -309,8 +309,9 @@ export const storeReply = async (db: Db, repo: string, n: number, claim: string,
 /**
  * Withdraws the maintainer's message that waits for Opus, queued or being answered: it ends as failed, naming who withdrew it, the writer's
  * model calls for it go too, and the item takes messages again; a reply that arrives later is not stored. `by`: an operator, or the maintainer who wrote it.
+ * Returns the withdrawn turn's id.
  */
-export const withdrawTurn = async (db: Db, repo: string, n: number, by: { login: string; operator: boolean }): Promise<void> =>
+export const withdrawTurn = async (db: Db, repo: string, n: number, by: { login: string; operator: boolean }): Promise<number> =>
   await store.withdrawTurn(db, refOf(repo, n), by);
 
 /** Gives the claimed message back: it waits, pending, for a later run. */

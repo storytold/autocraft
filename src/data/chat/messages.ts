@@ -207,3 +207,25 @@ export async function linkNewestSaid(db: Db, o: { repo: string; number: number; 
     return Number(m.id);
   });
 }
+
+/** Sets fields of a message's payload, beside what it holds already; false when there is no such message. Joins the caller's `db.write`. */
+export async function setPayloadFields(db: Db, id: number, fields: Record<string, unknown>): Promise<boolean> {
+  const q = queryDb(db);
+  return await db.write(async () => {
+    const row = await q.get(q.k.selectFrom("main.chat_messages").select("payload").where("id", "=", id));
+    if (!row) return false;
+    const was = parse(row.payload as string | null);
+    const payload = was && typeof was === "object" && !Array.isArray(was) ? { ...(was as Record<string, unknown>), ...fields } : { ...fields };
+    await q.run(q.k.updateTable("main.chat_messages").set({ payload: JSON.stringify(payload) }).where("id", "=", id));
+    return true;
+  });
+}
+
+/** The question messages from Discord written after `since` (linked to a turn), with their items and payloads, oldest first. */
+export async function loadDiscordQuestions(db: Db, since: string): Promise<{ id: number; repo: string; number: number; payload: unknown }[]> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.chat_messages as m").innerJoin("main.chat_conversations as c", "c.id", "m.conversation_id")
+    .select(["m.id as id", "c.repo as repo", "c.number as number", "m.payload as payload"])
+    .where("m.via", "=", "discord").where("m.kind", "=", "said").where("m.turn_id", "is not", null).where("m.at", ">=", since).orderBy("m.id"));
+  return rows.flatMap((r) => (r.repo === null || r.number === null ? [] : [{ id: Number(r.id), repo: String(r.repo), number: Number(r.number), payload: parse(r.payload as string | null) }]));
+}

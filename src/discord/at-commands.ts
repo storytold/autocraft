@@ -16,6 +16,11 @@
 // Who: a sender with no linked login, or without write access on a repo of the command's items, gets one short public reply (at most
 // one per REFUSAL_GAP_MS) and nothing runs.
 //
+// `ask <question>` (and text the model reading takes for only a question) is no workflow command: on one item, from an operator or a
+// maintainer with write access, it goes to Opus as the sender's message in the item's chat (do.ts, src/conversations/ask.ts). The
+// bot replies to the question's message that it was asked, and posts the answer as a reply to it when Opus's turn ends (answers.ts),
+// in the channel or thread where it was asked. A question starts no thread and makes nothing follow its item.
+//
 // Answer: when anything ran, the bot starts a public thread on the command message ("review · photocraft#123 (+2)") and posts the
 // confirmation lines there, the lines GitHub shows (an item of a private or quiet repo shows a status line and its link only); a command sent in a thread is answered in that thread. Without Create Public
 // Threads, Send Messages in Threads or Read Message History in the channel, or when starting the thread fails, the answer is a plain
@@ -28,7 +33,7 @@ import { freshWrite, type PermissionFn } from "../remote/permission.ts";
 import type { Db } from "../db/index.ts";
 import { t } from "../i18n/index.ts";
 import type { CommandResult } from "../workflow/apply.ts";
-import { describe, parse } from "../workflow/parse.ts";
+import { askedQuestion, describe, parse } from "../workflow/parse.ts";
 import type { ReadDeps } from "../workflow/read.ts";
 import { listText } from "../workflow/status.ts";
 import type { ItemRef, Parsed } from "../workflow/types.ts";
@@ -57,7 +62,7 @@ const MENTION = /<@[!&]?\d+>/g;
 /** The text of a message without mentions, on one line. */
 export const withoutMentions = (s: string): string => s.replace(MENTION, " ").replace(/\s+/g, " ").trim();
 
-/** Whether text written to the bot may be a command: it starts with a command word or alias, or reads whole as one. `take` then drops text that parses as ambiguous and has no items to act on. */
+/** Whether text written to the bot may be a command: it starts with a command word or alias (or is `ask <question>`), or reads whole as one. `take` then drops text that parses as ambiguous and has no items to act on. */
 export function isCommand(text: string): boolean {
   return startsWithCommandWord(text) || (text.trim().length > 0 && parse(text).kind !== "ambiguous");
 }
@@ -70,6 +75,7 @@ export function statusRest(text: string): string | null {
 }
 
 function startsWithCommandWord(text: string): boolean {
+  if (askedQuestion(text) !== null) return true;
   const words = text.toLowerCase().replace(/[‘’]/g, "'").split(/[\s,.:;!]+/).filter(Boolean);
   for (let n = Math.min(4, words.length); n > 0; n--) if (commandOf(words.slice(0, n).join(" "))) return true;
   return false;
@@ -218,7 +224,15 @@ export class AtCommands {
     }
     if (denied.length) return await this.#refuse(m, t("{login} has no write access to {repos}. Nothing ran.", { login, repos: listText(denied) }));
     if (unknown.length) return await this.#refuse(m, t("Could not check {login}'s write access to {repos}. Try again. Nothing ran.", { login, repos: listText(unknown) }));
-    const result = await runDo(db, keys, d, { userId, login, messageId: m.id }, this.#d.read, this.#d.permission);
+    const where = (await dc.loadWatchedChannels(db, [m.channel_id])).get(m.channel_id);
+    const askedAt = { guildId: m.guild_id ?? where?.guildId ?? "", channelId: m.channel_id, messageId: m.id };
+    const result = await runDo(db, keys, d, { userId, login, messageId: m.id }, this.#d.read, this.#d.permission, askedAt);
+    if (result.asked) {
+      // A question is answered by a reply to its message, where it was asked: no thread, nothing to follow.
+      const content = (await publicLines(db, result)).join("\n").slice(0, 1990) || t("Nothing ran.");
+      await this.#d.rest.createMessage(m.channel_id, { content, allowed_mentions: { parse: [] }, message_reference: { message_id: m.id, fail_if_not_exists: false } });
+      return;
+    }
     await this.#answer(m, d, result, here, login);
     if (result.items.some((o) => o.outcome === "run")) this.#d.followed?.();
   }

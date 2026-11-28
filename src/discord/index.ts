@@ -29,6 +29,7 @@ import { DiscordConfigError, readKeyFile, readTokenFile, type DiscordKeys } from
 import { forgetAuthor, forgetMessages, handleDispatch, setStatus } from "./store.ts";
 import { forgetFollowsOf } from "./threads.ts";
 import { ThreadResults } from "./results.ts";
+import { DiscordAnswers } from "./answers.ts";
 import { forgetVerifyRows, listChannelBriefs, markWatched, removeChannelTree, saveCategories, saveChannels, setViewable, type CategoryRow, type ChannelReport } from "../data/discord/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -143,6 +144,7 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
   watchRoleGrants(db, keys, rest, log, signal);
   const results = new ThreadResults({ db, keys, rest, log });
   results.start(signal);
+  new DiscordAnswers({ db, keys, rest, log }).start(signal);
   const pings = new Pings({ db, keys, rest, search, log, commands: new AtCommands({ db, keys, rest, log, followed: () => void results.sync() }) });
   const signals = new Signals({ db, keys, log });
   const reactor = new Reactor({ db, rest, log });

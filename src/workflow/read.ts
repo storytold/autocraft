@@ -276,7 +276,7 @@ export async function runText(db: Db, actor: Actor, via: Surface, given: Command
   // An option of the open question named on its own ("2", "go with one archive") answers it as the parser reads it: no model reading.
   if (await namesOption(db, input.items.length ? input.items : read.own, input.parsed)) return await runCommand(db, actor, via, input.items.length ? input : { ...input, items: [...read.own] });
   const reading = await within(read.waitMs ?? READ_WAIT_MS, readCommand(db, actor.login, read));
-  // A question on a surface that answers none (the agent, Discord) is no reading: nothing to propose there.
+  // A question on a surface that answers none (the agent, `/autocraft do`) is no reading: nothing to propose there.
   if (!reading || (reading.asks && !read.ask)) return await runCommand(db, actor, via, input);
   const runs = readingRuns(reading, read);
   const hash = createHash("sha256").update(read.text).digest("hex").slice(0, 16);

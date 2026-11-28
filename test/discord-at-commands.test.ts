@@ -1,5 +1,6 @@
 // @AutoCraft commands in a channel: a reply to a message that names items acts on all of them or on the one named, answers in a
-// thread, and a sender with no linked login runs nothing.
+// thread, a sender with no linked login runs nothing, and `ask <question>` is answered by Opus on the asker's own Task Runner as a
+// reply to the question.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -12,6 +13,11 @@ import type { CommandDef, DiscordRest, EditBody, MessageBody } from "../src/disc
 import type { Search } from "../src/discord/search.ts";
 import { handleDispatch } from "../src/discord/store.ts";
 import { followOf, threadTarget } from "../src/discord/threads.ts";
+import { DiscordAnswers } from "../src/discord/answers.ts";
+import { answerPending } from "../src/conversations/run.ts";
+import { setUserInteractiveSlots } from "../src/remote/interactive-slots.ts";
+import { setEnabled } from "../src/runner/autopilot.ts";
+import { fakeTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 
@@ -215,4 +221,37 @@ test("`fix and merge <item>` to the bot's role starts the fix-up with the merge 
   }
   assert.deepEqual(JSON.parse(outcome[0]!).slice(0, 2), ["fixup", "nora"]);
   assert.equal(outcome[1], outcome[0]);
+});
+
+test("a maintainer's @AutoCraft ask queues an Interactive call bound to their Task Runner and the answer replies to the question", async () => {
+  await setEnabled(db, true, "test");
+  await setUserInteractiveSlots(db, "nora", "maintainer", 1);
+  const ANSWER = "The preview encoder converts to RGB before it writes the PNG.";
+  const runner = await fakeTaskRunner(db, (call) => (call.promptId === "interactive.conversation-turn" ? ANSWER : undefined), "nora", "maintainer");
+  try {
+    const sent = rest.sent.length;
+    await say("q-1", "u70", "<@100> ask photocraft#4 why does the preview lose the alpha channel");
+    const ack = rest.sent.slice(sent);
+    assert.equal(ack.length, 1);
+    assert.equal(ack[0]!.body.message_reference?.message_id, "q-1");
+    assert.match(ack[0]!.body.content ?? "", /Asked Opus/);
+    assert.ok(!rest.threads.some((th) => th.messageId === "q-1"), "a question starts no thread");
+
+    await answerPending(db, { kind: "maintainer", checkout: async () => null, usageRun: "t", log: () => {} });
+    const call = await db.get(db.k.selectFrom("main.remote_calls").select(["prompt_id", "for_login"]).where("prompt_id", "like", "%conversation%"));
+    assert.equal(call?.prompt_id, "interactive.conversation-turn", "a Discord question takes Interactive slots");
+    assert.equal(call?.for_login, "nora", "it runs only on the asker's own Task Runner");
+
+    const answers = new DiscordAnswers({ db, keys, rest, log: (l) => assert.fail(l) });
+    await answers.sync();
+    await answers.sync();
+    const posted = rest.sent.slice(sent + 1);
+    assert.equal(posted.length, 1, "the answer is posted once");
+    assert.equal(posted[0]!.channelId, "c1");
+    assert.equal(posted[0]!.body.message_reference?.message_id, "q-1");
+    assert.ok(posted[0]!.body.content?.includes(ANSWER), posted[0]!.body.content ?? "");
+    assert.deepEqual(posted[0]!.body.allowed_mentions, { parse: [] });
+  } finally {
+    await runner.stop();
+  }
 });

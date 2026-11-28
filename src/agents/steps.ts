@@ -250,6 +250,8 @@ export const CONVERSATION: ClaudeStep<ConversationInput, ConversationReply, Conv
   lint: { fields: ["cards[].text", "cards[].steps[].body", "cards[].steps[].title"], make: (_x, c) => async (text, stage) => (await parseReply(c.db, c.repo, c.n, text) ? referenceProblems(commentTexts(text), c.dir, c.semantic, { stage }) : null) },
   parse: async (text, _x, ctx, c) => { const r = await parseReply(c.db, c.repo, c.n, text, dropTexts(ctx.problems)); return r === null ? null : { value: r }; },
 };
+/** The same step for a question asked on Discord: its call runs in Interactive slots (src/remote/interactive-slots.ts). */
+export const CONVERSATION_INTERACTIVE: ClaudeStep<ConversationInput, ConversationReply, ConversationCtx> = { ...CONVERSATION, id: "interactive.conversation-turn" };
 
 /** The plan reply as parsed, valid or not: an invalid plan is asked for again (the last reading stands after the last attempt). */
 export type PlanCtx = { ref: string; crates: Crate[]; label: string | null; ci: boolean };

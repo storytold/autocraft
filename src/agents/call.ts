@@ -40,7 +40,7 @@ const PROMPT_STEP: Record<string, { step: string; stage: number }> = {
   "review.opus": { step: "opus-review", stage: 5 }, "postmerge.opus": { step: "postmerge", stage: 8 }, "premerge.opus": { step: "premerge", stage: 6 },
   "dupes.compare-prs.opus": { step: "dupes-compare", stage: 3 }, "dupes.compare-issues.sonnet": { step: "dupes-compare", stage: 3 },
   "fixup.check": { step: "fixup", stage: 6 },
-  "conversation.turn": { step: "conversation", stage: 3 },
+  "conversation.turn": { step: "conversation", stage: 3 }, "interactive.conversation-turn": { step: "conversation", stage: 3 },
   "areas.jev": { step: "classify-new", stage: 2 }, "areas.haiku": { step: "classify-new", stage: 2 },
   "areas.propose": { step: "areas-propose", stage: 2 }, "areas.suggest": { step: "areas-suggest", stage: 2 },
   "fixup.conflict": { step: "fixup", stage: 6 }, "discord.signal.jev": { step: "discord-signal", stage: 3 }, "discord.signal.haiku": { step: "discord-signal", stage: 3 },

@@ -5,7 +5,7 @@ import { actionRefusal, buttonLabel, cardEffect, cardLines, cardRepos, commandTe
 import { queueReason } from "../../conversations/queue.ts";
 import { cardDigest, type CardRow } from "../../conversations/act.ts";
 import { loadStale, withdrawTurn, type Stale, type StoreDeps } from "../../conversations/store.ts";
-import { ASK_LIMITED, askLimited, askQuestion } from "../../conversations/ask.ts";
+import { ASK_LIMITED, askLimited, askQuestion, withdrawnAsked } from "../../conversations/ask.ts";
 import { ConversationError, loadQueue, type Queue } from "../../data/conversations/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
@@ -131,7 +131,8 @@ export async function askOpus(db: Db, req: Req, repo: string, n: number, body: s
   return await askQuestion(db, { login: req.user.login, operator: isOperator(req) }, repo, n, body, deps ? { deps } : {});
 }
 
-/** Withdraws the message on the item that waits for Opus, as the reader: an operator, or the person who wrote it. */
+/** Withdraws the message on the item that waits for Opus, as the reader: an operator, or the person who wrote it. A question asked on GitHub or Discord then gets no answer there. */
 export async function withdrawMessage(db: Db, req: Req, repo: string, n: number): Promise<void> {
-  await guard(async () => await withdrawTurn(db, repo, n, { login: req.user.login, operator: isOperator(req) }));
+  const turnId = await guard(async () => await withdrawTurn(db, repo, n, { login: req.user.login, operator: isOperator(req) }));
+  await withdrawnAsked(db, turnId, `withdrawn by ${req.user.login}`);
 }

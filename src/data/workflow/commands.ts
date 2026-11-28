@@ -117,14 +117,15 @@ export async function recordNudges(db: Db, rows: { login: string; at: string }[]
 
 /**
  * Settles a command that waits for the answer to its question (state `asked`) with the answer to post: `done` with the answer, `refused`
- * with why there is none. False when the command does not wait (it was settled already, or pruned).
+ * with why there is none. `reply` false: nothing is posted (a question withdrawn in the item's chat). False when the command does not
+ * wait (it was settled already, or pruned).
  */
-export async function settleAsked(db: Db, commentId: number, o: { state: "done" | "refused"; result: string; at: string }): Promise<boolean> {
+export async function settleAsked(db: Db, commentId: number, o: { state: "done" | "refused"; result: string; at: string; reply?: boolean }): Promise<boolean> {
   const q = queryDb(db);
   return await db.write(async () => {
     const row = await q.get(q.k.selectFrom(T).select("state").where("comment_id", "=", commentId));
     if (row?.state !== "asked") return false;
-    await settleCommands(db, [{ commentId, state: o.state, result: o.result, reply: true, allowed: true, at: o.at }]);
+    await settleCommands(db, [{ commentId, state: o.state, result: o.result, reply: o.reply ?? true, allowed: true, at: o.at }]);
     return true;
   });
 }
