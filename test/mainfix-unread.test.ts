@@ -1,10 +1,10 @@
 // A red default branch whose failure log GitHub does not serve yet: read again after the main CI poll, classified once readable,
-// given up after an hour, and never counted toward the step's daily limit.
+// given up after an hour, and never counted toward the step's daily limit; a model reply that sorts nothing is given up after three.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { mainFixDueRepos, runMainFix, setMainFixApproval, type MainFixDeps } from "../src/mainfix/index.ts";
+import { mainFixClock, mainFixDueRepos, runMainFix, setMainFixApproval, type MainFixDeps } from "../src/mainfix/index.ts";
 import { POLL_EVERY_MS } from "../src/mainci/index.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "./helpers/raw-db.ts";
@@ -17,10 +17,10 @@ test("an unread failure log is read again after the main CI poll, classified onc
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "mainfix-unread-")), "t.db"));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: at(0), pipeline: 1 }));
   await setMainFixApproval(db, "op", "app", true);
-  const w = { readable: false, now: at(1), classified: 0 };
+  const w = { readable: false, now: at(1), classified: 0, usable: true };
   const deps: MainFixDeps = {
     now: () => new Date(w.now),
-    classify: async (_db, input) => { w.classified++; return input.checks.map((c) => ({ check: c.check, verdict: "code" as const, reason: "a test fails" })); },
+    classify: async (_db, input) => { w.classified++; if (!w.usable) return null; return input.checks.map((c) => ({ check: c.check, verdict: "code" as const, reason: "a test fails" })); },
     gh: async (args) => {
       if (args[1]?.includes("check-runs")) return JSON.stringify({ check_runs: [{ name: "gate / test", status: "completed", conclusion: "failure", details_url: "https://github.com/storytold/app/actions/runs/11/job/1" }] });
       if (args[0] === "run") { if (!w.readable) throw new Error("HTTP 404: Not Found"); return "test\tcargo test\tassertion failed\n"; }
@@ -33,7 +33,7 @@ test("an unread failure log is read again after the main CI poll, classified onc
     w.now = at(min + 1);
   };
   let handled = 0;
-  const run = async (min: number) => { w.now = at(min); await runMainFix(db, { repo: "app", onHandled: (n) => { handled = n; } }, () => {}, deps); };
+  const run = async (min: number) => { w.now = at(min); await runMainFix(db, { repo: "app", onHandled: (n) => { handled = n; } }, () => {}, deps).catch(() => {}); };
   const due = async (min: number) => { const wake: number[] = []; return { due: (await mainFixDueRepos(db, ["app"], { now: ms(min), wake })).length > 0, wake }; };
   const rows = async (sha: string) => (await db.all(db.k.selectFrom("main_fixes").select(["state"]).where("head_sha", "=", sha))).map((r) => r.state);
 
@@ -54,6 +54,20 @@ test("an unread failure log is read again after the main CI poll, classified onc
   w.readable = false;
   await head("a2", 10);
   await run(11);
+  await run(40);
+  assert.deepEqual(await rows("a2"), ["unread"], "still read again within the hour");
+  assert.notEqual(await mainFixClock(db, ms(40)), await mainFixClock(db, ms(43)), "the lane's clock moves while the current head is unread");
   await run(72);
   assert.deepEqual([await rows("a2"), (await due(80)).due, w.classified], [["nothing-to-do"], false, 1]);
+  assert.equal(await mainFixClock(db, ms(80)), await mainFixClock(db, ms(83)));
+
+  w.readable = true;
+  w.usable = false;
+  handled = 0;
+  await head("a3", 90);
+  for (const min of [91, 100, 110]) {
+    assert.equal((await due(min)).due, true);
+    await run(min);
+  }
+  assert.deepEqual([await rows("a3"), w.classified, handled, (await due(120)).due], [["nothing-to-do"], 4, 0, false]);
 });

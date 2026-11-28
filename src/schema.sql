@@ -2019,7 +2019,8 @@ CREATE INDEX IF NOT EXISTS main_ci_repo_time ON main_ci(repo, committed_at);
 --   needs-fix (code, or red again after a rerun: waits for the fix PR step) | nothing-to-do (nothing readable to act on, or main is
 --   green again, or an open PR already covers the failure: `#N` in the reason) | pr-opened (our fix PR: pr_number, pr_url) |
 --   fix-failed (no fix PR could be made: reason; a person takes over) | unread (check "(none)": the head's failure log could not be
---   read yet; written at the first read; read again once per main CI poll interval for an hour, then nothing-to-do; not a classification). One attempt per row.
+--   read yet; written at the first read; read again once per main CI poll interval for an hour, then nothing-to-do; not a classification) | unclassified (check "(none)":
+--   `tries` model replies sorted none of the failed checks; the third makes the row nothing-to-do). One attempt per row.
 CREATE TABLE IF NOT EXISTS main_fixes (
   repo TEXT NOT NULL,
   head_sha TEXT NOT NULL,
