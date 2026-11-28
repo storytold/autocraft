@@ -1,8 +1,9 @@
 // Takers in the user-local model queue: whether some Task Runner may take calls on a repo now, and what happens when none
 // can. A taker is a fresh, ready Task Runner (helpers.ts) of a user who is not cooled off (cooloff.ts) and who may take the
 // call (runnerTakes: role rules, write permission by the room's rule roomCanWrite, My repos narrowed by the runner's own
-// list), busy or not. A Manual only user's runner (manual-only.ts) is a taker, since the user may pick the call, though it is
-// no room. For work its user started or approved (started.ts) a runner is a taker whatever its My repos, tasks and items, and
+// list), busy or not. A Manual only user's runner (manual-only.ts) is no taker for automatic work, which it never claims: only
+// for the calls it claims (work its user started or approved, calls bound to its user or taken over, follow-ups and picks). For work
+// its user started or approved (started.ts) a runner is a taker whatever its My repos, tasks and items, and
 // whether or not it is connected and ready. takerTest is the one taker rule: pools and the runner's job starts skip work without a taker, the
 // dashboard's minute maintenance runs sweepTakers: a queued call with no taker for NO_TAKER_MS is withdrawn, and pipeline-on
 // repos with no taker are recorded for the remote-no-taker health check. Follow-up turns and calls with a pick that counts
@@ -72,7 +73,12 @@ export function takerTestIn(v: RemoteView): (c: TakerCall) => boolean {
     ? runners.some((r) => bound(r, c.forLogin!.toLowerCase(), c))
       // An item workflow's bound work also has a taker in the runners of a person who took it (started.ts boundTakers).
       || (!!c.refs?.length && [...owner.boundTakers({ prompt_id: c.prompt_id, refs: c.refs, forLogin: c.forLogin, ...(c.tier && { tier: c.tier }), refusedToken: c.refusedToken ?? null })].some((l) => runners.some((r) => bound(r, l, c))))
-    : runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && runnerTakes(r, c, canWrite)) || owner.waitersFor(c).size > 0;
+    : runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && autoTakes(r, c, canWrite)) || owner.waitersFor(c).size > 0;
+}
+
+/** Whether a runner takes `c` as automatic work: runnerTakes, and its user is not on Manual only. */
+function autoTakes(r: Runner, c: Parameters<typeof runnerTakes>[1], canWrite: (login: string, repo: string) => boolean): boolean {
+  return !r.manual && runnerTakes(r, c, canWrite);
 }
 
 /** Why a person's Task Runner cannot claim now: no fresh report, held for its plan usage, cooling off, or another readiness. */
@@ -92,7 +98,7 @@ export type RunnerWait = { login: string; hold: RunnerHold; until: number | null
 
 export function waitingOnIn(v: RemoteView, c: TakerCall): RunnerWait[] {
   const runners = takersIn(v), canWrite = canWriteOf(v.snapshot), s = startedOf(v);
-  if (runners.some((r) => runnerTakes(r, c, canWrite)) || [...s.ownersFor(c)].some((o) => s.canTake(o, c))) return [];
+  if (runners.some((r) => autoTakes(r, c, canWrite)) || [...s.ownersFor(c)].some((o) => s.canTake(o, c))) return [];
   return [...s.waitersFor(c)].sort().map((login) => runnerHoldOf(v, login));
 }
 
@@ -128,7 +134,7 @@ export function runnerWaitText(w: RunnerWait | { login: string; renewsAt: number
  */
 export function loginWaitIn(v: RemoteView, c: TakerCall): { login: string; at: number } | null {
   const canWrite = canWriteOf(v.snapshot), s = startedOf(v), owners = s.ownersFor(c);
-  const now = takersIn(v).filter((r) => runnerTakes(r, c, canWrite) || (owners.has(r.login.toLowerCase()) && s.canTake(r.login, c)));
+  const now = takersIn(v).filter((r) => autoTakes(r, c, canWrite) || (owners.has(r.login.toLowerCase()) && s.canTake(r.login, c)));
   if (!now.length || now.some((r) => (r.row.loginRenewsAt ?? 0) <= v.now)) return null;
   const first = now.reduce((a, b) => (b.row.loginRenewsAt! < a.row.loginRenewsAt! ? b : a));
   return { login: first.login, at: first.row.loginRenewsAt! };
@@ -144,7 +150,7 @@ export function tierTaker(v: RemoteView, c: TakerCall & { tier: Tier }, exceptTo
   const logins = c.forLogin ? new Set([c.forLogin.toLowerCase(), ...(c.refs?.length ? startedOf(v).boundTakers({ prompt_id: c.prompt_id, refs: c.refs, forLogin: c.forLogin, tier: c.tier, refusedToken: exceptToken }) : [])]) : null;
   return takersIn(v).some((r) => r.tokenId !== exceptToken && r.tiers.has(c.tier) && (logins
     ? logins.has(r.login.toLowerCase()) && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x))
-    : runnerTakes(r, c, canWrite)));
+    : autoTakes(r, c, canWrite)));
 }
 
 /** A key equal for two units exactly when the same users of `logins` take them under their item choices (task-items.ts); "" when none does. */
@@ -191,16 +197,23 @@ export async function ownTaker(db: Db, login: string, c: { prompt_id: string; re
   return takerTestIn(await loadView(db, nowMs))({ ...c, forLogin: login });
 }
 
+/** The error of a call withdrawn because the only Task Runners that would take it are on Manual only, which take no automatic work. */
+export const manualOnlyReason = (repos: readonly string[]): string =>
+  `${NO_TAKER_PREFIX} ${repos.length ? `on ${repos.join(", ")}` : "that name no repo"}: no Task Runner takes automatic work there (the Task Runners that would are on Manual only)`;
+
 /** The error of a bound call withdrawn because none of its user's Task Runners is ready: its caller skips the work (NoTakerError). */
 export const noOwnRunnerReason = (login: string): string => `${NO_TAKER_PREFIX} for ${login}: none of their Task Runners is connected and ready`;
 
-/** Why no taker takes a call `takes` says no to: its user's runners for a bound call; else its repos, else its task, else the item choices of the runners that take the rest. */
+/**
+ * Why no taker takes a call `takes` says no to: its user's runners for a bound call; else its repos (Manual only when such a runner would
+ * take them), else its task, else the item choices of the runners that take the rest.
+ */
 function whyNoTaker(v: RemoteView, takes: (c: TakerCall) => boolean, c: { prompt_id: string; repos: readonly string[]; step: string; forLogin?: string | null }): string {
   if (c.forLogin) return noOwnRunnerReason(c.forLogin);
-  if (!takes({ prompt_id: c.prompt_id, repos: c.repos })) return noTakerReason(c.repos);
-  if (!takes({ prompt_id: c.prompt_id, repos: c.repos, step: c.step })) return noTakerReason(c.repos, c.step);
   const canWrite = canWriteOf(v.snapshot);
-  const choices = new Set(takersIn(v).filter((r: Runner) => r.items && runnerTakes({ ...r, items: null }, { prompt_id: c.prompt_id, repos: c.repos, step: c.step }, canWrite)).map((r) => settingsOf(v.snapshot, r.login).taskItems));
+  if (!takes({ prompt_id: c.prompt_id, repos: c.repos })) return takersIn(v).some((r) => r.manual && runnerTakes({ ...r, items: null }, { prompt_id: c.prompt_id, repos: c.repos }, canWrite)) ? manualOnlyReason(c.repos) : noTakerReason(c.repos);
+  if (!takes({ prompt_id: c.prompt_id, repos: c.repos, step: c.step })) return noTakerReason(c.repos, c.step);
+  const choices = new Set(takersIn(v).filter((r: Runner) => !r.manual && r.items && runnerTakes({ ...r, items: null }, { prompt_id: c.prompt_id, repos: c.repos, step: c.step }, canWrite)).map((r) => settingsOf(v.snapshot, r.login).taskItems));
   return noTakerReason(c.repos, c.step, TASK_ITEMS.filter((x): x is Exclude<TaskItems, "all"> => x !== "all" && choices.has(x)));
 }
 

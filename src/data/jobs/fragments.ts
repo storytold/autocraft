@@ -44,10 +44,14 @@ export const jobStateOf = (eb: kx.AnyEb, jobIdRef: kx.Ex): AliasableExpression<s
 /** Ids of jobs waiting in the queue to resume. */
 export const resumingJobs = (db: Db) => queryDb(db).k.selectFrom("main.jobs").select("id").where("state", "=", "queued").where("resumes", ">", 0);
 
-/** A `remote_calls` row (unaliased in the enclosing statement) of an earlier run of a resumed job that has not ended: it waits for adoption, with no caller polling it. */
+/**
+ * A `remote_calls` row (unaliased in the enclosing statement) of an earlier run of a resumed job that has not ended: it waits for adoption, with
+ * no caller polling it. While the job waits in the queue only a leased call counts (its Task Runner works on it, and the reply waits in the row);
+ * a queued call of a queued job is left to the gone-expiry, since the job may wait without bound and its resumed run queues the call again.
+ */
 export const earlierRunCall = (_db: Db, eb: kx.AnyEb): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.jobs as j").select(one(eb)).where("j.id", "=", kx.ref<number>("remote_calls.job_id")).where("j.resumes", ">", 0)
-    .where((e) => e.or([e("j.state", "=", "queued"), e.and([e("j.state", "=", "running"),
+    .where((e) => e.or([e.and([e("j.state", "=", "queued"), e(kx.ref<string>("remote_calls.state"), "=", "leased")]), e.and([e("j.state", "=", "running"),
       e(kx.ref<number>("remote_calls.since"), "<", e(e.parens(e.fn<number>("julianday", [e.ref("j.started_at")]), "-", e.lit(2440587.5)), "*", e.lit(86400000)))])])));
 
 /** Sum of `items` of jobs of `step` started at or after `sinceRef`, as a scalar (0 when none). */

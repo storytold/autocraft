@@ -106,7 +106,7 @@ const lastSignature = new WeakMap<Db, string>();
 
 /**
  * The runners the taker rule reads, in a form that changes only when they or what decides their repos change: each one's login, role,
- * My repos, own repo list and skipped tasks. The planner adds it to its input, so work left for want of a taker is planned again when one
+ * My repos, own repo list, skipped tasks and Manual only switch. The planner adds it to its input, so work left for want of a taker is planned again when one
  * connects or comes back, without every status report waking the planner. Then, per user with an item choice, the repos of the items they
  * take (started work, or the work they started or approved), and the oldest cached non-write permission check of the takers' logins, so
  * the signature changes when that one expires. One wave: the grouped string, the takers with their item choice, the started work and the
@@ -128,7 +128,8 @@ async function readTakerSignature(db: Db, now: number, deps: SnapshotDeps): Prom
     q.get(q.k.selectFrom((eb) => eb.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id").leftJoin("main.access as a", "a.login", "t.login")
       .leftJoin("main.user_settings as us", (j) => j.onRef("us.login", "=", "t.login").on("us.key", "=", "repos"))
       .leftJoin("main.user_settings as sk", (j) => j.onRef("sk.login", "=", "t.login").on("sk.key", "=", "skip_tasks"))
-      .select((e) => [[e.fn<string>("lower", ["t.login"]), e.fn.coalesce("a.role", e.val("")), e.fn.coalesce("us.value", e.val("")), e.fn.coalesce("h.idle_repos", e.val("")), e.fn.coalesce("sk.value", e.val(""))]
+      .leftJoin("main.user_settings as mo", (j) => j.onRef("mo.login", "=", "t.login").on("mo.key", "=", "manual_only"))
+      .select((e) => [[e.fn<string>("lower", ["t.login"]), e.fn.coalesce("a.role", e.val("")), e.fn.coalesce("us.value", e.val("")), e.fn.coalesce("h.idle_repos", e.val("")), e.fn.coalesce("sk.value", e.val("")), e.fn.coalesce("mo.value", e.val(""))]
         .reduce((acc, part) => e(e(acc, "||", e.val(":")), "||", part)).as("k")])
       .distinct().where((e) => takerExpr(e, now)).as("ks"))
       .select(kx.groupConcat(db, "k", ";", kx.bytewise(db, "k")).as("s"))),

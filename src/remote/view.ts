@@ -44,8 +44,11 @@ export const freshReady = (s: RunnerSnapshot, r: RunnerRow, now: number): boolea
 export const runnerOffers = (v: RemoteView, login: string, tiers: readonly Tier[]): boolean =>
   v.snapshot.runners.some((r) => r.login.toLowerCase() === login.toLowerCase() && (!tiers.length || r.reportedAt === null || tiers.some((t) => tiersOf(r.models, v.accepted).has(t))));
 
-/** A runner as the taker rule reads it: its user's repos (My repos narrowed by its own last list), skipped tasks, item filter and offered tiers. */
-export type Runner = { tokenId: number; login: string; role: string; repos: ReadonlySet<string> | null; skip: ReadonlySet<string>; items: ItemFilter; tiers: ReadonlySet<Tier>; row: RunnerRow };
+/**
+ * A runner as the taker rule reads it: its user's repos (My repos narrowed by its own last list), skipped tasks, item filter and offered
+ * tiers; `manual`: its user's Manual only switch (manual-only.ts), under which it takes no automatic work.
+ */
+export type Runner = { tokenId: number; login: string; role: string; repos: ReadonlySet<string> | null; skip: ReadonlySet<string>; items: ItemFilter; tiers: ReadonlySet<Tier>; manual: boolean; row: RunnerRow };
 
 /** The user's ItemFilter over the snapshot's started work. */
 export const itemFilterIn = (s: RunnerSnapshot, login: string): ItemFilter => itemFilterOf(s.started, login, settingsOf(s, login).taskItems);
@@ -55,7 +58,7 @@ export function runnerOf(v: RemoteView, r: RunnerRow): Runner {
   const set = settingsOf(v.snapshot, r.login);
   return {
     tokenId: r.tokenId, login: r.login, role: r.role ?? "", repos: claimReposOf(set.repos, r.idleRepos ?? undefined), skip: skipsIn(set.skipTasks),
-    items: itemFilterIn(v.snapshot, r.login), tiers: tiersOf(r.models, v.accepted), row: r,
+    items: itemFilterIn(v.snapshot, r.login), tiers: tiersOf(r.models, v.accepted), manual: set.manualOnly, row: r,
   };
 }
 

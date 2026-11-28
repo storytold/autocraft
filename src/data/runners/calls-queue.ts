@@ -13,8 +13,13 @@ import { reuseKey } from "../../remote/reuse-key.ts";
 import { loadItemAuthors } from "../mirror/authors.ts";
 import type { NewCall } from "./types.ts";
 
+/** Why a resumed job's earlier call is withdrawn: the resumed run asked the same prompt about its items with other input. */
+export const RESUME_REPLACED = "replaced by the resumed run's call";
+
 /** Calls this process queued or adopted: a resumed run adopts each earlier call once. */
 const adopted = new Set<number>();
+/** Of those, the earlier runs' calls this process adopted: they belong to the run now, so a later call of it does not withdraw them. */
+const adoptedEarlier = new Set<number>();
 /** One adoption at a time, so two equal calls of one job made side by side do not adopt the same earlier call. */
 let adopting: Promise<unknown> = Promise.resolve();
 
@@ -23,8 +28,9 @@ const parentOf = (c: NewCall) => (eb: Eb) => (c.parentId === undefined ? eb("par
 
 /**
  * In a resumed job: adopts a call of the job's earlier runs with the same prompt, version, reuse key (src/remote/reuse-key.ts) and parent that is
- * still open or answered and unread, and returns its id. When there is none, the earlier runs' open calls with the same prompt, items and parent
- * asked something else: the queued ones are withdrawn; leased ones run on, since a later call of the run may still adopt them. At most 4 statements per call.
+ * still open or answered and unread, and returns its id. When there is none, the earlier runs' open calls with the same prompt and parent that
+ * name one of its items (or name no item, like it) asked about input this call replaces (a job's item list changes between runs): the queued
+ * ones are withdrawn; leased ones run on, since a later call of the run may still adopt them. At most 4 statements per call.
  */
 function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash: string, now: number): Promise<number | null> {
   const q = queryDb(db);
@@ -36,6 +42,7 @@ function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash
     if (earlier) {
       const id = Number(earlier.id);
       adopted.add(id);
+      adoptedEarlier.add(id);
       // Fresh again for claims: its caller is back. A queued call's wait starts again: the time it waited before the stop counts toward its wait limits, the restart's does not.
       await q.run(q.k.updateTable("main.remote_calls").set((eb) => {
         const w = schemaEb(eb) as any;
@@ -47,9 +54,14 @@ function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash
       dropQueueCache(db);
       return id;
     }
+    const refs = c.items.map((i) => [i.repo, i.number] as const), kept = [...adoptedEarlier];
     const stale = await q.all(q.k.selectFrom("main.remote_calls").select("id").where("job_id", "=", jobId).where("since", "<", startedMs).where("prompt_id", "=", c.promptId)
-      .where("items", "=", JSON.stringify(c.items)).where(parentOf(c)).where("state", "=", "queued").$if(taken.length > 0, (b) => b.where(inList(db, "id", taken, "bigint", true))));
-    if (stale.length) await withdrawCalls(db, stale.map((r) => ({ id: Number(r.id), reason: "the resumed job asked again with other input" })), { states: ["queued"], now });
+      .where((eb) => refs.length
+        ? eb.exists(schemaEb(eb).selectFrom("main.remote_call_items as ri").select(eb.lit(1).as("one")).where("ri.call_id", "=", ref<number>("remote_calls.id"))
+          .where(tupleIn(db, ["ri.repo", "ri.number"], refs, ["text", "bigint"])))
+        : eb("items", "=", "[]"))
+      .where(parentOf(c)).where("state", "=", "queued").$if(kept.length > 0, (b) => b.where(inList(db, "id", kept, "bigint", true))));
+    if (stale.length) await withdrawCalls(db, stale.map((r) => ({ id: Number(r.id), reason: RESUME_REPLACED })), { states: ["queued"], now });
     return null;
   });
   adopting = turn.catch(() => undefined);
