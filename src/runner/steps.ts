@@ -331,7 +331,7 @@ export const STEPS: StepDef[] = [
     models: [],
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
-      { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 10, help: "pull requests to start or merge in this job" },
+      { name: "limit", label: "At most", kind: "int", min: 1, max: 500, default: 10, help: "pull requests to start or merge in this job" },
     ],
     // No repo check: whether a PR may merge is its own (src/core/may.ts), applied by the step to each PR.
     run: async (ctx) => {

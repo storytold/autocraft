@@ -1571,6 +1571,9 @@ export interface MergeBatches {
   ci_rerun_at: string | null;
   opened_at: string | null;
   topped_up: Generated<number>;
+  below_id: number | null;
+  root_sha: string | null;
+  side: Generated<number>;
 }
 
 export interface MergeHolds {
@@ -1584,6 +1587,8 @@ export interface MergeRepoState {
   repo: string;
   batch_size: number;
   updated_at: string;
+  train_depth: number | null;
+  train_note: string | null;
 }
 
 export interface MergeState {
@@ -3385,9 +3390,9 @@ export const COLUMNS = {
   main_fixes: ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "decision_id", "issue_number", "pr_number", "pr_url", "created_at", "updated_at", "session", "patch", "files", "lint_task", "lint_round", "lint_state", "tries"],
   mcp_tokens: ["id", "login", "token_hash", "label", "can_answer", "created_at", "last_used_at", "expires_at", "can_run", "idle_claim_at", "idle_tiers", "idle_repos", "kind", "machine", "can_agent"],
   merge_batch_prs: ["batch_id", "number", "head_oid", "position", "repo"],
-  merge_batches: ["id", "repo", "branch", "state", "base_sha", "commit_sha", "parent_id", "task_id", "retries", "pr_number", "pr_url", "summary", "created_at", "updated_at", "fork", "merge_sha", "build_state", "build_tries", "ci_reruns", "ci_rerun_at", "opened_at", "topped_up"],
+  merge_batches: ["id", "repo", "branch", "state", "base_sha", "commit_sha", "parent_id", "task_id", "retries", "pr_number", "pr_url", "summary", "created_at", "updated_at", "fork", "merge_sha", "build_state", "build_tries", "ci_reruns", "ci_rerun_at", "opened_at", "topped_up", "below_id", "root_sha", "side"],
   merge_holds: ["repo", "number", "held_by", "held_at"],
-  merge_repo_state: ["repo", "batch_size", "updated_at"],
+  merge_repo_state: ["repo", "batch_size", "updated_at", "train_depth", "train_note"],
   merge_state: ["repo", "number", "head", "since", "reads", "rereads", "stuck"],
   merges: ["repo", "number", "head_oid", "run_id", "at", "path", "method", "outcome", "reason", "ci", "mergeable"],
   model_checks: ["id", "run_id", "step", "repo", "number", "head", "command", "crate", "test_name", "task_id", "outcome", "started_at", "ended_at"],

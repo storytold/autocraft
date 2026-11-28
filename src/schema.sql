@@ -1564,7 +1564,10 @@ CREATE TABLE IF NOT EXISTS merge_batches (
   ci_reruns INTEGER NOT NULL DEFAULT 0, -- failed runs of the batch PR rerun (once, when no PR was traced)
   ci_rerun_at TEXT,                   -- when that rerun was asked for
   opened_at TEXT,                     -- when the first batch PR of its lineage opened (upstream CI started); a rebuild carries its parent's
-  topped_up INTEGER NOT NULL DEFAULT 0 -- 1: a top-up or a rebuild of one, so the lineage takes no other
+  topped_up INTEGER NOT NULL DEFAULT 0, -- 1: a top-up or a rebuild of one, so the lineage takes no other
+  below_id INTEGER,                   -- merge train: the car this batch is built on (its tip is base_sha); null: built on the default branch
+  root_sha TEXT,                      -- the default branch head under the train's bottom car; null: base_sha
+  side INTEGER NOT NULL DEFAULT 0     -- 1: a split half or a traced PR's test, built beside the train; nothing is built on it
 );
 CREATE INDEX IF NOT EXISTS merge_batches_repo ON merge_batches(repo, state);
 CREATE TABLE IF NOT EXISTS merge_batch_prs (
@@ -3178,7 +3181,9 @@ CREATE TABLE IF NOT EXISTS merge_state (
 CREATE TABLE IF NOT EXISTS merge_repo_state (
   repo TEXT PRIMARY KEY,
   batch_size INTEGER NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  train_depth INTEGER,                -- merge train: cars in flight at most (1-4); null: 1
+  train_note TEXT                     -- why the train runs one car at a time whatever its depth (the branch must be up to date); null: it does not
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS merge_batches_pr ON merge_batches(repo, pr_number);
 -- The recent batches the merge queue's publish backoff reads on every planner pass (src/data/merge/batches.ts loadPublishFailures).

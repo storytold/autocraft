@@ -136,13 +136,14 @@ const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 300);
 
 // ---- GitHub reads ----
 
-export type PrInfo = { id: string; head: string; state: string; assignees: string[]; authors: number; commits: number; baseRef: string };
+/** `mergeState`: GitHub's merge state status (BEHIND: the base has commits the head lacks), null when not reported. */
+export type PrInfo = { id: string; head: string; state: string; assignees: string[]; authors: number; commits: number; baseRef: string; mergeState: string | null };
 
 export const PR_INFO_QUERY = `query($owner: String!, $name: String!, $n: Int!) {
   rateLimit { cost remaining resetAt }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $n) {
-      id headRefOid baseRefName state
+      id headRefOid baseRefName state mergeStateStatus
       assignees(first: 10) { nodes { login } }
       commits(first: 100) { totalCount nodes { commit { authors(first: 10) { nodes { email name user { login } } } } } }
     }
@@ -150,7 +151,7 @@ export const PR_INFO_QUERY = `query($owner: String!, $name: String!, $n: Int!) {
 }`;
 
 type InfoNode = {
-  id: string; headRefOid: string; baseRefName: string; state: string; assignees?: { nodes?: { login: string }[] };
+  id: string; headRefOid: string; baseRefName: string; state: string; mergeStateStatus?: string | null; assignees?: { nodes?: { login: string }[] };
   commits?: { totalCount: number; nodes?: { commit?: { authors?: { nodes?: { email?: string | null; name?: string | null; user?: { login: string } | null }[] } } }[] };
 };
 
@@ -163,7 +164,7 @@ export async function prInfo(q: Querier, repo: string, n: number): Promise<PrInf
     for (const a of c.commit?.authors?.nodes ?? []) who.add(a.user?.login ? `@${a.user.login}` : (a.email || a.name || "?").toLowerCase());
   return {
     id: p.id, head: p.headRefOid, state: p.state, assignees: (p.assignees?.nodes ?? []).map((a) => a.login),
-    authors: who.size, commits: p.commits?.totalCount ?? 0, baseRef: p.baseRefName,
+    authors: who.size, commits: p.commits?.totalCount ?? 0, baseRef: p.baseRefName, mergeState: p.mergeStateStatus ?? null,
   };
 }
 

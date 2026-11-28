@@ -39,6 +39,12 @@ export type BatchRow = {
   opened_at?: string | null;
   /** 1: built by a top-up or a rebuild of one; a lineage is topped up at most once. */
   topped_up?: number;
+  /** Merge train: the car this batch is built on (base_sha is its tip); null: built on the default branch. */
+  below_id?: number | null;
+  /** The default branch head under the train's bottom car; null: base_sha. */
+  root_sha?: string | null;
+  /** 1: a split half or a traced PR's test, built beside the train on the failed car's base; nothing is built on it. */
+  side?: number;
 };
 export type BatchView = BatchRow & { members: BatchMember[] };
 export type BatchRun = { active: BatchView[]; size: number };
@@ -50,6 +56,10 @@ export type NewBatch = {
   toppedUp?: boolean;
   /** When the first batch PR of its lineage opened (a rebuild carries its parent's). */
   openedAt?: string;
+  /** Merge train: the car it is built on, the default branch head under the train (when not `baseSha`), and whether it is built beside the train. */
+  belowId?: number | null;
+  rootSha?: string | null;
+  side?: boolean;
 };
 export type StageRow = { repo: string; number: number; stage: string; at: string; actor: string | null; note: string | null };
 /** An audit row a caller hands a writer: `target` is `repo#number`, `repo:branch` or null. */

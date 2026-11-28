@@ -15,7 +15,8 @@ const parse = <T>(text: string | null | undefined, fallback: T): T => {
 
 /**
  * Every merge fact the planner needs for `keys`: attempts, merged history, verifications, run approvals, unknown state, batch
- * membership, screenshot regressions. 8 statements in one `together` wave whatever the key count. An integration PR's `membersReviewed` is true while every member
+ * membership, screenshot regressions. 8 statements in one `together` wave whatever the key count, and one more when an integration PR is a merge
+ * train car built on another. An integration PR's `membersReviewed` is true while every member, and every member of the active cars below it,
  * has a final take or take-fix review at its batched head, or is approved for merge and handed over there with a clean pre-merge review.
  */
 export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFacts> {
@@ -38,12 +39,7 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
     q.all(k.selectFrom("merge_state as s").innerJoin(resolveKeys(db, keys, "kk"), onKey("s"))
       .select(["s.repo", "s.number", "s.head", "s.since", "s.reads", "s.rereads", "s.stuck"])) as Promise<any[]>,
     // Batches whose PR or any member is in the keys. A member's repo is its batch's repo.
-    q.all(batchViews(db)
-      .select((eb) => eb.case().when(eb.not(eb.exists(eb.selectFrom("merge_batch_prs as mr").select(eb.lit(1).as("one")).whereRef("mr.batch_id", "=", "b.id")
-        .where((w) => w.not(w.or([
-          finalTakeAtLatestHead(w, "b.repo", "mr.number", "mr.head_oid"),
-          w.and([handedOverAt(w, "b.repo", "mr.number", "mr.head_oid"), premergeClean(db, w, "b.repo", "mr.number", "mr.head_oid")]),
-        ])))))).then(1).else(0).end().as("members_reviewed"))
+    q.all(batchViews(db).select((eb) => membersReviewed(db, eb))
       .where("b.state", "in", [...ACTIVE_BATCH, "failed"]).where((eb: any) => eb.or([
       eb.exists(eb.selectFrom("merge_batch_prs as bp").innerJoin(resolveKeys(db, keys, "kk"), (j: any) => j.onRef("kk.repo", "=", "b.repo").onRef("kk.number", "=", "bp.number"))
         .select(eb.lit(1).as("one")).whereRef("bp.batch_id", "=", "b.id")),
@@ -73,6 +69,25 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
   for (const r of regressions) facts.regressions.set(headOf(r.repo, r.number, r.head_sha), { summary: r.comparison, at: r.finished_at ?? "" });
   for (const r of unknown) facts.unknown.set(refOf(r.repo, r.number), { head: r.head, since: r.since, reads: r.reads, rereads: r.rereads, stuck: !!r.stuck } satisfies UnknownState);
 
+  const reviewed = (raw: unknown) => Number((raw as { members_reviewed: unknown }).members_reviewed) === 1;
+  // A merge train car's tip carries the PRs of the active cars below it: their members count as its own.
+  const cars = batches.map(toBatchView).filter((b) => ACTIVE_BATCH.includes(b.state) && b.pr_number !== null && (b.below_id ?? null) !== null);
+  const below = new Map<number, { below: number | null; reviewed: boolean }>();
+  if (cars.length) {
+    const rows = await q.all(batchViews(db).select((eb) => membersReviewed(db, eb)).where("b.state", "in", ACTIVE_BATCH).where(kx.inList(db, "b.repo", [...new Set(cars.map((b) => b.repo))])));
+    for (const r of rows) below.set(Number(r.id), { below: r.below_id ?? null, reviewed: reviewed(r) });
+  }
+  const belowReviewed = (id: number | null): boolean => {
+    for (let at = id, n = 0; at !== null && n < 64; n++) {
+      const b = below.get(at);
+      // A car below that is not active landed, or ended and takes this one with it.
+      if (!b) return true;
+      if (!b.reviewed) return false;
+      at = b.below;
+    }
+    return true;
+  };
+
   const wanted = new Set<string>();
   if (Array.isArray(keys)) for (const r of keys) wanted.add(refOf(r.repo, r.number));
   for (const raw of batches) {
@@ -90,12 +105,21 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
     if (active && b.pr_number !== null) {
       const ref = refOf(b.repo, b.pr_number);
       if ((!Array.isArray(keys) || wanted.has(ref)) && !facts.integration.has(ref)) {
-        const membersReviewed = Number((raw as { members_reviewed: unknown }).members_reviewed) === 1;
+        const membersReviewed = reviewed(raw) && belowReviewed(b.below_id ?? null);
         facts.integration.set(ref, { id: b.id, repo: b.repo, branch: b.branch, state: b.state, commitSha: b.commit_sha, prNumber: b.pr_number, members: b.members, membersReviewed } satisfies BatchOfPr);
       }
     }
   }
   return facts;
+}
+
+/** 1 while every member of batch `b` has a final take or take-fix review at its batched head, or is approved for merge and handed over there with a clean pre-merge review. */
+function membersReviewed(db: Db, eb: any) {
+  return eb.case().when(eb.not(eb.exists(eb.selectFrom("merge_batch_prs as mr").select(eb.lit(1).as("one")).whereRef("mr.batch_id", "=", "b.id")
+    .where((w: any) => w.not(w.or([
+      finalTakeAtLatestHead(w, "b.repo", "mr.number", "mr.head_oid"),
+      w.and([handedOverAt(w, "b.repo", "mr.number", "mr.head_oid"), premergeClean(db, w, "b.repo", "mr.number", "mr.head_oid")]),
+    ])))))).then(1).else(0).end().as("members_reviewed");
 }
 
 /** The active batch of each PR in `keys`. 1 statement. */
