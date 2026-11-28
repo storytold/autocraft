@@ -31,7 +31,7 @@ import {
   addTurn, endSession, ensureSession, lastTurn, loadSessions, loadTurns, SESSION_MAX_TURNS, settleTurn, turnsOf, updateSession,
   type FixSession, type FixTurn, type FixTurnPurpose, type FixTurnStep,
 } from "./store.ts";
-import { ensureWorkspace, restorePatch, WORKSPACE_SESSION_KIND, type FixWorkspaceEnv } from "./workspace.ts";
+import { ensureWorkspace, restorePatch, WORKSPACE_SESSION_KIND, type DependencyFetch, type FixWorkspaceEnv } from "./workspace.ts";
 
 export type FixPromptId = "fix.session" | "security.session";
 /** The step a turn works for, with a maintainer's `fix <instructions>` apart from the review's fixes; turns are stored under it. */
@@ -362,9 +362,10 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
   };
 
   type Next = { purpose: FixTurnPurpose; message: string | null };
-  const opening = async (): Promise<Next> => spec.lint ? { purpose: "lint", message: spec.lint.message } : ({
+  const deps = dependencyNote(ws.dependencies);
+  const opening = async (): Promise<Next> => spec.lint ? { purpose: "lint", message: spec.lint.message + deps } : ({
     purpose: "step",
-    message: spec.message({ moved: ws.moved ? { from: ws.moved.from, diffStat: await env.movedStat?.(ws.moved.from, ws.moved.to).catch(() => "") ?? "" } : null }),
+    message: spec.message({ moved: ws.moved ? { from: ws.moved.from, diffStat: await env.movedStat?.(ws.moved.from, ws.moved.to).catch(() => "") ?? "" } : null }) + deps,
   });
   let next: Next | null = round ? null : await opening();
   let misses = 0, retryOf: number | null = null;
@@ -467,4 +468,11 @@ async function leasedStep(env: StepEnv, session: FixSession, spec: StepSpec): Pr
     undone = true;
     next = { purpose: "undo", message: undoMessage(g.problems) };
   }
+}
+
+/** What the opening message says when the workspace could not fetch the tree's dependencies: cargo may not load the workspace offline. */
+export function dependencyNote(d: DependencyFetch): string {
+  if (d.state !== "failed") return "";
+  const tail = d.text.trim().split("\n").slice(-12).join("\n").slice(-2000);
+  return `\n\nNote: fetching this tree's dependencies through the crate mirror failed, so cargo may not load the workspace offline. If that stops you from building or testing, report status blocked and name the dependency. The fetch's last lines:\n\n\`\`\`\n${tail}\n\`\`\``;
 }

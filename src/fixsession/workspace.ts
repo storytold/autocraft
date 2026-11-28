@@ -250,7 +250,7 @@ async function readyRow(env: FixWorkspaceEnv, id: number): Promise<WorkspaceRow 
 /**
  * Fetches the dependencies of a tree that changed when its Cargo.lock files differ from those of the warm version the target came
  * from (with no warm version, whenever it has any), through the environment's crate mirror. A fetch that fails does not fail the
- * step: the session is told, and the lint task, which can fetch, stays the gate.
+ * step: the opening message says so (turn.ts dependencyNote), and the lint task, which can fetch, stays the gate.
  */
 async function fetchIfNeeded(env: FixWorkspaceEnv, w: WorkspaceRow, at: string): Promise<DependencyFetch> {
   const db = env.db;
