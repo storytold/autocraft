@@ -1,10 +1,16 @@
-// Fix PR of a red default branch: the patch is stored with its lint task and the step ends; a later run collects the result.
+// Fix PR of a red default branch: the patch is stored with its lint task and the step ends; a later run collects the result. With
+// main-fix in fix_sessions the change comes from the repo's fix session in a workspace at the failing commit.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
+import { createEnv } from "../src/build/envs.ts";
+import { getWorkspace } from "../src/build/workspaces.ts";
+import { setFixSessions } from "../src/fixsession/switch.ts";
+import { branchFor } from "../src/mainfix/pr.ts";
+import { fixPod } from "./helpers/fix-pod.ts";
 import { HARDENING, type Exec } from "../src/fixup/git.ts";
 import { mainFixDue, onCodeVerdict, runMainFix, setMainFixApproval, type FixRow, type MainFixDeps } from "../src/mainfix/index.ts";
 import { CLIPPY_ARTIFACT } from "../src/prepush/index.ts";
@@ -14,6 +20,8 @@ import { connectDb, type Db } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "mainfix-pr-"));
+// AutoCraft's clone, which a fix session's workspace is seeded from, is the fix PR step's root.
+process.env.AUTOCRAFT_FIXUP_DIR = join(dir, "fixups");
 const T0 = "2026-01-01T00:00:00Z";
 const PR_URL = "https://github.com/storytold/app/pull/9";
 
@@ -83,7 +91,7 @@ async function world(o: { source?: string; log?: string; reply?: string | null }
     },
   };
   const step = () => runMainFix(db, { repo: "app" }, () => {}, deps);
-  return { db, head, step, asked, log };
+  return { db, head, step, asked, log, deps, work, fork };
 }
 
 /** Ends the repo's newest lint task with these clippy diagnostics (NDJSON). */
@@ -156,4 +164,36 @@ test("a panic inside a test whose patch could not be made opens an issue naming 
   const lib = await world({ source, log: panicAt(2), reply: null });
   await lib.step();
   assert.deepEqual([(await row(lib.db)).state, lib.log.issues.length], ["fix-failed", 0]);
+});
+
+test("with main-fix in fix_sessions the fix is a session turn in a workspace at the failing commit, and the clean change opens the fix PR; off, the patch path", async () => {
+  const w = await world();
+  await createEnv(w.db, { id: "pods", label: "Pods", kind: "kubernetes", slots: 4, settings: { image: "autocraft:test" } }, "op");
+  await setFixSessions(w.db, { steps: ["main-fix"], repos: null }, "op");
+  const pod = fixPod(w.db, { top: mkdtempSync(join(dir, "pods-")), src: w.work, head: w.head });
+  const live = await pod.session("mainfix", 0);
+  const fixed = BROKEN.replace("b()", "a()");
+  pod.model(() => ({ "src/lib.rs": fixed }), { status: "done", summary: "Called the function that exists." });
+  w.deps.fix!.session = (db, log) => ({ ...pod.deps, db, log });
+
+  await w.step();
+  assert.equal(pod.queued.length, 1);
+  const turn = pod.queued[0]!;
+  assert.equal(turn.workspaceId, live.workspaceId, "the turn works in the repo's main-fix session");
+  assert.equal((await getWorkspace(w.db, live.workspaceId!))?.base_sha, w.head, "at the failing commit");
+  assert.match(turn.stdin, /default branch's CI fails/);
+  assert.match(turn.stdin, /src\/lib\.rs/);
+  assert.equal(w.asked.length, 0, "no patch is asked for");
+  assert.equal((await stateOf(w.db)).state, "linting");
+
+  await finishLint(w.db, CLEAN);
+  assert.equal((await w.step()).prs, 1);
+  assert.deepEqual([(await stateOf(w.db)).state, (await stateOf(w.db)).pr, w.log.pushed, w.log.opened], ["pr-opened", 9, 1, 1]);
+  assert.equal(git(w.fork, "show", `refs/heads/${branchFor("gate / test", w.head)}:src/lib.rs`) + "\n", fixed, "the PR branch holds the session's change");
+  assert.equal((await getWorkspace(w.db, live.workspaceId!))?.state, "parked");
+
+  const off = await world();
+  await off.step();
+  assert.equal(off.asked.length, 1, "off: the patch path");
+  assert.equal((await off.db.all(off.db.k.selectFrom("fix_sessions").select("id"))).length, 0);
 });

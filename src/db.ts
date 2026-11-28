@@ -515,6 +515,7 @@ const STATE_COLUMNS: [table: string, column: string, type: string][] = [
   ["ci_fixes", "session_turn", "INTEGER"],
   ["conflict_merges", "session_turn", "INTEGER"],
   ["security_fix_rounds", "session_turn", "INTEGER"],
+  ["main_fixes", "session_turn", "INTEGER"],
 ];
 
 const STATE_INDEXES = [

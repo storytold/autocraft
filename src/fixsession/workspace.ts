@@ -23,7 +23,7 @@ export { WorkspaceUnavailable };
 /** The registry wait (GLOBAL_WAITS) a step is in while its session's workspace is not ready. */
 export const FIX_WORKSPACE_WAIT = "Fix session workspace";
 /** workspace_sessions.kind of a fix session's model calls. */
-export const WORKSPACE_SESSION_KIND: Record<FixSessionKind, "fix" | "security-fix"> = { pr: "fix", security: "security-fix" };
+export const WORKSPACE_SESSION_KIND: Record<FixSessionKind, "fix" | "security-fix" | "main-fix"> = { pr: "fix", security: "security-fix", mainfix: "main-fix" };
 /**
  * Workspaces of one session at one head that fail to start before the step fails (a counted try); after that the session makes none
  * at that head until a build environment changes. A new head has its own count.
@@ -89,17 +89,18 @@ export type WorkspaceReady = {
 };
 
 /**
- * The planner's reading for the lanes of PR fix steps (fix-up, CI fix): what the steps of PR fix sessions wait for (a workspace
+ * The planner's reading for the lanes of the fix steps of `kind` (PR: fix-up, CI fix; mainfix: Fix red main): what the steps of those
+ * fix sessions wait for (a workspace
  * starting, failed, off the session's head or gone, or room for its pod; loadFixWorkspaceWaits), the kubernetes environments a
  * workspace can run in, and when one was last changed. A step that waited for its workspace
  * records nothing, so its job handled nothing; it runs again when this changes (the workspace gets ready or fails, an environment is
  * enabled, disabled or edited). A session out of starts at a head lets go of its failed workspace once and makes no new one there,
  * so the reading then stays as it is.
  */
-export async function fixWorkspaceReading(db: Db): Promise<string> {
+export async function fixWorkspaceReading(db: Db, kind: Exclude<FixSessionKind, "security"> = "pr"): Promise<string> {
   const k = await loadEnvs(db, { kind: "kubernetes" });
   const envs = k.filter((e) => e.enabled && !envSettings(e).warmWriter).map((e) => `${e.id}${e.confidential ? "*" : ""}`).sort();
-  return `${await loadFixWorkspaceWaits(db, "pr")}|${envs.join(",")}|${envsChangedAt(k) ?? ""}`;
+  return `${await loadFixWorkspaceWaits(db, kind)}|${envs.join(",")}|${envsChangedAt(k) ?? ""}`;
 }
 
 /** When a person last changed a kubernetes environment (made, enabled, disabled or edited one), or null when there is none. */
@@ -114,9 +115,12 @@ async function startFailures(db: Db, session: Pick<FixSession, "id" | "kind">, a
   return await countFixStartFailures(db, ownerOf(session), at, envsChangedAt(await loadEnvs(db, { kind: "kubernetes" })));
 }
 
-/** The environment a session's workspace runs in: implementations' for a PR, a confidential one for a security fix (none: a wait). */
+/**
+ * The environment a session's workspace runs in: implementations' for a PR or a default branch, a confidential one for a security fix
+ * (none: a wait).
+ */
 export async function fixSessionEnv(db: Db, kind: FixSessionKind): Promise<string | WorkspaceWait> {
-  if (kind === "pr") return await implementEnv(db);
+  if (kind !== "security") return await implementEnv(db);
   const k = (await listEnvs(db)).filter((e) => e.kind === "kubernetes" && e.enabled && e.confidential && !e.settings?.warmWriter).sort((a, b) => a.id.localeCompare(b.id));
   return k[0]?.id ?? { kind: "wait", wait: FIX_WORKSPACE_WAIT, reason: "no confidential kubernetes environment is enabled" };
 }

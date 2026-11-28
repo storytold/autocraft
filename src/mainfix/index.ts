@@ -48,6 +48,8 @@ import { wholeReplyJson } from "../core/reply-json.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { filterSeq } from "../async-seq.ts";
+import { assertFence } from "../db/fence.ts";
+import { guardedApi, inClusterApi } from "../build/kube-api.ts";
 
 export { setMainFixApproval } from "./approval.ts";
 export { autocraftText } from "./status.ts";
@@ -115,6 +117,11 @@ export function defaultDeps(): MainFixDeps {
       ask: async (db, input, checkout, tool) => (await askClaude("cifix.patch", PATCH.models[0]!, input, db, { checkout, check: tool }))?.text ?? null,
       check: async (db, input, checkout) => (await askClaude("fixup.check", CHECK.models[0]!, input, db, { checkout }))?.text ?? null,
       checkout: (repo, branch, sha) => checkoutForCommit(repo, branch, sha, console.log),
+      session: (db, log) => {
+        const cluster = inClusterApi();
+        if (!cluster) throw new Error("this runner is not in the cluster, so it cannot reach a fix session's workspace");
+        return { db, api: guardedApi(cluster, () => assertFence(db)), log };
+      },
     },
     classify: async (db, input) => {
       const model = PROMPT.models[0]!;

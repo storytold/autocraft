@@ -368,7 +368,7 @@ export async function patchFromFailure(db: Db, d: Pick<CifixDeps, "ask" | "check
  * The Opus check of a CI fix's patch, reading `diffText` and, with a checkout, the files: null when it approves, else the refusal
  * (`rejected: ...` when Opus said no).
  */
-async function opusCheck(db: Db, d: Pick<CifixDeps, "check">, r: Pick<PatchRequest, "ref" | "title" | "repo" | "number" | "head" | "round" | "failure" | "reviewReason" | "runId" | "actor" | "at">, diffText: string, checkout: string | undefined, patch: string): Promise<string | null> {
+export async function opusCheck(db: Db, d: Pick<CifixDeps, "check">, r: Pick<PatchRequest, "ref" | "title" | "repo" | "number" | "head" | "round" | "failure" | "reviewReason" | "runId" | "actor" | "at">, diffText: string, checkout: string | undefined, patch: string): Promise<string | null> {
   const { ref, title, repo, head, failure } = r;
   const names = failure.checks.map((x) => x.name);
   const input: FixupCheckInput = {

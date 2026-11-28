@@ -1561,6 +1561,7 @@ export interface MainFixes {
   lint_round: number | null;
   lint_state: string | null;
   tries: Generated<number>;
+  session_turn: number | null;
 }
 
 export interface McpTokens {
@@ -3436,7 +3437,7 @@ export const COLUMNS = {
   liveness_state: ["id", "checked_at", "open"],
   main_ci: ["repo", "head_sha", "branch", "state", "failing", "checks", "committed_at", "headline", "first_seen_at", "state_changed_at", "updated_at", "settled_state"],
   main_ci_failures: ["repo", "head_sha", "state", "keys", "reason", "read_at"],
-  main_fixes: ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "decision_id", "issue_number", "pr_number", "pr_url", "created_at", "updated_at", "session", "patch", "files", "lint_task", "lint_round", "lint_state", "tries"],
+  main_fixes: ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "decision_id", "issue_number", "pr_number", "pr_url", "created_at", "updated_at", "session", "patch", "files", "lint_task", "lint_round", "lint_state", "tries", "session_turn"],
   mcp_tokens: ["id", "login", "token_hash", "label", "can_answer", "created_at", "last_used_at", "expires_at", "can_run", "idle_claim_at", "idle_tiers", "idle_repos", "kind", "machine", "can_agent"],
   merge_batch_prs: ["batch_id", "number", "head_oid", "position", "repo"],
   merge_batches: ["id", "repo", "branch", "state", "base_sha", "commit_sha", "parent_id", "task_id", "retries", "pr_number", "pr_url", "summary", "created_at", "updated_at", "fork", "merge_sha", "build_state", "build_tries", "ci_reruns", "ci_rerun_at", "opened_at", "topped_up", "below_id", "root_sha", "side"],

@@ -115,14 +115,15 @@ function storeOf(kind: FixSession["kind"]): RoundStore<FixTurnResult, FixRound, 
     async afterReply() {},
   };
 }
-const STORES = { pr: storeOf("pr"), security: storeOf("security") };
+const STORES = { pr: storeOf("pr"), security: storeOf("security"), mainfix: storeOf("mainfix") };
 
 // ---- prompts ----------------------------------------------------------------------------------------------------------
 
 /** fix.session's system prompt (with the repo's guidance) and its first message, from the prompt revisions as they are now. */
 export async function renderFixSession(db: Db, task: FixSessionTask): Promise<{ system: string; stdin: string; version: string }> {
   await ensurePrompts(db);
-  const repo = task.ref.split("#")[0]!;
+  // A PR's ref is repo#n, a default branch's repo@sha.
+  const repo = task.ref.split(/[#@]/)[0]!;
   const guidance = guidanceOf(repo);
   const p = claudeParts("fix.session", [{ ...task, ...(guidance && { repo_guidance: guidance }) }], false);
   return { system: p.system ?? "", stdin: p.stdin, version: p.version };

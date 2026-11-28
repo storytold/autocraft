@@ -1,10 +1,13 @@
 // Fix sessions (`fix_sessions`) and their turns (`fix_session_turns`): the model sessions the fix steps keep per item (src/fixsession).
 
-/** pr: the session of a pull request (fix-up, CI fix, conflict); security: the private fix of a security finding. */
-export type FixSessionKind = "pr" | "security";
+/**
+ * pr: the session of a pull request (fix-up, CI fix, conflict); security: the private fix of a security finding; mainfix: the fix of
+ * a red default branch, one per repo (number 0: the default branch, not a PR).
+ */
+export type FixSessionKind = "pr" | "security" | "mainfix";
 /** The step a turn works for: its allowed files and its stored row come from it. */
-export type FixStep = "fixup" | "cifix" | "conflict" | "security";
-export const FIX_STEPS: readonly FixStep[] = ["cifix", "fixup", "conflict", "security"];
+export type FixStep = "fixup" | "cifix" | "conflict" | "security" | "main-fix";
+export const FIX_STEPS: readonly FixStep[] = ["cifix", "fixup", "conflict", "security", "main-fix"];
 /** The step a turn was sent for: a maintainer's `fix <instructions>` runs in the fix-up step with its own gate, so its turns are apart. */
 export type FixTurnStep = FixStep | "maintainer";
 export type FixTurnPurpose = "start" | "step" | "findings" | "lint" | "undo" | "report" | "fresh";

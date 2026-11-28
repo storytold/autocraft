@@ -1,6 +1,8 @@
 // The fix PR of a red default branch: for each `needs-fix` row of an approved repo whose head is still red, one attempt
 // (per repo, head and check): skip when main is green again or an open PR already covers the failure, otherwise the CI fix
-// patch path writes a patch against the head commit (Sonnet, Opus check, validators). A patch that changes Rust files is
+// patch path writes a patch against the head commit (Sonnet, Opus check, validators), or, with `main-fix` in the fix_sessions
+// setting, the repo's main-fix session edits the tree of a workspace at the head and AutoCraft reads its change back as a diff
+// (the CI fix's gates, the Opus check). A patch that changes Rust files is
 // stored on the rows (state `linting`) with its lint task and the step ends; a later run collects the result: formatting is
 // folded in, findings go back to the model (at most LINT_MAX_ROUNDS lint rounds). The clean commit is pushed to the
 // pipeline account's fork on `autocraft/main-ci-<check>-<sha7>` and a PR is opened against the default branch.
@@ -13,7 +15,15 @@ import { CLI_BY, type By } from "../core/gates.ts";
 import { guardRepo } from "../core/guard.ts";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { errorFiles, patchFromFailure, type CifixDeps } from "../cifix/index.ts";
+import { cifixFiles, errorFiles, guardApplied, logText, opusCheck, patchFromFailure, type CifixDeps } from "../cifix/index.ts";
+import { CIFIX_SESSION_RULES, type CifixGate } from "../fixsession/gates.ts";
+import type { MainFixTurn } from "../fixsession/messages.ts";
+import { parkStepPod } from "../fixsession/park.ts";
+import { loadTurns, type FixSession } from "../fixsession/store.ts";
+import { fixSessionsOn } from "../fixsession/switch.ts";
+import { lintParent, prStep, runStep, type StepEnv, type StepOutcome } from "../fixsession/turn.ts";
+import { openSession, WorkspaceUnavailable } from "../fixsession/workspace.ts";
+import { CHECK_PATCH_CAP } from "../patchcheck/types.ts";
 import { isTestLine } from "../cifix/guard.ts";
 import { testLocations } from "../core/failure-locations.ts";
 import { loadQuiet } from "../data/security/index.ts";
@@ -49,13 +59,16 @@ export const PR_ACTOR = "main-fix";
 /** Open PRs read for overlap with the failure. */
 const MAX_PRS = 30;
 
-/** What the fix PR step needs beyond the reading and sorting deps. */
-export type FixPrDeps = Pick<CifixDeps, "ask" | "check" | "root"> & {
+/** What the fix PR step needs beyond the reading and sorting deps; `session`: the workspace and model calls of a fix in a fix session. */
+export type FixPrDeps = Pick<CifixDeps, "ask" | "check" | "root" | "session"> & {
   /** Host directory with a read-only checkout of the head commit for the sandboxed model calls, or null to ask without tools. */
   checkout?: (repo: string, branch: string, sha: string) => Promise<string | null>;
 };
 
 const PATCH_MODEL = CLAUDE_PROMPTS["cifix.patch"].models[0]!;
+const SESSION_MODEL = CLAUDE_PROMPTS["fix.session"].models[0]!;
+/** The number of a repo's main-fix session: the default branch, not a PR. */
+const MAIN_FIX_ITEM = 0;
 
 /** Whether the repo has stored patches to collect: the lint task of one ended, or its head is not the current one. `lintingHeads` are the repo's `linting` rows (`loadMainFixDue`). */
 export async function lintReadyIn(db: Db, lintingHeads: { headSha: string; lintTask: number | null }[], current: string): Promise<boolean> {
@@ -154,7 +167,7 @@ type Outcome = "opened" | "skipped" | "failed" | "waiting" | "linting" | "issue"
  * linting with a stored patch, goes to issue-opening when no patch was made and its check fails only in test code
  * (testCodeFailure), or stays as it is while the head is still running or the lint task is.
  */
-async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: SessionLedger): Promise<Outcome> {
+async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: SessionLedger, sessions: boolean): Promise<Outcome> {
   const at = (): string => c.now().toISOString();
   const head = rows[0]!.headSha;
   const set = async (list: FixRow[], state: "nothing-to-do" | "fix-failed", reason: string): Promise<"skipped" | "failed"> => {
@@ -188,10 +201,11 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
     if (covered !== null) return await set(live, "nothing-to-do", `an open PR already covers it: #${covered}`);
 
     const stored = live[0]!.state === "linting";
-    const w = stored ? { patch: live[0]!.patch ?? "", files: JSON.parse(live[0]!.files ?? "[]") as string[], task: live[0]!.lintTask, round: live[0]!.lintRound ?? 1, state: live[0]!.lintState, session: live[0]!.session } : null;
+    const w = stored ? { patch: live[0]!.patch ?? "", files: JSON.parse(live[0]!.files ?? "[]") as string[], task: live[0]!.lintTask, round: live[0]!.lintRound ?? 1, state: live[0]!.lintState, session: live[0]!.session, sessionTurn: live[0]!.sessionTurn ?? null } : null;
     const res = w ? await readLint(c.db, w.task ?? -1) : null;
     if (res?.kind === "pending") return "waiting";
-    if (!stored) count();
+    // A fix in a fix session counts once it did not wait for its workspace (fromSession).
+    if (!stored && !sessions) count();
     const git = new Git(c.exec, c.fix.root, c.repo);
     mkdirSync(c.fix.root, { recursive: true });
     if (!(await git.fetchBranch(ownerOf(c.repo), c.repo, now.branch, head))) return await set(live, "fix-failed", "the head commit is no longer in the repository");
@@ -208,7 +222,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
         if (!found) { failed.push(r); continue; }
         const why = scrubReason(oneLine(`${found}; ${how}, and a CI fix may not change tests`), c.fix.root);
         // A stored patch of a lint round is dropped with the row's move.
-        await c.setState(r, "issue-opening", why, at(), { patch: null, files: null, lintTask: null, lintRound: null, lintState: null, session: null });
+        await c.setState(r, "issue-opening", why, at(), { patch: null, files: null, lintTask: null, lintRound: null, lintState: null, session: null, sessionTurn: null });
         c.log(`  ${c.repo}: ${r.check}: ${why}; opening an issue`);
         issues++;
       }
@@ -223,17 +237,20 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
       try { return await git.applyToTree(head, patch, join(scratch, "index"), exact); }
       finally { rmSync(scratch, { recursive: true, force: true }); }
     };
-    const store = async (patch: string, files: string[], task: number, state: "pending" | "requeued", round: number, session: string | null): Promise<void> => {
-      for (const r of live) await c.setState(r, "linting", null, at(), { patch, files: JSON.stringify(files), lintTask: task, lintRound: round, lintState: state, session });
+    const store = async (patch: string, files: string[], task: number, state: "pending" | "requeued", round: number, session: string | null, sessionTurn: number | null = null): Promise<void> => {
+      for (const r of live) await c.setState(r, "linting", null, at(), { patch, files: JSON.stringify(files), lintTask: task, lintRound: round, lintState: state, session, sessionTurn });
     };
 
-    type Made = { ok: true; patch: string; files: string[]; changed: number; shown: CifixPr["files"]; model: string; applied: Awaited<ReturnType<typeof treeOf>> } | { ok: false; reason: string };
+    /** `sessionTurn`: the fix session turn that wrote the change. `wait`: the fix session cannot work now; nothing is recorded or counted. */
+    type Made = { ok: true; patch: string; files: string[]; changed: number; shown: CifixPr["files"]; model: string; applied: Awaited<ReturnType<typeof treeOf>>; sessionTurn?: number } | { ok: false; reason: string; wait?: true };
+    const culpritQuiet = async (): Promise<boolean> => !!now.culpritPr && (await loadQuiet(c.db, [`${c.repo}#${now.culpritPr}`])).size > 0;
+    const runId = `main-fix-${c.repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
+    const reviewReason = `The default branch fails the check${names.length > 1 ? "s" : ""} ${names.join(", ")} at this head. The patch must make ${names.length > 1 ? "them" : "it"} pass without changing what the code is meant to do.`;
     /** A model patch (with the earlier patch and its findings after a lint round), applied and checked. */
     const generate = async (previous: { patch: string; findings: string[] } | null, round: number, ses: SessionAsk = {}): Promise<Made> => {
       const made = await patchFromFailure(c.db, c.fix, {
-        git, ref, title, repo: c.repo, number: 0, base: head, ...(now.culpritPr && (await loadQuiet(c.db, [`${c.repo}#${now.culpritPr}`])).size > 0 ? { quiet: true } : {}), head, round, failure: { head, checks }, diffText: "", ...(previous ? { previous } : {}), session: ses,
-        runId: `main-fix-${c.repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`, actor: PR_ACTOR, at,
-        reviewReason: `The default branch fails the check${names.length > 1 ? "s" : ""} ${names.join(", ")} at this head. The patch must make ${names.length > 1 ? "them" : "it"} pass without changing what the code is meant to do.`,
+        git, ref, title, repo: c.repo, number: MAIN_FIX_ITEM, base: head, ...(await culpritQuiet() ? { quiet: true } : {}), head, round, failure: { head, checks }, diffText: "", ...(previous ? { previous } : {}), session: ses,
+        runId, actor: PR_ACTOR, at, reviewReason,
         checkout: async () => c.fix.checkout?.(c.repo, now.branch, head),
       });
       ledger.hold(ses.kept);
@@ -249,13 +266,71 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
       return { ok: true, patch: v.patch, files: v.files, changed: v.changed, shown, model: made.model, applied: tree };
     };
 
+    /**
+     * The fix in the repo's main-fix session: the session edits the tree of its workspace at the head (the failure as its task, or
+     * with `lint` the lint findings on its stored change), and the diff that passes the CI fix's gates (the files the log names, no
+     * test, no new file, the guard, no line cap) is applied and checked by Opus as a patch is. A workspace that is not ready is a wait:
+     * the job does not wait for it, and the lane runs again when the workspace moves (fixWorkspaceReading).
+     */
+    const fromSession = async (round: number, lint?: { patch: string; findings: string[]; sessionTurn: number | null }): Promise<Made> => {
+      const wait = (reason: string): Made => ({ ok: false, reason, wait: true });
+      if (!c.fix.session) return wait("fix sessions are on for main-fix, but this job has no fix session environment");
+      let env: StepEnv;
+      try {
+        env = { ...c.fix.session(c.db, c.log), pollReady: false };
+      } catch (e) {
+        return wait(String((e as Error).message ?? e));
+      }
+      const scripts = await buildScriptsAt(git, head);
+      const failure = { head, checks };
+      const allowed = cifixFiles(failure, "", scripts);
+      if (!allowed.length) return { ok: false, reason: "the failure names no file a CI fix may edit" };
+      const quiet = await culpritQuiet();
+      const turn: MainFixTurn = { ref, title, head, ...(quiet && { quiet }), step: "main-fix", failure: logText(failure), allowed };
+      const gate: CifixGate = {
+        step: "cifix", allowed, scripts, quiet,
+        guard: async (patch) => (await guardApplied(git, c.fix.root, head, patch, [])) ?? (patch.length > CHECK_PATCH_CAP ? `the change is over the ${CHECK_PATCH_CAP} character limit for the check` : null),
+      };
+      const opened = await openSession(c.db, "mainfix", c.repo, MAIN_FIX_ITEM, { head });
+      if ("refused" in opened) return wait("the default branch's fix session was refused");
+      const base = prStep(c.db, turn, () => gate, lint ? { lint: { findings: lint.findings, patch: lint.patch, parentId: await lintParent(c.db, opened.session, lint.sessionTurn) } } : {});
+      // A new red head is a new task on a clean tree, not a branch someone moved; the calls name no item (Fix red main's own routing).
+      const spec = { ...base, items: [], message: () => base.message({ moved: null }) };
+      let out: StepOutcome;
+      try {
+        out = await runStep(env, opened.session, spec);
+      } catch (e) {
+        if (e instanceof WorkspaceUnavailable) return wait(e.message);
+        throw e;
+      }
+      c.log(`  ${c.repo}: fix session ${out.session.id}: ${out.turns.length} turns, ${out.kind}`);
+      if (out.kind === "wait") return wait(out.reason);
+      count();
+      switch (out.kind) {
+        case "ended":
+        case "failed": return { ok: false, reason: out.reason };
+        case "report": return { ok: false, reason: out.report.status === "blocked" ? `blocked: ${out.report.blocked_reason ?? out.report.summary}` : "no cause it can fix" };
+        case "empty": return { ok: false, reason: "the session reported a fix and changed nothing" };
+        case "refused": return { ok: false, reason: out.problems.join("; ") };
+        case "ok": {
+          if (out.baseSha !== head) return wait(`the fix session's tree is at ${out.baseSha.slice(0, 8) || "no commit"}, not the head ${head.slice(0, 8)}`);
+          const tree = await treeOf(out.gate.patch);
+          if (!tree.ok) return { ok: false, reason: tree.reason };
+          const checkout = (await c.fix.checkout?.(c.repo, now.branch, head)) ?? undefined;
+          const refusal = await opusCheck(c.db, c.fix, { ref, title, repo: c.repo, number: MAIN_FIX_ITEM, head, round, failure, reviewReason, runId, actor: PR_ACTOR, at }, "", checkout, out.gate.patch);
+          if (refusal !== null) return { ok: false, reason: refusal.replace(/^rejected: /, "") };
+          return { ok: true, patch: out.gate.patch, files: out.gate.files, changed: out.gate.changed, shown: [], model: SESSION_MODEL, applied: tree, sessionTurn: out.turnId };
+        }
+      }
+    };
+
     let patch: string, patchFiles: string[], changed: number, shown: CifixPr["files"] = [], model = PATCH_MODEL;
     let applied: Awaited<ReturnType<typeof treeOf>>;
     if (w && res) {
       if (res.kind === "infra-failed") {
         const again = w.state === "requeued" ? null : await queueLintFor(c.db, { step: "mainfix", repo: c.repo, number: null, head, base: head, patch: w.patch });
         if (again === null) return await set(live, "fix-failed", `lint: ${res.reason}`);
-        await store(w.patch, w.files, again, "requeued", w.round, w.session);
+        await store(w.patch, w.files, again, "requeued", w.round, w.session, w.sessionTurn);
         c.log(`  ${c.repo}: lint task failed (${res.reason}); queued again as task ${again}`);
         return "linting";
       }
@@ -267,23 +342,33 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
         const scripts = await buildScriptsAt(git, head);
         const fold = await foldFormat(git, head, w.patch, res.formatDiff ?? "", c.fix.root);
         if (!fold.ok) return await set(live, "fix-failed", fold.reason);
-        const v = validatePatch(w.patch, w.files, (x) => editable(x, scripts));
+        // A change a fix session made is git's own diff with no line cap; the patch path's keeps the default rules.
+        const v = validatePatch(w.patch, w.files, (x) => editable(x, scripts), w.sessionTurn !== null ? CIFIX_SESSION_RULES : undefined);
         if (!v.ok) return await set(live, "fix-failed", v.reason);
         applied = await treeOf(fold.patch);
         ({ patch, patchFiles, changed } = { patch: fold.patch, patchFiles: v.files, changed: v.changed });
       } else {
         const findings = res.kind === "result" ? res.findings : [];
         if (verdict?.action === "fail") return await set(live, "fix-failed", `${findingsWord(findings)} remain after ${w.round} rounds: ${oneLine(verdict.first.message)}`);
-        count();
         const texts = verdict?.action === "ask" ? verdict.texts : [];
-        const ses = sessionAsk(w.session, "", texts, new Date(at()));
-        const made = await generate({ patch: w.patch, findings: texts }, w.round + 1, ses);
-        dropSessions(w.session, ses.kept ? { "": ses.kept } : {});
+        let ses: SessionAsk = {};
+        let made: Made;
+        if (sessions) {
+          // A change the patch path stored goes on in the fix session; its kept model session is not used again.
+          dropSessions(w.session);
+          made = await fromSession(w.round + 1, { patch: w.patch, findings: texts, sessionTurn: w.sessionTurn });
+          if (!made.ok && made.wait) { c.log(`  ${c.repo}: waiting: ${scrubReason(oneLine(made.reason), c.fix.root)}`); return "waiting"; }
+        } else {
+          count();
+          ses = sessionAsk(w.session, "", texts, new Date(at()));
+          made = await generate({ patch: w.patch, findings: texts }, w.round + 1, ses);
+          dropSessions(w.session, ses.kept ? { "": ses.kept } : {});
+        }
         if (!made.ok) return await noPatch(made.reason);
         ({ patch, files: patchFiles, changed, shown, model, applied } = made);
         const task = await queueLintFor(c.db, { step: "mainfix", repo: c.repo, number: null, head, base: head, patch });
         if (task === null) { /* the new patch changes no Rust file: nothing to lint */ } else {
-          await store(patch, patchFiles, task, "pending", w.round + 1, ses.kept ? storeSessions({ "": ses.kept }, new Date(at())) : null);
+          await store(patch, patchFiles, task, "pending", w.round + 1, ses.kept ? storeSessions({ "": ses.kept }, new Date(at())) : null, made.sessionTurn ?? null);
           if (ses.kept) ledger.stored({ "": ses.kept });
           c.log(`  ${c.repo}: patch stored; lint task ${task} queued (round ${w.round + 1})`);
           return "linting";
@@ -291,13 +376,14 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
       }
     } else {
       const ses: SessionAsk = {};
-      const made = await generate(null, 1, ses);
+      const made = sessions ? await fromSession(1) : await generate(null, 1, ses);
+      if (!made.ok && made.wait) { c.log(`  ${c.repo}: waiting: ${scrubReason(oneLine(made.reason), c.fix.root)}`); return "waiting"; }
       if (!made.ok) return await noPatch(made.reason);
       ({ patch, files: patchFiles, changed, shown, model, applied } = made);
       // Like every model patch, this one is linted before it is pushed; the collect step on a later run folds in the formatting or sends findings back.
       const task = await queueLintFor(c.db, { step: "mainfix", repo: c.repo, number: null, head, base: head, patch });
       if (task !== null) {
-        await store(patch, patchFiles, task, "pending", 1, ses.kept ? storeSessions({ "": ses.kept }, new Date(at())) : null);
+        await store(patch, patchFiles, task, "pending", 1, ses.kept ? storeSessions({ "": ses.kept }, new Date(at())) : null, made.sessionTurn ?? null);
         if (ses.kept) ledger.stored({ "": ses.kept });
         c.log(`  ${c.repo}: patch stored; lint task ${task} queued (round 1)`);
         return "linting";
@@ -351,6 +437,25 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
   }
 }
 
+/**
+ * The step on the repo's main-fix session ended (it did not wait): the session's pod is parked, unless a change a turn of that session
+ * wrote is stored and waits for its lint task, whose findings go back to the session.
+ */
+async function endStepPod(c: Ctx): Promise<void> {
+  if (!c.fix.session) return;
+  let env: StepEnv;
+  try {
+    env = c.fix.session(c.db, c.log);
+  } catch {
+    return;
+  }
+  const pending = async (s: FixSession): Promise<boolean> => {
+    const turns = (await loadMainFixes(c.db, { repo: c.repo, states: ["linting"], verdict: "code" })).flatMap((r) => (r.lintTask !== null && r.sessionTurn != null ? [r.sessionTurn] : []));
+    return turns.length > 0 && [...(await loadTurns(c.db, turns)).values()].some((t) => t.sessionId === s.id);
+  };
+  await parkStepPod(env, "mainfix", { repo: c.repo, number: MAIN_FIX_ITEM }, pending, (raw) => scrubReason(oneLine(raw), c.fix.root));
+}
+
 /** Takes the repo's `needs-fix` and `linting` rows head by head; `onHandled` is called once per head that reaches the model work. */
 export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ opened: number; skipped: number; failed: number; linting: number; issue: number }> {
   const out = { opened: 0, skipped: 0, failed: 0, linting: 0, issue: 0 };
@@ -358,6 +463,8 @@ export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ open
   const byHead = new Map<string, FixRow[]>();
   const ledger = new SessionLedger();
   for (const r of rows) (byHead.get(r.headSha) ?? byHead.set(r.headSha, []).get(r.headSha)!).push(r);
+  // Read once per job: a switch flipped meanwhile applies from the next job.
+  const sessions = await fixSessionsOn(c.db, "main-fix", c.repo);
   try {
     await sweepSessions(c.db, c.now());
     let stopLogged = false;
@@ -376,8 +483,9 @@ export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ open
         if (!now.length) return;
         // Rows that turned red after the patch was stored wait until it is collected.
         const stored = now.filter((r) => r.state === "linting");
-        const o = await attempt(c, stored.length ? stored : now, () => onHandled?.(), ledger);
+        const o = await attempt(c, stored.length ? stored : now, () => onHandled?.(), ledger, sessions);
         if (o !== "waiting") out[o]++;
+        if (sessions && o !== "waiting") await endStepPod(c);
       } finally { await release(); }
     }), poolRoom(c.db, () => [c.repo], () => []), { max: POOL_MAX.mainfix });
   } finally {

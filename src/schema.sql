@@ -1240,7 +1240,7 @@ CREATE INDEX IF NOT EXISTS workspace_calls_ws ON workspace_calls(workspace_id, i
 -- `prompt` is operator text: it goes only into the session's model call, never into job params or logs.
 CREATE TABLE IF NOT EXISTS workspace_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT,                          -- what the session is for: try (an operator's test session) | implement | fix | security-fix
+  kind TEXT,                          -- what the session is for: try (an operator's test session) | implement | fix | security-fix | main-fix
   repo TEXT NOT NULL,
   base_sha TEXT NOT NULL,
   item INTEGER NOT NULL,              -- the issue or PR in repo the session works for
@@ -1517,9 +1517,9 @@ INSERT OR IGNORE INTO stage_limits (step, per_day) VALUES ('implement', NULL);
 -- workspace and continued turn by turn by the fix-up, CI fix, conflict and security fix steps. One live session per item.
 CREATE TABLE IF NOT EXISTS fix_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL,                 -- pr | security
+  kind TEXT NOT NULL,                 -- pr | security | mainfix
   repo TEXT NOT NULL,
-  number INTEGER NOT NULL,            -- the PR, or the security finding
+  number INTEGER NOT NULL,            -- the PR, the security finding, or 0 for a mainfix session (the default branch)
   workspace_id INTEGER,
   head TEXT,                          -- the commit the workspace's base holds: the PR head, a merge commit or a pinned sha
   last_call_id INTEGER,               -- remote_calls.id of the turn the next follow-up continues
@@ -2155,7 +2155,8 @@ CREATE TABLE IF NOT EXISTS main_fixes (
   issue_number INTEGER,
   pr_number INTEGER,                  -- the fix PR
   pr_url TEXT,
-  -- state linting: the one model patch of the head's rows (patch, files JSON, lint_task, lint_round, lint_state pending | requeued) waits for its lint task
+  -- state linting: the one model patch of the head's rows (patch, files JSON, lint_task, lint_round, lint_state pending | requeued) waits for its lint task;
+  -- session_turn: the fix session turn (fix_session_turns.id) that wrote it, whose session gets the lint findings
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (repo, head_sha, "check")
