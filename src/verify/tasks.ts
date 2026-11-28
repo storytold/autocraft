@@ -17,12 +17,33 @@ export const WARM_PRIORITY = -10;
 
 type Planned = Exclude<VerifyPlan, { kind: "ci-enough" }>;
 
+const FOCUSED_TESTS_ARGV0 = "verify-focused-tests";
+const NO_FOCUSED_TESTS_EXIT = 86;
+export const NO_FOCUSED_TESTS_SUMMARY = "No tests ran for the requested Rust test filter.";
+
+// Cargo can succeed even when libtest filters out every test. Read all target summaries
+// and keep reporting Cargo's own failure status when compilation or a test fails.
+const FOCUSED_TESTS_SCRIPT = `"$@" | awk '
+  { print }
+  /^test result: ok[.] [1-9][0-9]* passed;/ { passed = 1 }
+  END { if (!passed) exit ${NO_FOCUSED_TESTS_EXIT} }
+'
+status=("\${PIPESTATUS[@]}")
+if [ "\${status[0]}" -ne 0 ]; then exit "\${status[0]}"; fi
+if [ "\${status[1]}" -eq ${NO_FOCUSED_TESTS_EXIT} ]; then
+  printf '%s\\n' '${NO_FOCUSED_TESTS_SUMMARY}' >&2
+fi
+exit "\${status[1]}"`;
+
+export const noFocusedTests = (cmd: string[] | undefined, exitCode: number | null): boolean =>
+  cmd?.[3] === FOCUSED_TESTS_ARGV0 && exitCode === NO_FOCUSED_TESTS_EXIT;
+
 /** The tasks that run `plan` at `head` (and, for a regression, at `base`). Order: head first. */
 export function tasksFor(plan: Planned, c: { repo: string; number: number; head: string; base: string }): NewTask[] {
   const common = { step: "verify", repo: c.repo, number: c.number, requires: { ...REQUIRES, toolchains: [...REQUIRES.toolchains] }, warm: { key: warmKeyOf(c.repo), role: "use" as const } };
   if (plan.kind === "tests") {
     const steps = rustPlan({ cargoArgs: plan.crates.flatMap((n) => ["-p", n]) }).map((s): TaskStep =>
-      s.name === "test" && plan.tests.length ? { ...s, cmd: [...s.cmd, "--", ...plan.tests] } : s);
+      s.name === "test" && plan.tests.length ? { ...s, cmd: ["bash", "-c", FOCUSED_TESTS_SCRIPT, FOCUSED_TESTS_ARGV0, ...s.cmd, "--", ...plan.tests] } : s);
     return [{ ...common, headSha: c.head, baseSha: c.base, plan: steps }];
   }
   const steps = rustPlan({ cargoArgs: ["-p", plan.crate] }).map((s): TaskStep =>
