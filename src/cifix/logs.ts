@@ -25,16 +25,20 @@ type Run = { name: string; conclusion: string; runId: number | null; checkId: nu
 /**
  * The failed check runs of a head. The repos' CI calls the suite's gate workflow, so its checks carry "gate" in their
  * name; when some failed check does, only those count (a failing optional check next to a passing gate is not the
- * gate's failure). With no such name every failed check counts. `gatePassed`: gate checks exist and none failed, so
- * whatever fails is not the gate and is left alone. Checks on the repo's optional list are never failures to fix.
+ * gate's failure). With no such name every failed check counts. `gates`: "passed" when gate checks exist, none failed and
+ * all have completed as success, skipped or neutral, so whatever fails is not the gate and is left alone; "running" when
+ * gate checks exist, none failed and some have not completed, so the head is not judged yet; "none" otherwise. Checks on
+ * the repo's optional list are never failures to fix.
  */
-export function failedRuns(reply: CheckRuns, optional: string[] = []): { runs: Run[]; gatePassed: boolean } {
+export function failedRuns(reply: CheckRuns, optional: string[] = []): { runs: Run[]; gates: "passed" | "running" | "none" } {
   const all = reply.check_runs ?? [];
   const failed = all.filter((c) => c.status === "completed" && FAILED.has(c.conclusion ?? "") && !optional.includes(c.name ?? "?"))
     .map((c) => ({ name: c.name ?? "?", conclusion: c.conclusion ?? "failure", runId: Number(/\/actions\/runs\/(\d+)/.exec(c.details_url ?? "")?.[1]) || null, checkId: c.id ?? null, completedAt: c.completed_at ?? null }));
   const gate = failed.filter((c) => GATE.test(c.name));
-  const gatePassed = !gate.length && all.some((c) => GATE.test(c.name ?? ""));
-  return { runs: gate.length ? gate : failed, gatePassed };
+  const gateChecks = all.filter((c) => GATE.test(c.name ?? ""));
+  const gates = gate.length || !gateChecks.length ? "none"
+    : gateChecks.every((c) => c.status === "completed" && ["success", "skipped", "neutral"].includes(c.conclusion ?? "")) ? "passed" : "running";
+  return { runs: gate.length ? gate : failed, gates };
 }
 
 /** The step name `gh` gives every line when it cannot split a job's log into steps: the line's job log is then the whole job's. */
@@ -182,8 +186,9 @@ export type Reading = { kind: "failure"; failure: CiFailure } | { kind: "skip"; 
  * or an action_required run failed it), or whose gate checks all passed, is skipped: there is nothing here to fix.
  */
 export async function readFailure(gh: Gh, repo: string, head: string, optional: string[] = []): Promise<Reading> {
-  const { runs, gatePassed } = failedRuns(JSON.parse(await gh(["api", `repos/${slugOf(repo)}/commits/${head}/check-runs?per_page=100`])) as CheckRuns, optional);
-  if (gatePassed) return { kind: "skip", why: "the gate checks passed; only an optional check failed" };
+  const { runs, gates } = failedRuns(JSON.parse(await gh(["api", `repos/${slugOf(repo)}/commits/${head}/check-runs?per_page=100`])) as CheckRuns, optional);
+  if (gates === "running") return { kind: "unread", why: "the gate checks are still running", failure: { head, checks: [] }, permanent: false };
+  if (gates === "passed") return { kind: "skip", why: "the gate checks passed; only an optional check failed" };
   if (!runs.length) return { kind: "skip", why: "no failed check run at the head (a commit status or a run waiting for approval failed)" };
   // Per run: its failed steps, or "jobs" when the run goes on and each failed check's own job log is read instead.
   const logs = new Map<number, FailedStep[] | "jobs">();
